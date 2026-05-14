@@ -8,6 +8,8 @@
   const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
   const IMAGE_EXTENSION_PATTERN = /\.(?:png|jpe?g|gif|webp)(?:[?#].*)?$/i;
   const VENDOR_TOC_MARKER = 'PME_TOC_MARKER_7B4E2D8C';
+  const RICH_INLINE_SOURCE_SELECTOR = 'strong, b, em, i, del, s, code, a, img, .math-inline';
+  const RICH_INLINE_EDIT_BLOCK_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, li, td, th';
   let mermaidRenderSerial = 0;
   let vendorMarkdownRenderer = null;
 
@@ -20,7 +22,7 @@
 ## できること
 
 - **ライブプレビュー**
-- ブロック単位のリッチ編集モード
+- シームレスなリッチ編集モード
 - Mermaid図
 - 主要言語のコードハイライト
 - Markdown / HTML の保存
@@ -85,7 +87,12 @@ flowchart TD
     lastAutoSaved: null,
     saveTimer: 0,
     renderTimer: 0,
-    currentBlockEditor: null,
+    richReparseTimer: 0,
+    richSelectionTimer: 0,
+    richComposing: false,
+    richInlineSource: null,
+    richInlineActivationSuppressed: false,
+    richSelectionLock: false,
     allowedLinkDomains: [],
     assetUrls: new Map(),
     markdownRelativePath: '',
@@ -166,6 +173,8 @@ flowchart TD
     document.addEventListener('click', onDocumentClick);
     document.addEventListener('change', onDocumentChange);
     document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('selectionchange', onSelectionChange);
+    document.addEventListener('focusin', onDocumentFocusIn);
 
     els.source.addEventListener('input', () => {
       state.markdown = normalizeNewlines(els.source.value);
@@ -178,27 +187,18 @@ flowchart TD
     els.fileInput.addEventListener('change', onFileChosen);
     els.folderInput.addEventListener('change', onFolderChosen);
     els.imageInput.addEventListener('change', onImageChosen);
-
-    els.rich.addEventListener('click', (event) => {
-      if (event.target.closest('button, input, select, textarea')) return;
-      const block = event.target.closest('.rich-block');
-      if (state.currentBlockEditor && block !== state.currentBlockEditor) {
-        cancelCurrentBlockEditor(block);
-        return;
-      }
-      if (!block) {
-        if (state.currentBlockEditor) cancelCurrentBlockEditor(null);
-        return;
-      }
-      editRichBlock(block);
+    els.rich.setAttribute('contenteditable', 'true');
+    els.rich.setAttribute('role', 'textbox');
+    els.rich.setAttribute('aria-multiline', 'true');
+    els.rich.setAttribute('aria-label', 'リッチMarkdown編集');
+    els.rich.addEventListener('input', onRichInput);
+    els.rich.addEventListener('paste', onRichPaste);
+    els.rich.addEventListener('compositionstart', () => { state.richComposing = true; });
+    els.rich.addEventListener('compositionend', () => {
+      state.richComposing = false;
+      syncRichMarkdownFromDom('rich-input');
     });
-
-    els.rich.addEventListener('keydown', (event) => {
-      if ((event.key === 'Enter' || event.key === ' ') && event.target.classList.contains('rich-block')) {
-        event.preventDefault();
-        editRichBlock(event.target);
-      }
-    });
+    els.rich.addEventListener('click', onRichClick);
 
     window.addEventListener('beforeunload', (event) => {
       if (!state.dirty) return;
@@ -208,6 +208,9 @@ flowchart TD
   }
 
   function onDocumentClick(event) {
+    const target = eventTargetElement(event);
+    cancelActiveRichSourceEditorForTarget(target);
+
     const actionButton = event.target.closest('[data-action]');
     if (!actionButton) return;
 
@@ -270,22 +273,6 @@ flowchart TD
       case 'collapse-outline':
         toggleOutline();
         break;
-      case 'edit-block':
-        editRichBlock(actionButton.closest('.rich-block'));
-        break;
-      case 'add-block-before':
-        insertBlockNear(actionButton.closest('.rich-block'), 'before');
-        break;
-      case 'add-block-after':
-        insertBlockNear(actionButton.closest('.rich-block'), 'after');
-        break;
-      case 'commit-block':
-        commitBlockEditor(actionButton.closest('.rich-block'));
-        break;
-      case 'cancel-block':
-        state.currentBlockEditor = null;
-        renderRich();
-        break;
       default:
         break;
     }
@@ -301,7 +288,584 @@ flowchart TD
     }
   }
 
+  function onDocumentFocusIn(event) {
+    const active = state.richInlineSource?.element;
+    const target = eventTargetElement(event);
+    if (active && target && !active.contains(target)) {
+      commitRichInlineSource(active);
+    }
+  }
+
+  function onRichClick(event) {
+    const target = eventTargetElement(event);
+    if (!target || !els.rich.contains(target)) return;
+
+    const activeInline = state.richInlineSource?.element;
+    if (activeInline && !activeInline.contains(target)) {
+      commitRichInlineSource(activeInline);
+      suppressRichInlineActivation();
+    }
+
+    if (cancelActiveRichSourceEditorForTarget(target)) {
+      event.stopPropagation();
+      return;
+    }
+
+    if (target.closest('.rich-source-editor, .rich-source-actions')) {
+      event.stopPropagation();
+      return;
+    }
+
+    if (target.closest('.task-checkbox, .code-language-input, .rich-inline-source')) return;
+
+    if (activatePendingMathShortcutFromSelection()) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    const link = target.closest('a');
+    if (link && els.rich.contains(link)) {
+      handleRichLinkClick(event, link);
+      return;
+    }
+
+    const inlineRendered = validRichInlineSourceElement(target.closest(RICH_INLINE_SOURCE_SELECTOR));
+    if (inlineRendered) {
+      event.preventDefault();
+      activateRichInlineSource(inlineRendered, 'end');
+      return;
+    }
+
+    const sourceBacked = findRichSourceBackedElement(target);
+    if (!sourceBacked) {
+      placeCaretAtPointer(event);
+      return;
+    }
+
+    event.preventDefault();
+    showRichSourceEditor(sourceBacked.kind, sourceBacked.element);
+    event.stopPropagation();
+  }
+
+  function eventTargetElement(event) {
+    const target = event.target;
+    if (!target) return null;
+    if (target.nodeType === 1) return target;
+    return target.parentElement || null;
+  }
+
+  function findRichSourceBackedElement(target) {
+    const mermaid = target.closest('.mermaid-diagram');
+    if (mermaid && els.rich.contains(mermaid)) {
+      return { kind: 'mermaid', element: mermaid };
+    }
+
+    const code = target.closest('pre.code-block');
+    if (code && els.rich.contains(code) && !code.closest('.mermaid-diagram')) {
+      return { kind: 'code', element: code };
+    }
+
+    const math = target.closest('.math-display');
+    if (math && els.rich.contains(math)) {
+      return { kind: 'math', element: math };
+    }
+
+    return null;
+  }
+
+  function activeRichSourceElement() {
+    return els.rich.querySelector('.is-editing-source .rich-source-editor')?.closest('.is-editing-source') || null;
+  }
+
+  function cancelActiveRichSourceEditorForTarget(target) {
+    const active = activeRichSourceElement();
+    if (!active) return false;
+    if (target && active.contains(target)) return false;
+    renderRich();
+    setStatus(`${richSourceTitle(active.dataset.richSourceKind)}ソース編集をキャンセルしました`);
+    return true;
+  }
+
+  function handleRichLinkClick(event, link) {
+    event.preventDefault();
+    if (!event.ctrlKey && !event.metaKey) {
+      placeCaretAtPointer(event);
+      return;
+    }
+
+    const href = link.getAttribute('data-markdown-href') || link.getAttribute('href') || '';
+    const safe = sanitizeLinkUrl(href);
+    if (!safe) {
+      setStatus('許可されていないリンクです');
+      return;
+    }
+
+    window.open(safe, '_blank', 'noopener,noreferrer');
+  }
+
+  function placeCaretAtPointer(event) {
+    const range = caretRangeFromPoint(event.clientX, event.clientY);
+    if (!range || !els.rich.contains(range.startContainer)) return;
+    const selection = window.getSelection?.();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    els.rich.focus();
+  }
+
+  function caretRangeFromPoint(clientX, clientY) {
+    if (document.caretPositionFromPoint) {
+      const position = document.caretPositionFromPoint(clientX, clientY);
+      if (!position) return null;
+      const range = document.createRange();
+      range.setStart(position.offsetNode, position.offset);
+      range.collapse(true);
+      return range;
+    }
+
+    if (document.caretRangeFromPoint) {
+      return document.caretRangeFromPoint(clientX, clientY);
+    }
+
+    return null;
+  }
+
+  function onSelectionChange() {
+    if (state.richSelectionLock) return;
+    window.clearTimeout(state.richSelectionTimer);
+    state.richSelectionTimer = window.setTimeout(updateRichInlineSourceFromSelection, 0);
+  }
+
+  function updateRichInlineSourceFromSelection() {
+    if (state.mode !== 'rich' || state.richComposing) return;
+    if (state.richInlineActivationSuppressed) return;
+    const selection = window.getSelection?.();
+    const active = state.richInlineSource?.element;
+
+    if (active && (!active.isConnected || !selection || !selection.rangeCount || !active.contains(selection.anchorNode))) {
+      commitRichInlineSource(active);
+      return;
+    }
+
+    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return;
+    if (nodeClosest(selection.anchorNode, '.rich-source-editor, .code-language-input, .rich-inline-source')) return;
+    if (nodeClosest(selection.anchorNode, '.mermaid-diagram, pre.code-block, .math-display')) return;
+
+    const candidate = findRichInlineSourceCandidate(selection);
+    if (!candidate) return;
+    activateRichInlineSource(candidate.element, candidate.position);
+  }
+
+  function nodeElement(node) {
+    if (!node) return null;
+    return node.nodeType === 1 ? node : node.parentElement;
+  }
+
+  function nodeClosest(node, selector) {
+    return nodeElement(node)?.closest?.(selector) || null;
+  }
+
+  function findRichInlineSourceCandidate(selection) {
+    const range = selection.getRangeAt(0);
+    const editBlock = richInlineEditBlockForRange(range);
+    if (!editBlock) return null;
+
+    const direct = validRichInlineSourceElement(nodeElement(range.startContainer)?.closest?.(RICH_INLINE_SOURCE_SELECTOR));
+    if (direct && isSameRichInlineEditBlock(direct, editBlock)) return { element: direct, position: 'end' };
+
+    const before = adjacentCaretNode(range.startContainer, range.startOffset, 'before');
+    const beforeElement = validRichInlineSourceElement(nodeElement(before)?.closest?.(RICH_INLINE_SOURCE_SELECTOR));
+    if (beforeElement && isSameRichInlineEditBlock(beforeElement, editBlock)) return { element: beforeElement, position: 'end' };
+
+    const after = adjacentCaretNode(range.startContainer, range.startOffset, 'after');
+    const afterElement = validRichInlineSourceElement(nodeElement(after)?.closest?.(RICH_INLINE_SOURCE_SELECTOR));
+    if (afterElement && isSameRichInlineEditBlock(afterElement, editBlock)) return { element: afterElement, position: 'start' };
+
+    return null;
+  }
+
+  function richInlineEditBlockForRange(range) {
+    if (!range) return null;
+    return nodeClosest(range.startContainer, RICH_INLINE_EDIT_BLOCK_SELECTOR);
+  }
+
+  function isSameRichInlineEditBlock(node, editBlock) {
+    if (!node || !editBlock) return false;
+    return nodeClosest(node, RICH_INLINE_EDIT_BLOCK_SELECTOR) === editBlock;
+  }
+
+  function validRichInlineSourceElement(element) {
+    if (!element || !els.rich.contains(element)) return null;
+    if (element.classList.contains('rich-inline-source')) return null;
+    if (element.closest('.rich-source-editor, .mermaid-diagram, pre.code-block, .math-display')) return null;
+    if (element.tagName?.toLowerCase() === 'code' && element.closest('pre')) return null;
+    if (!element.matches(RICH_INLINE_SOURCE_SELECTOR)) return null;
+    return element;
+  }
+
+  function adjacentCaretNode(container, offset, direction) {
+    if (!container) return null;
+    if (container.nodeType === 1) {
+      const child = direction === 'before' ? container.childNodes[offset - 1] : container.childNodes[offset];
+      return child ? edgeDescendant(child, direction) : adjacentDomNode(container, direction);
+    }
+
+    if (container.nodeType !== 3) return null;
+    const text = container.nodeValue || '';
+    if (direction === 'before' && offset === 0) return adjacentDomNode(container, direction);
+    if (direction === 'after' && offset === text.length) return adjacentDomNode(container, direction);
+    return null;
+  }
+
+  function edgeDescendant(node, direction) {
+    let current = node;
+    while (current?.nodeType === 1 && current.childNodes.length) {
+      current = direction === 'before'
+        ? current.childNodes[current.childNodes.length - 1]
+        : current.childNodes[0];
+    }
+    return current;
+  }
+
+  function adjacentDomNode(node, direction) {
+    let current = node;
+    while (current && current !== els.rich) {
+      const sibling = direction === 'before' ? current.previousSibling : current.nextSibling;
+      if (sibling) return edgeDescendant(sibling, direction);
+      current = current.parentNode;
+    }
+    return null;
+  }
+
+  function onRichInput(event) {
+    if (event.target?.closest?.('.task-checkbox, .code-language-input, .rich-source-editor')) return;
+    if (!event.target?.closest?.('.rich-inline-source')) {
+      maybeApplyRichMarkdownTrigger(event);
+    }
+    syncRichMarkdownFromDom('rich-input');
+  }
+
+  function maybeApplyRichMarkdownTrigger(_event) {
+    if (state.richComposing || state.richInlineSource?.element) return false;
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return false;
+    if (nodeClosest(selection.anchorNode, '.rich-source-editor, .code-language-input, .rich-inline-source')) return false;
+    if (nodeClosest(selection.anchorNode, '.mermaid-diagram, pre.code-block, .math-display')) return false;
+
+    return applyRichBlockMarkdownTrigger(selection) || applyRichInlineMarkdownTrigger(selection);
+  }
+
+  function applyRichBlockMarkdownTrigger(selection) {
+    const block = nodeClosest(selection.anchorNode, 'p');
+    if (!block || block.closest('li')) return false;
+    const caretOffset = getCaretCharacterOffsetWithin(block, selection);
+    const text = normalizeRichText(block.textContent || '');
+    if (caretOffset !== text.length) return false;
+
+    if (text === '$$$$ ') {
+      replaceParagraphWithMathDisplayEditor(block);
+      return true;
+    }
+
+    if (text === '$$ ') {
+      replaceParagraphWithMathInlineSource(block);
+      return true;
+    }
+
+    if (text === '| ') {
+      replaceParagraphWithTriggeredQuote(block);
+      return true;
+    }
+
+    if (text === '---') {
+      replaceParagraphWithHorizontalRule(block);
+      return true;
+    }
+
+    const task = text.match(/^- \[( |x|X)\] $/);
+    if (task) {
+      replaceParagraphWithTriggeredList(block, { ordered: false, task: true, checked: task[1].toLowerCase() === 'x' });
+      return true;
+    }
+
+    if (/^[*+-] $/.test(text)) {
+      replaceParagraphWithTriggeredList(block, { ordered: false, task: false, checked: false });
+      return true;
+    }
+
+    if (/^1\. $/.test(text)) {
+      replaceParagraphWithTriggeredList(block, { ordered: true, task: false, checked: false });
+      return true;
+    }
+
+    return false;
+  }
+
+  function activatePendingMathShortcutFromSelection() {
+    if (state.mode !== 'rich' || state.richComposing) return false;
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return false;
+    const block = nodeClosest(selection.anchorNode, 'p');
+    if (!block || block.closest('li')) return false;
+    const text = normalizeRichText(block.textContent || '');
+    if (text === '$$$$') {
+      replaceParagraphWithMathDisplayEditor(block);
+      syncRichMarkdownFromDom('rich-input');
+      return true;
+    }
+    if (text === '$$') {
+      replaceParagraphWithMathInlineSource(block);
+      syncRichMarkdownFromDom('rich-input');
+      return true;
+    }
+    return false;
+  }
+
+  function replaceParagraphWithTriggeredList(block, config) {
+    const list = document.createElement(config.ordered ? 'ol' : 'ul');
+    if (config.task) list.className = 'task-list';
+    const item = document.createElement('li');
+    if (config.task) {
+      item.className = 'task-list-item';
+      const checkbox = createTaskCheckbox();
+      checkbox.checked = Boolean(config.checked);
+      item.appendChild(checkbox);
+    }
+    item.appendChild(document.createTextNode(''));
+    item.appendChild(document.createElement('br'));
+    list.appendChild(item);
+
+    state.richSelectionLock = true;
+    block.replaceWith(list);
+    placeCaretAtListItemStart(item);
+    state.richSelectionLock = false;
+  }
+
+  function replaceParagraphWithTriggeredQuote(block) {
+    const quote = document.createElement('blockquote');
+    const paragraph = document.createElement('p');
+    paragraph.appendChild(document.createTextNode(''));
+    paragraph.appendChild(document.createElement('br'));
+    quote.appendChild(paragraph);
+
+    state.richSelectionLock = true;
+    block.replaceWith(quote);
+    placeCaretAtStart(paragraph);
+    state.richSelectionLock = false;
+  }
+
+  function replaceParagraphWithHorizontalRule(block) {
+    const rule = document.createElement('hr');
+    rule.setAttribute('contenteditable', 'false');
+    const paragraph = document.createElement('p');
+    paragraph.appendChild(document.createTextNode(''));
+    paragraph.appendChild(document.createElement('br'));
+
+    state.richSelectionLock = true;
+    block.replaceWith(rule, paragraph);
+    placeCaretAtStart(paragraph);
+    state.richSelectionLock = false;
+  }
+
+  function replaceParagraphWithMathInlineSource(block) {
+    const sourceElement = createRichInlineSourceElement('$$');
+    state.richSelectionLock = true;
+    block.replaceChildren(sourceElement);
+    state.richInlineSource = { element: sourceElement };
+    placeCaretInInlineSource(sourceElement, 1);
+    state.richSelectionLock = false;
+  }
+
+  function replaceParagraphWithMathDisplayEditor(block) {
+    const display = document.createElement('div');
+    display.className = 'math-display';
+    display.setAttribute('data-math-source', '');
+    display.setAttribute('data-math-display', 'true');
+    display.setAttribute('contenteditable', 'false');
+
+    state.richSelectionLock = true;
+    block.replaceWith(display);
+    showRichSourceEditor('math', display, { editorValue: '$$$$', caretOffset: 2 });
+    state.richSelectionLock = false;
+  }
+
+  function applyRichInlineMarkdownTrigger(selection) {
+    const range = selection.getRangeAt(0);
+    const caret = textCaretForMarkdownTrigger(range);
+    if (!caret) return false;
+    const { textNode, caretOffset } = caret;
+    const before = textNode.nodeValue.slice(0, caretOffset);
+
+    if (before.endsWith('$$ ') && !before.endsWith('$$$$ ')) {
+      replaceTextRangeWithRichInlineSource(textNode, caretOffset - 3, caretOffset, '$$', 1);
+      return true;
+    }
+
+    if (before.endsWith('****')) {
+      replaceTextRangeWithRichInlineSource(textNode, caretOffset - 4, caretOffset, '****', 2);
+      return true;
+    }
+
+    const trigger = findCompletedInlineMarkdownTrigger(before);
+    if (!trigger) return false;
+    replaceTextRangeWithRichInlineHtml(textNode, caretOffset - trigger.source.length, caretOffset, trigger.source);
+    return true;
+  }
+
+  function textCaretForMarkdownTrigger(range) {
+    if (range.startContainer.nodeType === Node.TEXT_NODE) {
+      return { textNode: range.startContainer, caretOffset: range.startOffset };
+    }
+
+    if (range.startContainer.nodeType !== Node.ELEMENT_NODE) return null;
+    const editBlock = richInlineEditBlockForRange(range);
+    if (!editBlock) return null;
+    const before = adjacentCaretNode(range.startContainer, range.startOffset, 'before');
+    if (before?.nodeType === Node.TEXT_NODE && editBlock.contains(before)) {
+      return { textNode: before, caretOffset: before.nodeValue.length };
+    }
+    return null;
+  }
+
+  function findCompletedInlineMarkdownTrigger(textBeforeCaret) {
+    const patterns = [
+      /(`[^`\n]+`)$/,
+      /(~~[^~\n]+~~)$/,
+      /(\*\*[^*\n]+?\*\*)$/,
+    ];
+
+    for (const pattern of patterns) {
+      const match = textBeforeCaret.match(pattern);
+      if (match) return { source: match[1] };
+    }
+
+    const italic = textBeforeCaret.match(/(^|[^*])(\*[^*\n]+\*)$/);
+    return italic ? { source: italic[2] } : null;
+  }
+
+  function replaceTextRangeWithRichInlineSource(textNode, start, end, source, caretOffset) {
+    const sourceElement = createRichInlineSourceElement(source);
+    replaceTextNodeRange(textNode, start, end, [sourceElement]);
+    state.richInlineSource = { element: sourceElement };
+    placeCaretInInlineSource(sourceElement, caretOffset);
+  }
+
+  function createRichInlineSourceElement(source) {
+    const sourceElement = document.createElement('span');
+    sourceElement.className = 'rich-inline-source';
+    sourceElement.contentEditable = 'true';
+    sourceElement.spellcheck = false;
+    sourceElement.dataset.inlineSource = source;
+    sourceElement.setAttribute('role', 'textbox');
+    sourceElement.setAttribute('aria-label', 'インラインMarkdownソース');
+    sourceElement.textContent = source;
+    return sourceElement;
+  }
+
+  function replaceTextRangeWithRichInlineHtml(textNode, start, end, source) {
+    const fragment = renderRichInlineSourceFragment(source);
+    const insertedNodes = Array.from(fragment.childNodes);
+    if (!insertedNodes.length) return;
+    replaceTextNodeRange(textNode, start, end, insertedNodes);
+    configureRichEditableSurface();
+    suppressRichInlineActivation();
+    placeCaretAfterNode(insertedNodes[insertedNodes.length - 1]);
+  }
+
+  function replaceTextNodeRange(textNode, start, end, replacementNodes) {
+    const parent = textNode.parentNode;
+    if (!parent) return;
+    const value = textNode.nodeValue || '';
+    const before = value.slice(0, start);
+    const after = value.slice(end);
+    const reference = textNode;
+    if (before) parent.insertBefore(document.createTextNode(before), reference);
+    replacementNodes.forEach((node) => parent.insertBefore(node, reference));
+    if (after) parent.insertBefore(document.createTextNode(after), reference);
+    textNode.remove();
+  }
+
+  function placeCaretAfterNode(node) {
+    const range = document.createRange();
+    range.setStartAfter(node);
+    range.collapse(true);
+    const selection = window.getSelection?.();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    els.rich.focus();
+  }
+
+  function getCaretCharacterOffsetWithin(element, selection) {
+    if (!selection || !selection.rangeCount) return 0;
+    const range = selection.getRangeAt(0);
+    const before = range.cloneRange();
+    before.selectNodeContents(element);
+    before.setEnd(range.startContainer, range.startOffset);
+    return normalizeRichText(before.toString()).length;
+  }
+
+  function suppressRichInlineActivation() {
+    state.richInlineActivationSuppressed = true;
+    window.setTimeout(() => {
+      state.richInlineActivationSuppressed = false;
+    }, 120);
+  }
+
+  function onRichPaste(event) {
+    event.preventDefault();
+    const text = normalizeNewlines(event.clipboardData?.getData('text/plain') || '');
+    insertPlainTextAtSelection(text);
+    syncRichMarkdownFromDom('rich-paste');
+  }
+
+  function insertPlainTextAtSelection(text) {
+    if (document.queryCommandSupported?.('insertText')) {
+      document.execCommand('insertText', false, text);
+      return;
+    }
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount) return;
+    const range = selection.getRangeAt(0);
+    range.deleteContents();
+    const node = document.createTextNode(text);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
   function onKeyDown(event) {
+    const inlineSource = event.target.closest?.('.rich-inline-source');
+    if (inlineSource) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        insertPlainTextAtSelection('\n');
+        syncRichMarkdownFromDom('rich-input');
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        commitRichInlineSource(inlineSource);
+        return;
+      }
+    }
+
+    if (els.rich.contains(event.target) && !event.target.closest?.('.rich-source-editor, .code-language-input')) {
+      if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && handleRichListArrowNavigation(event)) {
+        return;
+      }
+      if ((event.key === 'Backspace' || event.key === 'Delete') && handleRichDeleteToEmptyBlock(event)) {
+        return;
+      }
+      if (event.key === 'Enter') {
+        handleRichEnter(event);
+        return;
+      }
+    }
+
     if (event.target instanceof HTMLInputElement && event.target.classList.contains('code-language-input')) {
       if (event.key === 'Enter') {
         event.preventDefault();
@@ -338,6 +902,307 @@ flowchart TD
       event.preventDefault();
       insertMermaid();
     }
+  }
+
+  function handleRichDeleteToEmptyBlock(event) {
+    if (event.ctrlKey || event.metaKey || event.altKey) return false;
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return false;
+    const block = nodeClosest(selection.anchorNode, RICH_INLINE_EDIT_BLOCK_SELECTOR);
+    if (!block || block.closest('li')) return false;
+    const text = normalizeRichText(block.textContent || '');
+    if (text.length !== 1) return false;
+    const caretOffset = getCaretCharacterOffsetWithin(block, selection);
+    if (event.key === 'Backspace' && caretOffset !== text.length) return false;
+    if (event.key === 'Delete' && caretOffset !== 0) return false;
+
+    event.preventDefault();
+    state.richSelectionLock = true;
+    block.replaceChildren(document.createTextNode(''), document.createElement('br'));
+    placeCaretAtStart(block);
+    state.richSelectionLock = false;
+    suppressRichInlineActivation();
+    syncRichMarkdownFromDom('rich-input');
+    return true;
+  }
+
+  function handleRichEnter(event) {
+    event.preventDefault();
+    window.clearTimeout(state.richReparseTimer);
+
+    if (event.shiftKey) {
+      insertRichLineBreak();
+      syncRichMarkdownFromDom('rich-input');
+      return;
+    }
+
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount || !els.rich.contains(selection.anchorNode)) return;
+    const range = selection.getRangeAt(0);
+    if (!range.collapsed) range.deleteContents();
+
+    const listItem = richListItemFromRange(range);
+    if (listItem && els.rich.contains(listItem)) {
+      handleRichListEnter(listItem, range);
+      return;
+    }
+
+    const anchor = range.startContainer.nodeType === Node.ELEMENT_NODE
+      ? range.startContainer
+      : range.startContainer.parentElement;
+    const current = anchor?.closest?.('p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, table, figure, nav, div');
+    const insertionBase = richParagraphInsertionBase(current);
+    const paragraph = document.createElement('p');
+    paragraph.appendChild(document.createElement('br'));
+
+    if (insertionBase && insertionBase !== els.rich) {
+      insertionBase.after(paragraph);
+    } else {
+      els.rich.appendChild(paragraph);
+    }
+    placeCaretAtStart(paragraph);
+    syncRichMarkdownFromDom('rich-input');
+  }
+
+  function richParagraphInsertionBase(element) {
+    if (!element || !els.rich.contains(element)) return els.rich.lastElementChild || els.rich;
+    if (element.tagName?.toLowerCase() === 'li') return element.closest('ul, ol') || element;
+    return element;
+  }
+
+  function richListItemFromRange(range) {
+    const startItem = nodeClosest(range.startContainer, 'li');
+    if (startItem && els.rich.contains(startItem)) return startItem;
+    const selection = window.getSelection?.();
+    const focusItem = nodeClosest(selection?.focusNode, 'li');
+    return focusItem && els.rich.contains(focusItem) ? focusItem : null;
+  }
+
+  function handleRichListArrowNavigation(event) {
+    if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return false;
+    if (event.target.closest?.('.rich-source-editor, .code-language-input')) return false;
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return false;
+    const range = selection.getRangeAt(0);
+    const item = richListItemFromRange(range);
+    if (!item) return false;
+    const nextItem = adjacentRichListItem(item, event.key === 'ArrowDown' ? 'next' : 'previous');
+    if (!nextItem) return false;
+    event.preventDefault();
+    placeCaretInListItemAtTextOffset(nextItem, richListCaretTextOffset(item, range));
+    return true;
+  }
+
+  function adjacentRichListItem(item, direction) {
+    const siblingProperty = direction === 'next' ? 'nextElementSibling' : 'previousElementSibling';
+    let sibling = item[siblingProperty];
+    while (sibling) {
+      if (sibling.tagName?.toLowerCase() === 'li') return sibling;
+      sibling = sibling[siblingProperty];
+    }
+    return null;
+  }
+
+  function richListCaretTextOffset(item, range) {
+    const before = range.cloneRange();
+    before.selectNodeContents(item);
+    try {
+      before.setEnd(range.startContainer, range.startOffset);
+    } catch (_) {
+      return 0;
+    }
+    return normalizeRichText(before.toString()).length;
+  }
+
+  function placeCaretInListItemAtTextOffset(item, targetOffset) {
+    const position = findListItemTextPosition(item, targetOffset);
+    if (!position) {
+      placeCaretAtListItemStart(item);
+      return;
+    }
+    const range = document.createRange();
+    range.setStart(position.node, position.offset);
+    range.collapse(true);
+    const selection = window.getSelection?.();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    els.rich.focus();
+  }
+
+  function findListItemTextPosition(item, targetOffset) {
+    const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (nodeClosest(node, 'li') !== item) return NodeFilter.FILTER_REJECT;
+        if (node.parentElement?.closest('.rich-source-editor, .code-language-input')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    let consumed = 0;
+    let last = null;
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      last = node;
+      const length = normalizeRichText(node.nodeValue || '').length;
+      if (consumed + length >= targetOffset) {
+        return { node, offset: Math.max(0, Math.min(node.nodeValue.length, targetOffset - consumed)) };
+      }
+      consumed += length;
+    }
+    return last ? { node: last, offset: last.nodeValue.length } : null;
+  }
+
+  function handleRichListEnter(item, range) {
+    const list = item.closest('ul, ol');
+    if (!list) return;
+
+    if (isRichListItemEmpty(item)) {
+      exitRichListItem(item, list);
+      syncRichMarkdownFromDom('rich-input');
+      return;
+    }
+
+    const nextItem = createEmptyListItemLike(item, list);
+    const tail = extractListItemTail(item, range);
+    appendListItemTail(nextItem, tail);
+    ensureListItemEditablePlaceholder(item);
+    item.after(nextItem);
+    placeCaretAtListItemStart(nextItem);
+    syncRichMarkdownFromDom('rich-input');
+  }
+
+  function createEmptyListItemLike(item, list) {
+    const nextItem = document.createElement('li');
+    if (item.classList.contains('task-list-item') || list.classList.contains('task-list')) {
+      nextItem.className = 'task-list-item';
+      nextItem.appendChild(createTaskCheckbox());
+    }
+    return nextItem;
+  }
+
+  function extractListItemTail(item, range) {
+    const tailRange = document.createRange();
+    tailRange.setStart(range.startContainer, range.startOffset);
+    tailRange.setEnd(item, listItemContentEndOffset(item));
+    const fragment = tailRange.extractContents();
+    fragment.querySelectorAll?.('.task-checkbox').forEach((checkbox) => checkbox.remove());
+    return fragment;
+  }
+
+  function listItemContentEndOffset(item) {
+    const nestedListIndex = Array.from(item.childNodes).findIndex((child) => (
+      child.nodeType === Node.ELEMENT_NODE && ['ul', 'ol'].includes(child.tagName.toLowerCase())
+    ));
+    return nestedListIndex === -1 ? item.childNodes.length : nestedListIndex;
+  }
+
+  function appendListItemTail(item, fragment) {
+    if (isFragmentVisiblyEmpty(fragment)) {
+      item.appendChild(document.createTextNode(''));
+      item.appendChild(document.createElement('br'));
+      return;
+    }
+    item.appendChild(fragment);
+    ensureListItemEditablePlaceholder(item);
+  }
+
+  function ensureListItemEditablePlaceholder(item) {
+    const contentNodes = listItemEditableContentNodes(item);
+    if (contentNodes.length === 0 || serializeInlineNodes(contentNodes).trim() === '') {
+      contentNodes.forEach((node) => node.remove());
+      item.appendChild(document.createTextNode(''));
+      item.appendChild(document.createElement('br'));
+    }
+  }
+
+  function listItemEditableContentNodes(item) {
+    return Array.from(item.childNodes).filter((child) => {
+      if (child.nodeType !== Node.ELEMENT_NODE) return true;
+      if (['ul', 'ol'].includes(child.tagName.toLowerCase())) return false;
+      return !child.classList.contains('task-checkbox');
+    });
+  }
+
+  function isFragmentVisiblyEmpty(fragment) {
+    return serializeInlineNodes(Array.from(fragment.childNodes)).replace(/\s+/g, '').trim() === '';
+  }
+
+  function exitRichListItem(item, list) {
+    const paragraph = document.createElement('p');
+    paragraph.appendChild(document.createTextNode(''));
+    paragraph.appendChild(document.createElement('br'));
+
+    const afterList = document.createElement(list.tagName.toLowerCase());
+    afterList.className = list.className;
+    while (item.nextSibling) afterList.appendChild(item.nextSibling);
+
+    list.after(paragraph);
+    if (Array.from(afterList.children).some((child) => child.tagName?.toLowerCase() === 'li')) {
+      paragraph.after(afterList);
+    }
+
+    item.remove();
+    if (!Array.from(list.children).some((child) => child.tagName?.toLowerCase() === 'li')) {
+      list.remove();
+    }
+    placeCaretAtStart(paragraph);
+  }
+
+  function isRichListItemEmpty(item) {
+    const contentNodes = listItemEditableContentNodes(item);
+    return serializeInlineNodes(contentNodes).replace(/\s+/g, '').trim() === '';
+  }
+
+  function createTaskCheckbox() {
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'task-checkbox';
+    checkbox.setAttribute('contenteditable', 'false');
+    return checkbox;
+  }
+
+  function placeCaretAtListItemStart(item) {
+    const children = Array.from(item.childNodes);
+    const offset = children.findIndex((child) => !(child.nodeType === 1 && child.classList.contains('task-checkbox')));
+    const range = document.createRange();
+    const child = offset === -1 ? null : children[offset];
+    if (child?.nodeType === Node.TEXT_NODE) {
+      range.setStart(child, 0);
+    } else if (child) {
+      range.setStartBefore(child);
+    } else {
+      range.setStart(item, item.childNodes.length);
+    }
+    range.collapse(true);
+    const selection = window.getSelection?.();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    els.rich.focus();
+  }
+
+  function insertRichLineBreak() {
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount || !els.rich.contains(selection.anchorNode)) return;
+    const range = selection.getRangeAt(0);
+    range.deleteContents();
+    const br = document.createElement('br');
+    range.insertNode(br);
+    range.setStartAfter(br);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function placeCaretAtStart(element) {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(true);
+    const selection = window.getSelection?.();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    els.rich.focus();
   }
 
   function newDocument() {
@@ -502,6 +1367,8 @@ flowchart TD
   }
 
   function applyFormat(format) {
+    if (state.mode === 'rich' && applyRichFormat(format)) return;
+
     const textarea = focusMarkdownInput();
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
@@ -551,7 +1418,201 @@ flowchart TD
     replaceSelection(replacement, selectionStart, selectionEnd);
   }
 
+  function applyRichFormat(format) {
+    switch (format) {
+      case 'h1':
+        replaceRichCurrentBlockWithHeading(1);
+        return true;
+      case 'h2':
+        replaceRichCurrentBlockWithHeading(2);
+        return true;
+      case 'bold':
+        insertRichInlineElement('strong', '太字');
+        return true;
+      case 'italic':
+        insertRichInlineElement('em', '斜体');
+        return true;
+      case 'code': {
+        const selected = richSelectedText();
+        if (selected.includes('\n')) {
+          insertRichMarkdownBlock(`\`\`\`\n${selected || 'code'}\n\`\`\``, 'コードブロックを挿入しました');
+        } else {
+          insertRichInlineElement('code', 'code');
+        }
+        return true;
+      }
+      case 'quote':
+        replaceRichCurrentBlockWithQuote();
+        return true;
+      case 'list':
+        replaceRichCurrentBlockWithList();
+        return true;
+      case 'table':
+        insertRichMarkdownBlock('| 項目 | 内容 |\n| --- | --- |\n| 例 | テキスト |', '表を挿入しました');
+        return true;
+      case 'toc':
+        insertRichMarkdownBlock('[toc]', '目次を挿入しました');
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  function getRichSelectionRange() {
+    const selection = window.getSelection?.();
+    if (selection?.rangeCount && els.rich.contains(selection.anchorNode)) {
+      return selection.getRangeAt(0);
+    }
+    els.rich.focus();
+    const range = document.createRange();
+    range.selectNodeContents(els.rich);
+    range.collapse(false);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    return range;
+  }
+
+  function richSelectedText() {
+    const range = getRichSelectionRange();
+    return range ? range.toString() : '';
+  }
+
+  function insertRichInlineElement(tagName, placeholder, attrs = {}) {
+    const range = getRichSelectionRange();
+    if (!range) return;
+    const selected = range.toString();
+    const element = document.createElement(tagName);
+    Object.entries(attrs).forEach(([name, value]) => element.setAttribute(name, value));
+    element.textContent = selected || placeholder;
+    range.deleteContents();
+    range.insertNode(element);
+    configureRichEditableSurface();
+    if (selected) {
+      placeCaretAfterNode(element);
+    } else {
+      selectElementContents(element);
+    }
+    syncRichMarkdownFromDom('rich-input');
+  }
+
+  function replaceRichCurrentBlockWithHeading(level) {
+    const range = getRichSelectionRange();
+    if (!range) return;
+    const block = richCurrentEditableBlock(range);
+    const sourceText = range.toString() || block?.textContent?.trim() || '見出し';
+    const heading = document.createElement(`h${level}`);
+    heading.textContent = sourceText;
+    replaceOrInsertRichBlock(block, heading);
+    selectElementContents(heading);
+    syncRichMarkdownFromDom('rich-input');
+  }
+
+  function replaceRichCurrentBlockWithQuote() {
+    const range = getRichSelectionRange();
+    if (!range) return;
+    const block = richCurrentEditableBlock(range);
+    const text = range.toString() || block?.textContent?.trim() || '引用文';
+    const quote = document.createElement('blockquote');
+    const paragraph = document.createElement('p');
+    paragraph.textContent = text;
+    quote.appendChild(paragraph);
+    replaceOrInsertRichBlock(block, quote);
+    selectElementContents(paragraph);
+    syncRichMarkdownFromDom('rich-input');
+  }
+
+  function replaceRichCurrentBlockWithList() {
+    const range = getRichSelectionRange();
+    if (!range) return;
+    const block = richCurrentEditableBlock(range);
+    const text = range.toString() || block?.textContent?.trim() || '項目';
+    const list = document.createElement('ul');
+    const item = document.createElement('li');
+    item.textContent = text;
+    list.appendChild(item);
+    replaceOrInsertRichBlock(block, list);
+    selectElementContents(item);
+    syncRichMarkdownFromDom('rich-input');
+  }
+
+  function richCurrentEditableBlock(range) {
+    const element = nodeElement(range.startContainer);
+    const block = element?.closest?.('p, h1, h2, h3, h4, h5, h6, li, blockquote');
+    return block && els.rich.contains(block) ? block : null;
+  }
+
+  function replaceOrInsertRichBlock(block, nextBlock) {
+    const topLevel = block ? richTopLevelBlock(block) : null;
+    configureRichEditableSurface();
+    if (topLevel && isReplaceableRichTextBlock(topLevel)) {
+      topLevel.replaceWith(nextBlock);
+    } else if (topLevel && topLevel !== els.rich) {
+      topLevel.after(nextBlock);
+    } else {
+      els.rich.appendChild(nextBlock);
+    }
+  }
+
+  function richTopLevelBlock(element) {
+    let current = element;
+    while (current?.parentElement && current.parentElement !== els.rich) current = current.parentElement;
+    return current;
+  }
+
+  function isReplaceableRichTextBlock(element) {
+    const tag = element.tagName?.toLowerCase();
+    return ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'ul', 'ol'].includes(tag);
+  }
+
+  function insertRichMarkdownBlock(markdown, status = '挿入しました') {
+    const fragment = richFragmentFromMarkdown(markdown);
+    if (!fragment.childNodes.length) return;
+    const range = getRichSelectionRange();
+    const topLevel = range ? richTopLevelBlock(nodeElement(range.startContainer)) : null;
+    const inserted = Array.from(fragment.childNodes);
+    if (topLevel && topLevel !== els.rich) {
+      topLevel.after(fragment);
+    } else {
+      els.rich.appendChild(fragment);
+    }
+    configureRichEditableSurface();
+    placeCaretInInsertedRichBlock(inserted[0]);
+    syncRichMarkdownFromDom('rich-input');
+    setStatus(status);
+  }
+
+  function richFragmentFromMarkdown(markdown) {
+    const template = document.createElement('template');
+    template.innerHTML = renderMarkdownHtml(markdown);
+    enhanceRenderedHtml(template.content);
+    return template.content;
+  }
+
+  function placeCaretInInsertedRichBlock(block) {
+    const target = block.querySelector?.('td, th, li, p, h1, h2, h3, h4, h5, h6') || block;
+    if (target.matches?.('pre, .mermaid-diagram, .math-display, .toc, table')) {
+      placeCaretAfterNode(block);
+      return;
+    }
+    selectElementContents(target);
+  }
+
+  function selectElementContents(element) {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const selection = window.getSelection?.();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    els.rich.focus();
+  }
+
   function insertLink() {
+    if (state.mode === 'rich') {
+      insertRichLink();
+      return;
+    }
+
     focusMarkdownInput();
     const label = getSelectedText() || 'リンク';
     const rawUrl = prompt('URLを入力してください。危険なURLはプレビュー時にブロックされます。', './README.md');
@@ -559,7 +1620,30 @@ flowchart TD
     replaceSelection(`[${label}](${rawUrl.trim()})`);
   }
 
+  function insertRichLink() {
+    const label = richSelectedText() || 'リンク';
+    const rawUrl = prompt('URLを入力してください。危険なURLはプレビュー時にブロックされます。', './README.md');
+    if (!rawUrl) return;
+    const href = rawUrl.trim();
+    const safe = sanitizeLinkUrl(href);
+    if (!safe) {
+      setStatus('許可されていないリンクです');
+      return;
+    }
+    insertRichInlineElement('a', label, {
+      href: safe,
+      'data-markdown-href': href,
+      rel: 'noopener noreferrer',
+      target: '_blank',
+    });
+  }
+
   function insertImageReference() {
+    if (state.mode === 'rich') {
+      insertRichImageReference();
+      return;
+    }
+
     focusMarkdownInput();
     const label = sanitizeMarkdownLabel(getSelectedText() || '画像');
     const rawPath = prompt('画像パスを入力してください。例: ./images/pic.png, Z:\\share\\pic.png, \\\\server\\share\\pic.png', './images/example.png');
@@ -573,13 +1657,33 @@ flowchart TD
     setStatus('ローカル画像参照を挿入しました');
   }
 
+  function insertRichImageReference() {
+    const label = sanitizeMarkdownLabel(richSelectedText() || '画像');
+    const rawPath = prompt('画像パスを入力してください。例: ./images/pic.png, Z:\\share\\pic.png, \\\\server\\share\\pic.png', './images/example.png');
+    if (!rawPath) return;
+    insertRichImageElement(label, rawPath.trim());
+  }
+
   function insertCodeBlock() {
+    if (state.mode === 'rich') {
+      const selected = richSelectedText();
+      insertRichMarkdownBlock(`\`\`\`\n${selected || 'code'}\n\`\`\``, 'コードブロックを挿入しました');
+      return;
+    }
+
     focusMarkdownInput();
     const selected = getSelectedText();
     replaceSelection(`\`\`\`\n${selected || 'code'}\n\`\`\``);
   }
 
   function insertMermaid() {
+    if (state.mode === 'rich') {
+      const selected = richSelectedText().trim();
+      const body = selected || 'flowchart TD\n  A[開始] --> B{確認}\n  B -->|OK| C[完了]\n  B -->|修正| A';
+      insertRichMarkdownBlock(`\`\`\`mermaid\n${body}\n\`\`\``, 'Mermaidを挿入しました');
+      return;
+    }
+
     focusMarkdownInput();
     const selected = getSelectedText().trim();
     const body = selected || 'flowchart TD\n  A[開始] --> B{確認}\n  B -->|OK| C[完了]\n  B -->|修正| A';
@@ -605,12 +1709,11 @@ flowchart TD
   }
 
   function focusMarkdownInput() {
-    const blockEditor = state.currentBlockEditor && state.currentBlockEditor.querySelector('.block-editor');
-    if (blockEditor) {
-      blockEditor.focus();
-      return blockEditor;
+    if (state.mode === 'rich') {
+      els.rich.focus();
+      return els.source;
     }
-    if (state.mode === 'rich' || state.mode === 'preview') applyMode('split');
+    if (state.mode === 'preview') applyMode('split');
     els.source.focus();
     return els.source;
   }
@@ -621,8 +1724,40 @@ flowchart TD
   }
 
   function insertAtSelection(text) {
+    if (state.mode === 'rich') {
+      insertRichMarkdownAtSelection(text);
+      return;
+    }
     focusMarkdownInput();
     replaceSelection(text);
+  }
+
+  function insertRichMarkdownAtSelection(markdown) {
+    const image = String(markdown || '').match(/^!\[([^\]]*)\]\((<[^>]+>|[^)]+)\)$/s);
+    if (image) {
+      insertRichImageElement(image[1], parseMarkdownTarget(image[2]));
+      return;
+    }
+    insertRichMarkdownBlock(markdown);
+  }
+
+  function insertRichImageElement(label, target) {
+    const safe = sanitizeImageUrl(target);
+    if (!safe) {
+      setStatus('PNG/JPEG/GIF/WebPのローカル画像パスのみ参照できます');
+      return;
+    }
+    const range = getRichSelectionRange();
+    if (!range) return;
+    const image = document.createElement('img');
+    image.alt = sanitizeMarkdownLabel(label);
+    image.src = safe;
+    image.setAttribute('data-markdown-src', target);
+    range.deleteContents();
+    range.insertNode(image);
+    placeCaretAfterNode(image);
+    syncRichMarkdownFromDom('rich-input');
+    setStatus('画像参照を挿入しました');
   }
 
   function replaceSelection(replacement, selectionStart, selectionEnd) {
@@ -647,8 +1782,7 @@ flowchart TD
   }
 
   function getActiveMarkdownInput() {
-    const blockEditor = state.currentBlockEditor && state.currentBlockEditor.querySelector('.block-editor');
-    return blockEditor || els.source;
+    return els.source;
   }
 
   function applyMode(mode) {
@@ -780,9 +1914,20 @@ flowchart TD
     updateStatusBar();
   }
 
-  function scheduleRender() {
+  function scheduleRender(reason = 'edit') {
     window.clearTimeout(state.renderTimer);
-    state.renderTimer = window.setTimeout(() => renderAll('edit'), 120);
+    state.renderTimer = window.setTimeout(() => renderAll(reason), 120);
+  }
+
+  function scheduleRichReparse() {
+    window.clearTimeout(state.richReparseTimer);
+    state.richReparseTimer = window.setTimeout(() => {
+      if (state.mode !== 'rich' || state.richComposing) return;
+      if (document.activeElement?.closest?.('.rich-source-editor, .code-language-input')) return;
+      const bookmark = getRichCaretBookmark();
+      renderRich();
+      restoreRichCaret(bookmark);
+    }, 320);
   }
 
   function scheduleAutosave() {
@@ -815,9 +1960,9 @@ flowchart TD
   }
 
   function renderAll(reason) {
-    if (reason !== 'init') state.markdown = normalizeNewlines(els.source.value);
+    if (reason !== 'init' && reason !== 'rich-input') state.markdown = normalizeNewlines(els.source.value);
     renderPreview();
-    renderRich();
+    if (reason !== 'rich-input') renderRich();
     renderOutline();
     updateStatusBar();
     document.body.classList.toggle('outline-collapsed', state.outlineCollapsed);
@@ -829,117 +1974,85 @@ flowchart TD
   }
 
   function renderRich() {
-    if (state.currentBlockEditor) return;
-    const blocks = splitMarkdownBlocks(state.markdown);
-    const headings = buildHeadingIndex(blocks);
-    els.rich.replaceChildren();
-
-    if (blocks.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'empty-state';
-      empty.textContent = 'Markdownを書き始めてください';
-      els.rich.appendChild(empty);
-      return;
-    }
-
-    for (const block of blocks) {
-      const wrapper = document.createElement('section');
-      wrapper.className = `rich-block block-${block.type}`;
-      wrapper.tabIndex = 0;
-      wrapper.dataset.start = String(block.start);
-      wrapper.dataset.end = String(block.end);
-      wrapper.dataset.type = block.type;
-      safeSetHtml(wrapper, renderBlockHtml(block, headings));
-
-      const tools = document.createElement('div');
-      tools.className = 'block-tools';
-      tools.innerHTML = [
-        '<button type="button" data-action="add-block-before" title="上に追加">＋上</button>',
-        '<button type="button" data-action="edit-block" title="編集">編集</button>',
-        '<button type="button" data-action="add-block-after" title="下に追加">＋下</button>',
-      ].join('');
-      wrapper.appendChild(tools);
-      els.rich.appendChild(wrapper);
-    }
+    state.richInlineSource = null;
+    const html = renderMarkdownHtml(state.markdown);
+    safeSetHtml(els.rich, html || '<p><br></p>');
+    configureRichEditableSurface();
   }
 
-  function editRichBlock(block) {
-    if (!block || state.currentBlockEditor) return;
-    const start = Number(block.dataset.start);
-    const end = Number(block.dataset.end);
-    if (!Number.isFinite(start) || !Number.isFinite(end)) return;
-
-    const raw = state.markdown.slice(start, end);
-    state.currentBlockEditor = block;
-    block.replaceChildren();
-
-    const textarea = document.createElement('textarea');
-    textarea.className = 'block-editor';
-    textarea.value = raw;
-    textarea.setAttribute('aria-label', 'Markdownブロック編集');
-
-    const actions = document.createElement('div');
-    actions.className = 'block-editor-actions';
-    actions.innerHTML = [
-      '<button type="button" data-action="cancel-block">キャンセル</button>',
-      '<button type="button" data-action="commit-block">反映</button>',
-    ].join('');
-
-    block.appendChild(textarea);
-    block.appendChild(actions);
-    textarea.focus();
-    textarea.setSelectionRange(0, textarea.value.length);
-
-    textarea.addEventListener('keydown', (event) => {
-      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-        event.preventDefault();
-        commitBlockEditor(block);
-      } else if (event.key === 'Escape') {
-        event.preventDefault();
-        state.currentBlockEditor = null;
-        renderRich();
-      }
+  function configureRichEditableSurface() {
+    els.rich.setAttribute('contenteditable', 'true');
+    els.rich.querySelectorAll('.toc, .mermaid-diagram, pre.code-block, .math-inline, .math-display').forEach((node) => {
+      node.setAttribute('contenteditable', 'false');
+    });
+    els.rich.querySelectorAll('.task-checkbox, .code-language-input').forEach((node) => {
+      node.setAttribute('contenteditable', 'false');
     });
   }
 
-  function cancelCurrentBlockEditor(nextBlock) {
-    const start = nextBlock?.dataset.start || '';
-    const end = nextBlock?.dataset.end || '';
-    state.currentBlockEditor = null;
-    renderRich();
-    if (start && end) {
-      const selector = `.rich-block[data-start="${cssEscape(start)}"][data-end="${cssEscape(end)}"]`;
-      const rerendered = els.rich.querySelector(selector);
-      if (rerendered) {
-        editRichBlock(rerendered);
-        setStatus('ブロック編集を切り替えました');
-        return;
-      }
+  function getRichCaretBookmark() {
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount || !els.rich.contains(selection.anchorNode)) return null;
+    const range = selection.getRangeAt(0);
+    const before = range.cloneRange();
+    before.selectNodeContents(els.rich);
+    before.setEnd(range.startContainer, range.startOffset);
+    const selected = range.cloneRange();
+    return {
+      start: before.toString().length,
+      length: selected.toString().length,
+    };
+  }
+
+  function restoreRichCaret(bookmark) {
+    if (!bookmark) return;
+    const start = findTextPosition(els.rich, bookmark.start);
+    const end = findTextPosition(els.rich, bookmark.start + bookmark.length);
+    if (!start) {
+      els.rich.focus();
+      return;
     }
-    setStatus('ブロック編集をキャンセルしました');
+    const range = document.createRange();
+    range.setStart(start.node, start.offset);
+    if (end) {
+      range.setEnd(end.node, end.offset);
+    } else {
+      range.collapse(true);
+    }
+    const selection = window.getSelection?.();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    els.rich.focus();
   }
 
-  function cssEscape(value) {
-    if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(String(value));
-    return String(value).replace(/["\\]/g, '\\$&');
-  }
-
-  function commitBlockEditor(block) {
-    const textarea = block && block.querySelector('.block-editor');
-    if (!block || !textarea) return;
-    const start = Number(block.dataset.start);
-    const end = Number(block.dataset.end);
-    const replacement = normalizeNewlines(textarea.value);
-    state.markdown = state.markdown.slice(0, start) + replacement + state.markdown.slice(end);
-    els.source.value = state.markdown;
-    state.currentBlockEditor = null;
-    markDirty();
-    renderAll('rich-edit');
-    persistDraft();
-    setStatus('ブロックを反映しました');
+  function findTextPosition(root, targetOffset) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (node.parentElement?.closest('.rich-source-editor, .code-language-input')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    let consumed = 0;
+    let last = null;
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      last = node;
+      const length = node.nodeValue.length;
+      if (consumed + length >= targetOffset) {
+        return { node, offset: Math.max(0, targetOffset - consumed) };
+      }
+      consumed += length;
+    }
+    return last ? { node: last, offset: last.nodeValue.length } : null;
   }
 
   function updateTaskCheckbox(input) {
+    if (els.rich.contains(input)) {
+      syncRichMarkdownFromDom('task-toggle');
+      setStatus(input.checked ? 'チェックを付けました' : 'チェックを外しました');
+      return;
+    }
     const position = Number(input.dataset.taskPos);
     if (!Number.isInteger(position) || !/^[ xX]$/.test(state.markdown[position] || '')) {
       renderAll('task-toggle-invalid');
@@ -956,6 +2069,18 @@ flowchart TD
   }
 
   function updateCodeBlockLanguage(input) {
+    if (els.rich.contains(input)) {
+      const language = safeCodeLanguage(input.value || '');
+      const editingPre = input.closest('pre.code-block.is-editing-source');
+      if (editingPre) {
+        editingPre.dataset.codeLanguage = language;
+        setStatus(language ? `コード言語: ${language}` : 'コード言語を未指定にしました');
+        return;
+      }
+      syncRichMarkdownFromDom('code-language', { refreshRich: true });
+      setStatus(language ? `コード言語: ${language}` : 'コード言語を未指定にしました');
+      return;
+    }
     const start = Number(input.dataset.codeStart);
     const end = Number(input.dataset.codeEnd);
     if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start) {
@@ -980,21 +2105,416 @@ flowchart TD
     setStatus(language ? `コード言語: ${language}` : 'コード言語を未指定にしました');
   }
 
-  function insertBlockNear(block, direction) {
-    if (!block) return;
-    const start = Number(block.dataset.start);
-    const end = Number(block.dataset.end);
-    const addition = '新しい段落';
-    if (!Number.isFinite(start) || !Number.isFinite(end)) return;
-    if (direction === 'before') {
-      state.markdown = state.markdown.slice(0, start) + `${addition}\n\n` + state.markdown.slice(start);
-    } else {
-      state.markdown = state.markdown.slice(0, end) + `\n\n${addition}` + state.markdown.slice(end);
+  function activateRichInlineSource(element, position = 'end') {
+    if (!element || element.classList.contains('rich-inline-source')) return;
+    const active = state.richInlineSource?.element;
+    if (active && active !== element) {
+      commitRichInlineSource(active);
+      return;
     }
+
+    const source = richInlineSourceFromElement(element);
+    if (!source) return;
+    const span = document.createElement('span');
+    span.className = 'rich-inline-source';
+    span.contentEditable = 'true';
+    span.spellcheck = false;
+    span.dataset.inlineSource = source;
+    span.setAttribute('role', 'textbox');
+    span.setAttribute('aria-label', 'インラインMarkdownソース');
+    span.textContent = source;
+
+    state.richSelectionLock = true;
+    element.replaceWith(span);
+    state.richInlineSource = { element: span };
+    placeCaretInInlineSource(span, position);
+    state.richSelectionLock = false;
+  }
+
+  function commitRichInlineSource(sourceElement = state.richInlineSource?.element) {
+    if (!sourceElement) return false;
+    if (!sourceElement.isConnected) {
+      if (state.richInlineSource?.element === sourceElement) state.richInlineSource = null;
+      return false;
+    }
+
+    const source = normalizeNewlines(sourceElement.textContent || '');
+    const fragment = renderRichInlineSourceFragment(source);
+    state.richSelectionLock = true;
+    if (state.richInlineSource?.element === sourceElement) state.richInlineSource = null;
+    sourceElement.replaceWith(fragment);
+    configureRichEditableSurface();
+    syncRichMarkdownFromDom('rich-input');
+    state.richSelectionLock = false;
+    return true;
+  }
+
+  function placeCaretInInlineSource(element, position) {
+    const text = element.firstChild || element.appendChild(document.createTextNode(''));
+    const offset = Number.isInteger(position)
+      ? Math.max(0, Math.min(position, text.nodeValue.length))
+      : position === 'start' ? 0 : text.nodeValue.length;
+    const range = document.createRange();
+    range.setStart(text, offset);
+    range.collapse(true);
+    const selection = window.getSelection?.();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    element.focus();
+  }
+
+  function renderRichInlineSourceFragment(source) {
+    const template = document.createElement('template');
+    template.innerHTML = renderInlineMarkdown(source);
+    enhanceRenderedHtml(template.content);
+    return template.content;
+  }
+
+  function richInlineSourceFromElement(element) {
+    if (!element) return '';
+    const tag = element.tagName?.toLowerCase();
+    if (tag === 'strong' || tag === 'b') return `**${serializeInlineChildren(element).trim()}**`;
+    if (tag === 'em' || tag === 'i') return `*${serializeInlineChildren(element).trim()}*`;
+    if (tag === 'del' || tag === 's') return `~~${serializeInlineChildren(element).trim()}~~`;
+    if (tag === 'code' && !element.closest('pre')) return markdownCodeSpan(element.textContent || '');
+    if (tag === 'a') return serializeLinkElement(element);
+    if (tag === 'img') return serializeImageElement(element);
+    if (element.classList?.contains('math-inline')) return serializeMathElement(element);
+    return '';
+  }
+
+  function showRichSourceEditor(kind, element, options = {}) {
+    if (!element || element.classList.contains('is-editing-source')) return;
+    const source = richSourceFromElement(kind, element);
+    const editorValue = options.editorValue ?? richSourceEditorValue(kind, element, source);
+    const language = kind === 'code' ? codeLanguageFromPre(element) : '';
+    element.classList.add('is-editing-source');
+    element.dataset.richSourceKind = kind;
+    setRichSourceOnElement(kind, element, source);
+    if (kind === 'code') {
+      element.dataset.codeLanguage = language;
+    }
+    element.setAttribute('contenteditable', 'false');
+    element.replaceChildren();
+
+    const caption = document.createElement(kind === 'mermaid' ? 'figcaption' : 'div');
+    caption.className = 'rich-source-caption';
+    caption.textContent = richSourceTitle(kind);
+    const hint = document.createElement('span');
+    hint.textContent = 'Ctrl+Enterで反映';
+    caption.appendChild(hint);
+
+    const textarea = document.createElement('textarea');
+    textarea.className = 'rich-source-editor';
+    textarea.value = editorValue;
+    textarea.spellcheck = false;
+    textarea.autocomplete = 'off';
+    textarea.autocapitalize = 'off';
+    textarea.setAttribute('aria-label', `${richSourceTitle(kind)}ソース編集`);
+
+    const actions = document.createElement('div');
+    actions.className = 'rich-source-actions';
+    actions.innerHTML = [
+      '<button type="button" data-source-action="cancel">キャンセル</button>',
+      '<button type="button" data-source-action="apply">反映</button>',
+    ].join('');
+
+    if (kind === 'code') {
+      element.appendChild(createCodeLanguageInput(language));
+    }
+    element.appendChild(caption);
+    element.appendChild(textarea);
+    element.appendChild(actions);
+
+    textarea.addEventListener('click', (event) => event.stopPropagation());
+    textarea.addEventListener('keydown', (event) => {
+      event.stopPropagation();
+      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+        event.preventDefault();
+        applyRichSourceEditor(kind, element, textarea.value);
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        renderRich();
+      }
+    });
+    actions.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const action = event.target.closest('[data-source-action]')?.dataset.sourceAction;
+      if (action === 'apply') applyRichSourceEditor(kind, element, textarea.value);
+      if (action === 'cancel') renderRich();
+    });
+
+    textarea.focus();
+    if (Number.isInteger(options.caretOffset)) {
+      textarea.setSelectionRange(options.caretOffset, options.caretOffset);
+    } else {
+      textarea.setSelectionRange(0, textarea.value.length);
+    }
+  }
+
+  function richSourceEditorValue(kind, element, source) {
+    if (kind === 'math' && element.getAttribute('data-math-display') === 'true') {
+      return `$$${source}$$`;
+    }
+    return source;
+  }
+
+  function createCodeLanguageInput(language) {
+    const input = document.createElement('input');
+    input.className = 'code-language-input';
+    input.type = 'text';
+    input.setAttribute('list', 'codeLanguageOptions');
+    input.spellcheck = false;
+    input.autocomplete = 'off';
+    input.setAttribute('autocapitalize', 'off');
+    input.setAttribute('contenteditable', 'false');
+    input.setAttribute('aria-label', 'コードブロックの言語');
+    input.placeholder = 'text';
+    input.value = safeCodeLanguage(language);
+    return input;
+  }
+
+  function applyRichSourceEditor(kind, element, source) {
+    if (kind === 'code') {
+      element.dataset.codeLanguage = codeLanguageFromPre(element);
+    }
+    if (kind === 'math') {
+      source = normalizeMathEditorSource(source);
+      element.setAttribute('data-math-display', 'true');
+    }
+    setRichSourceOnElement(kind, element, source);
+    syncRichMarkdownFromDom(`${kind}-source`, { refreshRich: true });
+    setStatus(`${richSourceTitle(kind)}ソースを反映しました`);
+  }
+
+  function normalizeMathEditorSource(source) {
+    const value = normalizeNewlines(source).trim();
+    if (value.startsWith('$$') && value.endsWith('$$') && value.length >= 4) return value.slice(2, -2);
+    if (value.startsWith('\\[') && value.endsWith('\\]') && value.length >= 4) return value.slice(2, -2);
+    if (value.startsWith('$') && value.endsWith('$') && value.length >= 2) return value.slice(1, -1);
+    if (value.startsWith('\\(') && value.endsWith('\\)') && value.length >= 4) return value.slice(2, -2);
+    return value;
+  }
+
+  function richSourceFromElement(kind, element) {
+    if (kind === 'mermaid') return mermaidSourceFromFigure(element);
+    if (kind === 'code') return codeSourceFromPre(element);
+    if (kind === 'math') {
+      const editor = element.querySelector('.rich-source-editor');
+      if (editor) return normalizeMathEditorSource(editor.value);
+      if (Object.prototype.hasOwnProperty.call(element.dataset, 'richSource')) return element.dataset.richSource;
+      const attrSource = element.getAttribute('data-math-source');
+      if (attrSource !== null) return attrSource;
+      return element.querySelector('.rich-source-editor')?.value || '';
+    }
+    return element.dataset.richSource || '';
+  }
+
+  function setRichSourceOnElement(kind, element, source) {
+    const value = normalizeNewlines(source);
+    element.dataset.richSource = value;
+    if (kind === 'mermaid') element.dataset.mermaidSource = value;
+    if (kind === 'math') element.setAttribute('data-math-source', value);
+  }
+
+  function richSourceTitle(kind) {
+    if (kind === 'mermaid') return 'Mermaid';
+    if (kind === 'code') return 'コード';
+    if (kind === 'math') return '数式';
+    return 'ソース';
+  }
+
+  function mermaidSourceFromFigure(figure) {
+    return figure.dataset.richSource
+      || figure.dataset.mermaidSource
+      || figure.querySelector('.mermaid-render-target')?.getAttribute('data-mermaid-source')
+      || figure.querySelector('code')?.textContent
+      || '';
+  }
+
+  function codeSourceFromPre(pre) {
+    return pre.querySelector('.rich-source-editor')?.value
+      || pre.dataset.richSource
+      || pre.querySelector('code')?.textContent
+      || '';
+  }
+
+  function codeLanguageFromPre(pre) {
+    const input = Array.from(pre.children).find((child) => child.classList?.contains('code-language-input'));
+    const code = pre.querySelector('code');
+    return safeCodeLanguage(input?.value || pre.dataset.codeLanguage || code?.dataset.lang || '');
+  }
+
+  function syncRichMarkdownFromDom(reason, options = {}) {
+    state.markdown = serializeRichMarkdown(els.rich);
     els.source.value = state.markdown;
     markDirty();
-    renderAll('insert-block');
-    persistDraft();
+    if (options.refreshRich) {
+      renderAll(reason || 'rich-edit');
+    } else {
+      scheduleRender('rich-input');
+      if (options.reparseRich) scheduleRichReparse();
+    }
+    scheduleAutosave();
+  }
+
+  function serializeRichMarkdown(root) {
+    const blocks = Array.from(root.childNodes)
+      .map((node) => serializeBlockNode(node))
+      .map((block) => block.trimEnd())
+      .filter((block) => block.trim() !== '');
+    return normalizeNewlines(blocks.join('\n\n')).replace(/\n{3,}/g, '\n\n').trimEnd();
+  }
+
+  function serializeBlockNode(node) {
+    if (node.nodeType === 3) return normalizeRichText(node.nodeValue || '').trim();
+    if (node.nodeType !== 1) return '';
+
+    const element = node;
+    if (element.classList.contains('toc')) return '[toc]';
+    if (element.classList.contains('mermaid-diagram')) return serializeMermaidDiagram(element);
+    if (element.classList.contains('math-display')) return serializeMathElement(element);
+    if (element.classList.contains('math-inline')) return serializeMathElement(element);
+
+    const tag = element.tagName.toLowerCase();
+    if (/^h[1-6]$/.test(tag)) return `${'#'.repeat(Number(tag[1]))} ${serializeInlineChildren(element).trim()}`;
+    if (tag === 'p') return serializeInlineChildren(element).trim();
+    if (tag === 'pre') return serializePreElement(element);
+    if (tag === 'blockquote') return prefixLines(serializeBlockChildren(element), '> ');
+    if (tag === 'ul' || tag === 'ol') return serializeListElement(element);
+    if (tag === 'table') return serializeTableElement(element);
+    if (tag === 'hr') return '---';
+    if (tag === 'img') return serializeImageElement(element);
+    if (tag === 'br') return '';
+
+    const blockText = serializeBlockChildren(element);
+    if (blockText) return blockText;
+    return serializeInlineChildren(element).trim();
+  }
+
+  function serializeBlockChildren(element) {
+    return Array.from(element.childNodes)
+      .map((child) => serializeBlockNode(child))
+      .map((block) => block.trimEnd())
+      .filter((block) => block.trim() !== '')
+      .join('\n\n');
+  }
+
+  function serializeInlineChildren(element) {
+    return serializeInlineNodes(Array.from(element.childNodes));
+  }
+
+  function serializeInlineNodes(nodes) {
+    return nodes.map((node) => serializeInlineNode(node)).join('').replace(/[ \t]+\n/g, '\n');
+  }
+
+  function serializeInlineNode(node) {
+    if (node.nodeType === 3) return normalizeRichText(node.nodeValue || '');
+    if (node.nodeType !== 1) return '';
+
+    const element = node;
+    if (element.classList.contains('rich-inline-source')) return normalizeNewlines(element.textContent || '');
+    if (element.classList.contains('math-inline') || element.classList.contains('math-display')) return serializeMathElement(element);
+    if (element.classList.contains('code-language-input') || element.classList.contains('task-checkbox')) return '';
+
+    const tag = element.tagName.toLowerCase();
+    if (tag === 'br') return '\n';
+    if (tag === 'strong' || tag === 'b') return `**${serializeInlineChildren(element).trim()}**`;
+    if (tag === 'em' || tag === 'i') return `*${serializeInlineChildren(element).trim()}*`;
+    if (tag === 'del' || tag === 's') return `~~${serializeInlineChildren(element).trim()}~~`;
+    if (tag === 'code' && !element.closest('pre')) return markdownCodeSpan(element.textContent || '');
+    if (tag === 'a') return serializeLinkElement(element);
+    if (tag === 'img') return serializeImageElement(element);
+    if (tag === 'div' || tag === 'p') return serializeInlineChildren(element).trim();
+    return serializeInlineChildren(element);
+  }
+
+  function serializeListElement(list, depth = 0) {
+    const ordered = list.tagName.toLowerCase() === 'ol';
+    const indent = '  '.repeat(depth);
+    const items = Array.from(list.children).filter((child) => child.tagName?.toLowerCase() === 'li');
+    return items.map((item, itemIndex) => {
+      const nestedLists = Array.from(item.children).filter((child) => ['ul', 'ol'].includes(child.tagName?.toLowerCase()));
+      const contentNodes = Array.from(item.childNodes).filter((child) => {
+        if (child.nodeType !== 1) return true;
+        const childElement = child;
+        if (['ul', 'ol'].includes(childElement.tagName.toLowerCase())) return false;
+        return !childElement.classList.contains('task-checkbox');
+      });
+      const checkbox = Array.from(item.children).find((child) => child.classList?.contains('task-checkbox'));
+      const taskPrefix = checkbox ? `[${checkbox.checked ? 'x' : ' '}] ` : '';
+      const marker = ordered ? `${itemIndex + 1}.` : '-';
+      const lines = serializeInlineNodes(contentNodes)
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line !== '');
+      const text = lines.shift() || ' ';
+      const continuation = lines.map((line) => `${indent}  ${line}`).join('\n');
+      const nested = nestedLists.map((child) => serializeListElement(child, depth + 1)).filter(Boolean).join('\n');
+      return `${indent}${marker} ${taskPrefix}${text}${continuation ? `\n${continuation}` : ''}${nested ? `\n${nested}` : ''}`;
+    }).join('\n');
+  }
+
+  function serializePreElement(pre) {
+    const language = codeLanguageFromPre(pre);
+    const text = normalizeNewlines(codeSourceFromPre(pre)).replace(/\n$/, '');
+    return `\`\`\`${language}\n${text}\n\`\`\``;
+  }
+
+  function serializeTableElement(table) {
+    const rows = Array.from(table.querySelectorAll('tr'));
+    if (!rows.length) return '';
+    const firstRowCells = Array.from(rows[0].children);
+    const headers = firstRowCells.map((cell) => escapeMarkdownTableCell(serializeInlineChildren(cell).trim()));
+    const separator = headers.map(() => '---');
+    const bodyRows = rows.slice(1).map((row) => {
+      const cells = Array.from(row.children).map((cell) => escapeMarkdownTableCell(serializeInlineChildren(cell).trim()));
+      return `| ${cells.join(' | ')} |`;
+    });
+    return [`| ${headers.join(' | ')} |`, `| ${separator.join(' | ')} |`, ...bodyRows].join('\n');
+  }
+
+  function serializeLinkElement(link) {
+    const label = serializeInlineChildren(link).trim();
+    const href = link.getAttribute('data-markdown-href') || link.getAttribute('href') || '';
+    const safe = sanitizeLinkUrl(href);
+    return safe ? `[${escapeMarkdownLabel(label)}](${formatMarkdownTarget(href)})` : label;
+  }
+
+  function serializeImageElement(image) {
+    const src = image.getAttribute('data-markdown-src') || image.getAttribute('src') || '';
+    const alt = image.getAttribute('alt') || '画像';
+    return sanitizeImageUrl(src) ? `![${escapeMarkdownLabel(alt)}](${formatMarkdownTarget(src)})` : escapeMarkdownLabel(alt);
+  }
+
+  function serializeMermaidDiagram(figure) {
+    const source = mermaidSourceFromFigure(figure);
+    return source ? `\`\`\`mermaid\n${normalizeNewlines(source).trim()}\n\`\`\`` : '';
+  }
+
+  function serializeMathElement(element) {
+    const source = richSourceFromElement('math', element);
+    if (!source) return element.getAttribute('data-math-display') === 'true' ? '$$$$' : '$$';
+    return element.getAttribute('data-math-display') === 'true' ? `$$${source}$$` : `$${source}$`;
+  }
+
+  function normalizeRichText(value) {
+    return String(value || '').replace(/\u00a0/g, ' ');
+  }
+
+  function markdownCodeSpan(value) {
+    const text = String(value || '');
+    const fence = text.includes('`') ? '``' : '`';
+    return `${fence}${text}${fence}`;
+  }
+
+  function escapeMarkdownLabel(value) {
+    return String(value || '').replace(/[\[\]\r\n]/g, ' ').trim();
+  }
+
+  function escapeMarkdownTableCell(value) {
+    return String(value || '').replace(/\|/g, '\\|').replace(/\n+/g, ' ');
   }
 
   function renderOutline() {
@@ -1086,6 +2606,7 @@ flowchart TD
         return self.renderToken(tokens, index, options);
       }
       tokens[index].attrs[hrefIndex][1] = safe;
+      tokens[index].attrSet('data-markdown-href', href);
       tokens[index].attrSet('rel', 'noopener noreferrer');
       tokens[index].attrSet('target', '_blank');
       return defaultLinkOpen(tokens, index, options, env, self);
@@ -1106,7 +2627,7 @@ flowchart TD
       const safe = sanitizeImageUrl(src);
       const alt = token.content || token.attrGet('alt') || 'no alt';
       if (!safe) return `<span class="blocked-image">画像ブロック: ${escapeHtml(alt)}</span>`;
-      return `<img alt="${escapeAttribute(alt)}" src="${escapeAttribute(safe)}">`;
+      return `<img alt="${escapeAttribute(alt)}" src="${escapeAttribute(safe)}" data-markdown-src="${escapeAttribute(src)}">`;
     };
 
     enableTaskListRendering(md);
@@ -1213,7 +2734,7 @@ flowchart TD
     const id = nextMermaidId('diagram', code);
     return [
       '<figure class="mermaid-diagram">',
-      '<figcaption>Mermaid</figcaption>',
+      '<figcaption>Mermaid <span>クリックでコード編集</span></figcaption>',
       `<div class="mermaid-render-target" data-mermaid-render-id="${escapeAttribute(id)}" data-mermaid-source="${escapeAttribute(code)}">`,
       `<pre class="code-block language-mermaid"><code data-lang="mermaid">${escapeHtml(code)}</code></pre>`,
       '</div>',
@@ -1239,6 +2760,18 @@ flowchart TD
         endIndex = index + 1;
         while (endIndex < lines.length && !/^\s*```\s*$/.test(lines[endIndex].text)) endIndex += 1;
         if (endIndex < lines.length) endIndex += 1;
+      } else if (displayMathDelimiter(first)) {
+        const delimiter = displayMathDelimiter(first);
+        endIndex = index + 1;
+        if (!isDisplayMathClosedLine(first, delimiter)) {
+          while (endIndex < lines.length) {
+            if (isDisplayMathClosedLine(lines[endIndex].text, delimiter)) {
+              endIndex += 1;
+              break;
+            }
+            endIndex += 1;
+          }
+        }
       } else if (isHeadingLine(first) || isHorizontalRule(first) || isTocLine(first)) {
         endIndex = index + 1;
       } else if (isTableStart(lines, index)) {
@@ -1264,7 +2797,7 @@ flowchart TD
       } else {
         endIndex = index + 1;
         while (endIndex < lines.length && lines[endIndex].text.trim() !== '') {
-          if (/^\s*```/.test(lines[endIndex].text) || isHeadingLine(lines[endIndex].text) || isHorizontalRule(lines[endIndex].text) || isTocLine(lines[endIndex].text)) break;
+          if (/^\s*```/.test(lines[endIndex].text) || displayMathDelimiter(lines[endIndex].text) || isHeadingLine(lines[endIndex].text) || isHorizontalRule(lines[endIndex].text) || isTocLine(lines[endIndex].text)) break;
           endIndex += 1;
         }
       }
@@ -1295,6 +2828,7 @@ flowchart TD
   function classifyBlock(raw) {
     const first = raw.split('\n', 1)[0] || '';
     if (/^\s*```/.test(first)) return 'code';
+    if (isDisplayMathBlock(raw)) return 'math';
     if (isHeadingLine(first)) return 'heading';
     if (isHorizontalRule(first)) return 'rule';
     if (isTocLine(first)) return 'toc';
@@ -1312,6 +2846,8 @@ flowchart TD
         return renderToc(headingIndex.items);
       case 'code':
         return renderCodeBlock(block.raw, block);
+      case 'math':
+        return renderMathBlock(block.raw);
       case 'list':
         return renderList(block.raw, block);
       default: {
@@ -1403,6 +2939,21 @@ flowchart TD
     return `<pre class="code-block${langClass}">${languageControl}<code${codeClass}${langAttr}>${code}</code></pre>`;
   }
 
+  function renderMathBlock(raw) {
+    const source = displayMathSource(raw);
+    const body = source
+      ? renderKaTeX(source, true)
+      : '<span class="math-placeholder">$$$$</span>';
+    return [
+      '<div class="math-display"',
+      ` data-math-source="${escapeAttribute(source)}"`,
+      ' data-math-display="true"',
+      '>',
+      body,
+      '</div>',
+    ].join('');
+  }
+
   function renderParagraph(raw) {
     const lines = raw.split('\n');
     return `<p>${lines.map((line) => renderInline(line)).join('<br>')}</p>`;
@@ -1421,22 +2972,37 @@ flowchart TD
     const ordered = /^\s*\d+\.\s+/.test(lines[0]?.text || '');
     const tag = ordered ? 'ol' : 'ul';
     let hasTasks = false;
-    const items = lines.map((line) => {
+    const itemsData = [];
+
+    for (const line of lines) {
       const textLine = line.text.replace(/\n$/, '');
+      const markerLine = textLine.match(/^\s*(?:[-+*]|\d+\.)\s+(.*)$/);
+      if (!markerLine && itemsData.length) {
+        itemsData[itemsData.length - 1].lines.push(textLine.replace(/^\s{2,}/, ''));
+        continue;
+      }
+
       const taskLine = textLine.match(/^(\s*(?:[-+*]|\d+\.)\s+)\[( |x|X)\]\s+(.*)$/);
-      let text = textLine.replace(/^\s*(?:[-+*]|\d+\.)\s+/, '');
-      let checkbox = '';
-      let className = '';
+      const item = {
+        lines: [markerLine ? markerLine[1] : textLine],
+        checkbox: '',
+        className: '',
+      };
       if (taskLine) {
         hasTasks = true;
-        className = ' class="task-list-item"';
+        item.className = ' class="task-list-item"';
         const checked = taskLine[2].toLowerCase() === 'x' ? ' checked' : '';
         const taskOffset = Number.isFinite(block?.start) ? block.start + line.start + taskLine[1].length + 1 : '';
         const offsetAttr = taskOffset === '' ? '' : ` data-task-pos="${escapeAttribute(taskOffset)}"`;
-        checkbox = `<input class="task-checkbox" type="checkbox"${offsetAttr}${checked}>`;
-        text = taskLine[3];
+        item.checkbox = `<input class="task-checkbox" type="checkbox"${offsetAttr}${checked}>`;
+        item.lines[0] = taskLine[3];
       }
-      return `<li${className}>${checkbox}${renderInlineMarkdown(text)}</li>`;
+      itemsData.push(item);
+    }
+
+    const items = itemsData.map((item) => {
+      const body = item.lines.map((line) => renderInlineMarkdown(line)).join('<br>');
+      return `<li${item.className}>${item.checkbox}${body}</li>`;
     }).join('');
     const classAttr = hasTasks ? ' class="task-list"' : '';
     return `<${tag}${classAttr}>${items}</${tag}>`;
@@ -1472,14 +3038,14 @@ flowchart TD
       const url = parseMarkdownTarget(target);
       const safe = sanitizeImageUrl(url);
       if (!safe) return hold(`<span class="blocked-image">画像ブロック: ${escapeHtml(alt || 'no alt')}</span>`);
-      return hold(`<img alt="${escapeAttribute(alt)}" src="${escapeAttribute(safe)}">`);
+      return hold(`<img alt="${escapeAttribute(alt)}" src="${escapeAttribute(safe)}" data-markdown-src="${escapeAttribute(url)}">`);
     });
 
     text = text.replace(/\[([^\]]+)\]\((<[^>]+>|[^)]+)\)/g, (_match, label, target) => {
       const url = parseMarkdownTarget(target);
       const safe = sanitizeLinkUrl(url);
       if (!safe) return hold(`<span class="blocked-link">リンクブロック: ${escapeHtml(label)}</span>`);
-      return hold(`<a href="${escapeAttribute(safe)}" rel="noopener noreferrer" target="_blank">${escapeHtml(label)}</a>`);
+      return hold(`<a href="${escapeAttribute(safe)}" data-markdown-href="${escapeAttribute(url)}" rel="noopener noreferrer" target="_blank">${escapeHtml(label)}</a>`);
     });
 
     text = escapeHtml(text);
@@ -2179,6 +3745,8 @@ ${body}
       }
       const span = document.createElement(part.display ? 'div' : 'span');
       span.className = part.display ? 'math-display' : 'math-inline';
+      span.setAttribute('data-math-source', part.value);
+      span.setAttribute('data-math-display', String(part.display));
       span.innerHTML = renderKaTeX(part.value, part.display);
       fragment.appendChild(span);
     }
@@ -2424,6 +3992,36 @@ ${body}
   function isListLine(line) { return /^\s*(?:[-+*]|\d+\.)\s+/.test(line); }
   function isQuoteLine(line) { return /^\s*>/.test(line); }
   function hasPipe(line) { return line.includes('|'); }
+
+  function displayMathDelimiter(line) {
+    const trimmed = String(line || '').trim();
+    if (trimmed.startsWith('$$')) return '$$';
+    if (trimmed.startsWith('\\[')) return '\\[';
+    return '';
+  }
+
+  function isDisplayMathClosedLine(line, delimiter) {
+    const trimmed = String(line || '').trim();
+    if (delimiter === '$$') return trimmed.length >= 4 && trimmed.endsWith('$$');
+    if (delimiter === '\\[') return trimmed.endsWith('\\]');
+    return false;
+  }
+
+  function isDisplayMathBlock(raw) {
+    const delimiter = displayMathDelimiter(raw);
+    if (!delimiter) return false;
+    const trimmed = String(raw || '').trim();
+    return delimiter === '$$'
+      ? trimmed.length >= 4 && trimmed.endsWith('$$')
+      : trimmed.endsWith('\\]');
+  }
+
+  function displayMathSource(raw) {
+    const text = normalizeNewlines(String(raw || '').trim());
+    if (text.startsWith('$$') && text.endsWith('$$')) return text.slice(2, -2).replace(/^\n|\n$/g, '');
+    if (text.startsWith('\\[') && text.endsWith('\\]')) return text.slice(2, -2).replace(/^\n|\n$/g, '');
+    return text;
+  }
 
   function isTableStart(lines, index) {
     if (!lines[index] || !lines[index + 1]) return false;
