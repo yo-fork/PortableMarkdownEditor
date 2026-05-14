@@ -33,12 +33,14 @@ Markdown本文に含まれる `<script>`, `<img onerror=...>`, `<iframe>` など
 リンクと画像のURLは別々に検証します。
 
 - リンク: 完全ローカル性を優先し、相対リンクとアンカーのみ許可。`http`, `https`, `mailto`, `tel`, `file` などのスキーム付きURLはリンク化しません。
-- 画像: `data:image/png`, `data:image/jpeg`, `data:image/gif`, `data:image/webp`, `blob:` のみ許可。
+- 画像: `data:image/png`, `data:image/jpeg`, `data:image/gif`, `data:image/webp`, `blob:`, 相対パス、`file:` URL、Windowsドライブパス、UNCパスを許可。
 - `javascript:`, `vbscript:`, `data:text/html`, SVG data画像、プロトコル相対URL、外部リンク、外部画像はブロック。
 
 ### 4. 画像挿入の制限
 
-画像挿入は PNG/JPEG/GIF/WebP のみで、2MB以下に制限しています。画像は Data URL としてMarkdown本文に埋め込まれるため、外部サーバーから画像を取得しません。
+画像埋め込みは PNG/JPEG/GIF/WebP のみで、2MB以下に制限しています。画像は Data URL としてMarkdown本文に埋め込まれるため、外部サーバーから画像を取得しません。
+
+画像参照は PNG/JPEG/GIF/WebP の拡張子を持つローカル参照に限定しています。相対パス、`file:` URL、`Z:\share\image.png` のようなWindowsドライブパス、`\\server\share\image.png` のようなUNCパスを許可します。`http`/`https` 画像は許可しません。
 
 ### 5. 依存関係ゼロ
 

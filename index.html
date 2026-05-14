@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src data: blob:; media-src data: blob:; font-src 'self' data:; connect-src 'none'; worker-src 'none'; manifest-src 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: file:; media-src data: blob:; font-src 'self' data:; connect-src 'none'; worker-src 'none'; manifest-src 'none';">
   <title>Portable Markdown Editer</title>
   <link rel="stylesheet" href="./styles.css">
   <script src="./app.js" defer></script>
 </head>
-<body data-mode="split">
+<body data-mode="rich">
   <a class="skip-link" href="#mainWorkspace">本文へ移動</a>
 
   <div class="app-shell" id="appShell">
@@ -36,13 +36,16 @@
         <button type="button" data-action="format" data-format="h2" title="見出し2">H2</button>
         <button type="button" data-action="format" data-format="bold" title="太字">B</button>
         <button type="button" data-action="format" data-format="italic" title="斜体">I</button>
-        <button type="button" data-action="format" data-format="code" title="コード">{ }</button>
+        <button type="button" data-action="format" data-format="code" title="インラインコード">{ }</button>
+        <button type="button" data-action="insert-code-block" title="コードブロック">```</button>
         <button type="button" data-action="format" data-format="quote" title="引用">”</button>
         <button type="button" data-action="format" data-format="list" title="箇条書き">•</button>
         <button type="button" data-action="format" data-format="table" title="表">表</button>
         <button type="button" data-action="format" data-format="toc" title="目次">TOC</button>
         <button type="button" data-action="insert-link" title="リンク">リンク</button>
-        <button type="button" data-action="insert-image" title="画像をData URLとして埋め込む">画像</button>
+        <button type="button" data-action="insert-mermaid" title="Mermaid図を挿入">Mermaid</button>
+        <button type="button" data-action="insert-image" title="画像をData URLとして埋め込む">画像埋込</button>
+        <button type="button" data-action="insert-image-ref" title="ローカル/ネットワークドライブ画像を参照">画像参照</button>
       </nav>
 
       <div class="view-controls" role="group" aria-label="表示モード">
@@ -110,7 +113,7 @@
         <li>Content Security Policyで通信、埋め込み、フォーム送信、外部スクリプトを禁止。</li>
         <li>Markdown内のHTMLは実行せず、文字としてエスケープ。</li>
         <li>JavaScript URL、危険なプロトコル、外部画像読み込みをブロック。</li>
-        <li>画像はPNG/JPEG/GIF/WebPをData URLで埋め込む方式。</li>
+        <li>画像はPNG/JPEG/GIF/WebPのみ。Data URL埋め込み、相対パス、file URL、Windowsドライブ、UNCパスの参照に限定。</li>
         <li>データ保存はブラウザのlocalStorageとユーザー操作によるダウンロードのみ。</li>
       </ul>
       <menu>

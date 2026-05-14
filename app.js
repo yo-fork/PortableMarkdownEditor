@@ -4,7 +4,9 @@
   const STORAGE_KEY = 'portable-markdown-editer:draft:v1';
   const SETTINGS_KEY = 'portable-markdown-editer:settings:v1';
   const MAX_EMBEDDED_IMAGE_BYTES = 2 * 1024 * 1024;
+  const MAX_HIGHLIGHT_CHARS = 120000;
   const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+  const IMAGE_EXTENSION_PATTERN = /\.(?:png|jpe?g|gif|webp)(?:[?#].*)?$/i;
 
   const DEFAULT_MARKDOWN = `# Portable Markdown Editer
 
@@ -16,6 +18,8 @@
 
 - **ライブプレビュー**
 - Typora風のリッチ編集モード
+- Mermaid図
+- 主要言語のコードハイライト
 - Markdown / HTML の保存
 - PDF化・印刷
 - 自動復元
@@ -52,12 +56,26 @@
 const message = 'Hello local Markdown';
 console.log(message);
 \`\`\`
+
+\`\`\`python
+def hello(name: str) -> str:
+    return f"Hello, {name}"
+\`\`\`
+
+## Mermaid
+
+\`\`\`mermaid
+flowchart TD
+  A[Markdownを書く] --> B{安全にプレビュー}
+  B -->|OK| C[保存]
+  B -->|確認| D[修正]
+\`\`\`
 `;
 
   const state = {
     markdown: DEFAULT_MARKDOWN,
     fileName: 'untitled.md',
-    mode: 'split',
+    mode: 'rich',
     dirty: false,
     theme: 'light',
     outlineCollapsed: false,
@@ -102,7 +120,7 @@ console.log(message);
     const settings = readJson(SETTINGS_KEY);
     const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
     state.theme = settings?.theme || (prefersDark ? 'dark' : 'light');
-    state.mode = settings?.mode || 'split';
+    state.mode = settings?.mode || 'rich';
     state.outlineCollapsed = Boolean(settings?.outlineCollapsed);
   }
 
@@ -200,6 +218,15 @@ console.log(message);
       case 'insert-image':
         els.imageInput.click();
         break;
+      case 'insert-image-ref':
+        insertImageReference();
+        break;
+      case 'insert-code-block':
+        insertCodeBlock();
+        break;
+      case 'insert-mermaid':
+        insertMermaid();
+        break;
       case 'mode':
         applyMode(actionButton.dataset.mode || 'split');
         break;
@@ -254,6 +281,9 @@ console.log(message);
     } else if (key === 'k') {
       event.preventDefault();
       insertLink();
+    } else if (key === 'm' && event.shiftKey) {
+      event.preventDefault();
+      insertMermaid();
     }
   }
 
@@ -379,8 +409,7 @@ console.log(message);
   }
 
   function applyFormat(format) {
-    focusSourceIfNeeded();
-    const textarea = els.source;
+    const textarea = focusMarkdownInput();
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
     const selected = textarea.value.slice(start, end);
@@ -430,46 +459,105 @@ console.log(message);
   }
 
   function insertLink() {
-    focusSourceIfNeeded();
+    focusMarkdownInput();
     const label = getSelectedText() || 'リンク';
     const rawUrl = prompt('URLを入力してください。危険なURLはプレビュー時にブロックされます。', './README.md');
     if (!rawUrl) return;
     replaceSelection(`[${label}](${rawUrl.trim()})`);
   }
 
+  function insertImageReference() {
+    focusMarkdownInput();
+    const label = sanitizeMarkdownLabel(getSelectedText() || '画像');
+    const rawPath = prompt('画像パスを入力してください。例: ./images/pic.png, Z:\\share\\pic.png, \\\\server\\share\\pic.png', './images/example.png');
+    if (!rawPath) return;
+    const path = rawPath.trim();
+    if (!sanitizeImageUrl(path)) {
+      setStatus('PNG/JPEG/GIF/WebPのローカル画像パスのみ参照できます');
+      return;
+    }
+    replaceSelection(`![${label}](${formatMarkdownTarget(path)})`);
+    setStatus('ローカル画像参照を挿入しました');
+  }
+
+  function insertCodeBlock() {
+    focusMarkdownInput();
+    const selected = getSelectedText();
+    const lang = safeCodeLanguage(prompt('言語名を入力してください。例: js, ts, python, html, css, json, bash, powershell, sql', 'js') || '');
+    const fence = lang ? `\`\`\`${lang}` : '```';
+    replaceSelection(`${fence}\n${selected || 'code'}\n\`\`\``);
+  }
+
+  function insertMermaid() {
+    focusMarkdownInput();
+    const selected = getSelectedText().trim();
+    const body = selected || 'flowchart TD\n  A[開始] --> B{確認}\n  B -->|OK| C[完了]\n  B -->|修正| A';
+    replaceSelection(`\`\`\`mermaid\n${body}\n\`\`\``);
+  }
+
   function prefixLines(text, prefix) {
     return text.split('\n').map((line) => line ? `${prefix}${line}` : prefix.trim()).join('\n');
   }
 
-  function focusSourceIfNeeded() {
+  function sanitizeMarkdownLabel(value) {
+    return String(value || '画像').replace(/[\]\r\n]/g, ' ').trim() || '画像';
+  }
+
+  function formatMarkdownTarget(value) {
+    const target = String(value || '').trim().replace(/[<>]/g, '');
+    return /[\s()\\]/.test(target) ? `<${target}>` : target;
+  }
+
+  function safeCodeLanguage(value) {
+    const match = String(value || '').trim().match(/^[A-Za-z0-9_+.-]{1,32}/);
+    return match ? match[0] : '';
+  }
+
+  function focusMarkdownInput() {
+    const blockEditor = state.currentBlockEditor && state.currentBlockEditor.querySelector('.block-editor');
+    if (blockEditor) {
+      blockEditor.focus();
+      return blockEditor;
+    }
     if (state.mode === 'rich' || state.mode === 'preview') applyMode('split');
     els.source.focus();
+    return els.source;
   }
 
   function getSelectedText() {
-    return els.source.value.slice(els.source.selectionStart, els.source.selectionEnd);
+    const textarea = getActiveMarkdownInput();
+    return textarea.value.slice(textarea.selectionStart, textarea.selectionEnd);
   }
 
   function insertAtSelection(text) {
-    focusSourceIfNeeded();
+    focusMarkdownInput();
     replaceSelection(text);
   }
 
   function replaceSelection(replacement, selectionStart, selectionEnd) {
-    const textarea = els.source;
+    const textarea = getActiveMarkdownInput();
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
     const before = textarea.value.slice(0, start);
     const after = textarea.value.slice(end);
     textarea.value = before + replacement + after;
-    state.markdown = normalizeNewlines(textarea.value);
     const nextStart = Number.isInteger(selectionStart) ? selectionStart : start + replacement.length;
     const nextEnd = Number.isInteger(selectionEnd) ? selectionEnd : nextStart;
     textarea.setSelectionRange(nextStart, nextEnd);
     textarea.focus();
+    if (textarea !== els.source) {
+      setStatus('ブロック編集欄に挿入しました');
+      return;
+    }
+    state.markdown = normalizeNewlines(textarea.value);
     markDirty();
     renderAll('edit');
     scheduleAutosave();
+  }
+
+  function getActiveMarkdownInput() {
+    const blockEditor = state.currentBlockEditor && state.currentBlockEditor.querySelector('.block-editor');
+    return blockEditor || els.source;
   }
 
   function applyMode(mode) {
@@ -839,10 +927,15 @@ console.log(message);
     const lines = raw.split('\n');
     const first = lines.shift() || '';
     if (lines.length && /^\s*```\s*$/.test(lines[lines.length - 1])) lines.pop();
-    const lang = (first.replace(/^\s*```/, '').trim().match(/^[A-Za-z0-9_+.-]{1,32}/) || [''])[0];
-    const code = escapeHtml(lines.join('\n'));
+    const lang = safeCodeLanguage(first.replace(/^\s*```/, ''));
+    const codeText = lines.join('\n');
+    const normalizedLang = normalizeCodeLanguage(lang);
+    if (normalizedLang === 'mermaid') return renderMermaidBlock(codeText);
+    const code = highlightCode(codeText, normalizedLang);
     const langAttr = lang ? ` data-lang="${escapeAttribute(lang)}"` : '';
-    return `<pre><code${langAttr}>${code}</code></pre>`;
+    const langClass = normalizedLang ? ` language-${escapeAttribute(normalizedLang)}` : '';
+    const label = normalizedLang ? `<span class="code-lang">${escapeHtml(normalizedLang)}</span>` : '';
+    return `<pre class="code-block${langClass}">${label}<code${langAttr}>${code}</code></pre>`;
   }
 
   function renderParagraph(raw) {
@@ -905,14 +998,14 @@ console.log(message);
 
     let text = raw.replace(/`([^`]+)`/g, (_match, code) => hold(`<code>${escapeHtml(code)}</code>`));
 
-    text = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_match, alt, target) => {
+    text = text.replace(/!\[([^\]]*)\]\((<[^>]+>|[^)]+)\)/g, (_match, alt, target) => {
       const url = parseMarkdownTarget(target);
       const safe = sanitizeImageUrl(url);
       if (!safe) return hold(`<span class="blocked-image">画像ブロック: ${escapeHtml(alt || 'no alt')}</span>`);
       return hold(`<img alt="${escapeAttribute(alt)}" src="${escapeAttribute(safe)}">`);
     });
 
-    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, target) => {
+    text = text.replace(/\[([^\]]+)\]\((<[^>]+>|[^)]+)\)/g, (_match, label, target) => {
       const url = parseMarkdownTarget(target);
       const safe = sanitizeLinkUrl(url);
       if (!safe) return hold(`<span class="blocked-link">リンクブロック: ${escapeHtml(label)}</span>`);
@@ -952,6 +1045,496 @@ console.log(message);
     return { items, byOffset };
   }
 
+  function normalizeCodeLanguage(lang) {
+    const value = String(lang || '').trim().toLowerCase().replace(/^language-/, '');
+    const aliases = {
+      cjs: 'js',
+      javascript: 'js',
+      jsx: 'js',
+      mjs: 'js',
+      node: 'js',
+      py: 'python',
+      python3: 'python',
+      ts: 'ts',
+      tsx: 'ts',
+      typescript: 'ts',
+      htm: 'html',
+      xhtml: 'html',
+      xml: 'html',
+      yml: 'yaml',
+      'c++': 'cpp',
+      cs: 'csharp',
+      golang: 'go',
+      rs: 'rust',
+      kt: 'kotlin',
+      sh: 'bash',
+      shell: 'bash',
+      zsh: 'bash',
+      ps: 'powershell',
+      ps1: 'powershell',
+      pwsh: 'powershell',
+      mermaidjs: 'mermaid',
+      mmd: 'mermaid',
+    };
+    return aliases[value] || value;
+  }
+
+  function highlightCode(code, lang) {
+    const text = String(code || '');
+    if (!lang || text.length > MAX_HIGHLIGHT_CHARS) return escapeHtml(text);
+    if (lang === 'html') return highlightWithRules(text, htmlHighlightRules());
+    if (lang === 'css') return highlightWithRules(text, cssHighlightRules());
+    if (lang === 'json') return highlightWithRules(text, jsonHighlightRules());
+    if (lang === 'python') return highlightWithRules(text, pythonHighlightRules());
+    if (lang === 'bash') return highlightWithRules(text, bashHighlightRules());
+    if (lang === 'powershell') return highlightWithRules(text, powershellHighlightRules());
+    if (lang === 'sql') return highlightWithRules(text, sqlHighlightRules());
+    if (lang === 'yaml') return highlightWithRules(text, yamlHighlightRules());
+    if (['js', 'ts', 'java', 'c', 'cpp', 'csharp', 'go', 'rust', 'php', 'swift', 'kotlin'].includes(lang)) {
+      return highlightWithRules(text, cLikeHighlightRules(lang));
+    }
+    return escapeHtml(text);
+  }
+
+  function highlightWithRules(code, rules) {
+    let html = '';
+    let offset = 0;
+    while (offset < code.length) {
+      let matched = false;
+      for (const rule of rules) {
+        rule.pattern.lastIndex = offset;
+        const match = rule.pattern.exec(code);
+        if (!match || match.index !== offset || !match[0]) continue;
+        html += `<span class="tok-${rule.token}">${escapeHtml(match[0])}</span>`;
+        offset += match[0].length;
+        matched = true;
+        break;
+      }
+      if (!matched) {
+        html += escapeHtml(code[offset]);
+        offset += 1;
+      }
+    }
+    return html;
+  }
+
+  function cLikeHighlightRules(lang) {
+    const keywordSets = {
+      js: 'as async await break case catch class const continue debugger default delete do else export extends finally for from function get if import in instanceof let new of return set static super switch this throw try typeof var void while with yield',
+      ts: 'abstract any as async await boolean break case catch class const constructor continue debugger declare default delete do else enum export extends false finally for from function get if implements import in infer instanceof interface keyof let module namespace never new null number object of private protected public readonly return set static string super switch symbol this throw true try type typeof undefined unknown var void while with yield',
+      java: 'abstract assert boolean break byte case catch char class const continue default do double else enum extends final finally float for goto if implements import instanceof int interface long native new package private protected public return short static strictfp super switch synchronized this throw throws transient try void volatile while',
+      c: 'auto break case char const continue default do double else enum extern float for goto if inline int long register restrict return short signed sizeof static struct switch typedef union unsigned void volatile while',
+      cpp: 'alignas alignof auto bool break case catch char class const constexpr continue default delete do double else enum explicit export extern false final float for friend goto if inline int long namespace new noexcept nullptr operator override private protected public register reinterpret_cast return short signed sizeof static struct switch template this throw true try typedef typename union unsigned using virtual void volatile while',
+      csharp: 'abstract as base bool break byte case catch char checked class const continue decimal default delegate do double else enum event explicit extern false finally fixed float for foreach goto if implicit in int interface internal is lock long namespace new null object operator out override params private protected public readonly ref return sbyte sealed short sizeof stackalloc static string struct switch this throw true try typeof uint ulong unchecked unsafe ushort using virtual void volatile while',
+      go: 'break case chan const continue default defer else fallthrough for func go goto if import interface map package range return select struct switch type var',
+      rust: 'as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while',
+      php: 'abstract and array as break callable case catch class clone const continue declare default die do echo else elseif empty enddeclare endfor endforeach endif endswitch endwhile eval exit extends final finally fn for foreach function global goto if implements include include_once instanceof insteadof interface isset list namespace new or print private protected public require require_once return static switch throw trait try unset use var while xor yield',
+      swift: 'as associatedtype break case catch class continue default defer deinit do else enum extension fallthrough false fileprivate for func guard if import in init inout internal is let nil open operator private protocol public repeat rethrows return self static struct subscript super switch throw throws true try typealias var where while',
+      kotlin: 'as break class continue do else false for fun if in interface is null object package return super this throw true try typealias val var when while',
+    };
+    return [
+      { token: 'comment', pattern: /\/\*[\s\S]*?\*\/|\/\/[^\n]*/y },
+      { token: 'string', pattern: /`(?:\\[\s\S]|[^`\\])*`|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'/y },
+      { token: 'number', pattern: /\b(?:0x[\da-fA-F]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/y },
+      { token: 'keyword', pattern: keywordRegex(keywordSets[lang] || keywordSets.js) },
+      { token: 'function', pattern: /\b[A-Za-z_$][\w$]*(?=\s*\()/y },
+      { token: 'operator', pattern: /[{}\[\]().,;:+\-*/%=&|!<>?~^]+/y },
+    ];
+  }
+
+  function pythonHighlightRules() {
+    return [
+      { token: 'comment', pattern: /#[^\n]*/y },
+      { token: 'string', pattern: /(?:[rRubBfF]{0,2})("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*')/y },
+      { token: 'number', pattern: /\b(?:0x[\da-fA-F]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/y },
+      { token: 'keyword', pattern: keywordRegex('and as assert async await break class continue def del elif else except False finally for from global if import in is lambda None nonlocal not or pass raise return True try while with yield') },
+      { token: 'function', pattern: /\b[A-Za-z_]\w*(?=\s*\()/y },
+      { token: 'operator', pattern: /[{}\[\]().,;:+\-*/%=&|!<>?~^]+/y },
+    ];
+  }
+
+  function htmlHighlightRules() {
+    return [
+      { token: 'comment', pattern: /<!--[\s\S]*?-->/y },
+      { token: 'keyword', pattern: /<!doctype[^>]*>/iy },
+      { token: 'tag', pattern: /<\/?[A-Za-z][^<>\n]*\/?>/y },
+      { token: 'string', pattern: /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'/y },
+    ];
+  }
+
+  function cssHighlightRules() {
+    return [
+      { token: 'comment', pattern: /\/\*[\s\S]*?\*\//y },
+      { token: 'string', pattern: /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'/y },
+      { token: 'number', pattern: /#[\da-fA-F]{3,8}\b|\b\d+(?:\.\d+)?(?:px|rem|em|vh|vw|%|s|ms|deg)?\b/y },
+      { token: 'keyword', pattern: /@[A-Za-z-]+|--?[A-Za-z][\w-]*(?=\s*:)/y },
+      { token: 'operator', pattern: /[{}\[\]().,;:+\-*/%=&|!<>?~^#]+/y },
+    ];
+  }
+
+  function jsonHighlightRules() {
+    return [
+      { token: 'property', pattern: /"(?:\\[\s\S]|[^"\\])*"(?=\s*:)/y },
+      { token: 'string', pattern: /"(?:\\[\s\S]|[^"\\])*"/y },
+      { token: 'number', pattern: /-?\b\d+(?:\.\d+)?(?:e[+-]?\d+)?\b/iy },
+      { token: 'keyword', pattern: /\b(?:true|false|null)\b/y },
+      { token: 'operator', pattern: /[{}\[\]:,]/y },
+    ];
+  }
+
+  function bashHighlightRules() {
+    return [
+      { token: 'comment', pattern: /#[^\n]*/y },
+      { token: 'string', pattern: /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'/y },
+      { token: 'property', pattern: /\$[{(]?[A-Za-z_][\w]*[})]?|\$\d+/y },
+      { token: 'keyword', pattern: keywordRegex('case do done elif else esac fi for function if in select then until while') },
+      { token: 'function', pattern: /\b[A-Za-z_][\w.-]*(?=\s)/y },
+      { token: 'operator', pattern: /[|&;(){}\[\]<>!=]+/y },
+    ];
+  }
+
+  function powershellHighlightRules() {
+    return [
+      { token: 'comment', pattern: /<#[\s\S]*?#>|#[^\n]*/y },
+      { token: 'string', pattern: /@"[\s\S]*?"@|@'[\s\S]*?'@|"(?:`[\s\S]|[^"`])*"|'(?:''|[^'])*'/y },
+      { token: 'property', pattern: /\$[A-Za-z_][\w:]*|\$\{[^}]+\}/y },
+      { token: 'keyword', pattern: keywordRegex('begin break catch class continue data define do dynamicparam else elseif end exit filter finally for foreach from function if in param process return switch throw trap try until using var while') },
+      { token: 'function', pattern: /\b[A-Za-z]+-[A-Za-z]+\b/y },
+      { token: 'operator', pattern: /-[A-Za-z]+|[|&;(){}\[\]<>!=]+/y },
+    ];
+  }
+
+  function sqlHighlightRules() {
+    return [
+      { token: 'comment', pattern: /\/\*[\s\S]*?\*\/|--[^\n]*/y },
+      { token: 'string', pattern: /'(?:''|[^'])*'|"(?:\\[\s\S]|[^"\\])*"/y },
+      { token: 'number', pattern: /\b\d+(?:\.\d+)?\b/y },
+      { token: 'keyword', pattern: keywordRegex('add all alter and as asc between by case create delete desc distinct drop else exists from group having in inner insert into is join left like limit not null on or order outer primary references right select set table then union update values when where') },
+      { token: 'function', pattern: /\b[A-Za-z_]\w*(?=\s*\()/y },
+      { token: 'operator', pattern: /[(),.;*+=<>!-]+/y },
+    ];
+  }
+
+  function yamlHighlightRules() {
+    return [
+      { token: 'comment', pattern: /#[^\n]*/y },
+      { token: 'property', pattern: /[A-Za-z0-9_.-]+(?=\s*:)/y },
+      { token: 'string', pattern: /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'/y },
+      { token: 'number', pattern: /\b\d+(?:\.\d+)?\b/y },
+      { token: 'keyword', pattern: /\b(?:true|false|null|yes|no|on|off)\b/y },
+      { token: 'operator', pattern: /[:\[\]{},&*|>!\-]+/y },
+    ];
+  }
+
+  function keywordRegex(words) {
+    return new RegExp(`\\b(?:${words.trim().split(/\s+/).join('|')})\\b`, 'y');
+  }
+
+  function renderMermaidBlock(code) {
+    const text = normalizeNewlines(code).trim();
+    const first = text.split('\n').find((line) => {
+      const trimmed = line.trim();
+      return trimmed && !trimmed.startsWith('%%');
+    }) || '';
+    if (/^(?:graph|flowchart)\b/i.test(first)) return renderMermaidFlowchart(text);
+    if (/^sequenceDiagram\b/i.test(first)) return renderMermaidSequence(text);
+    return renderMermaidFallback(text, '未対応のMermaid構文');
+  }
+
+  function renderMermaidFallback(code, message) {
+    return [
+      '<figure class="mermaid-diagram mermaid-fallback">',
+      `<figcaption>Mermaid <span>${escapeHtml(message)}</span></figcaption>`,
+      `<pre class="code-block language-mermaid"><code data-lang="mermaid">${escapeHtml(code)}</code></pre>`,
+      '</figure>',
+    ].join('');
+  }
+
+  function renderMermaidFlowchart(code) {
+    const parsed = parseMermaidFlowchart(code);
+    if (!parsed.nodes.size) return renderMermaidFallback(code, '表示できるノードがありません');
+
+    const layout = layoutFlowchart(parsed);
+    const markerId = `pme-arrow-${hashString(code)}`;
+    const nodes = Array.from(parsed.nodes.values()).map((node) => renderFlowNode(node, layout.positions.get(node.id))).join('');
+    const edges = parsed.edges.map((edge) => renderFlowEdge(edge, layout.positions, parsed.direction, markerId)).join('');
+
+    return [
+      '<figure class="mermaid-diagram mermaid-flowchart">',
+      '<figcaption>Mermaid flowchart</figcaption>',
+      `<svg class="mermaid-svg" role="img" aria-label="Mermaid flowchart" viewBox="0 0 ${layout.width} ${layout.height}">`,
+      `<defs><marker id="${markerId}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>`,
+      edges,
+      nodes,
+      '</svg>',
+      '</figure>',
+    ].join('');
+  }
+
+  function parseMermaidFlowchart(code) {
+    const lines = normalizeNewlines(code).split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('%%'));
+    const header = lines.shift() || '';
+    const direction = (header.match(/\b(TD|TB|BT|LR|RL)\b/i) || ['TD', 'TD'])[1].toUpperCase();
+    const nodes = new Map();
+    const edges = [];
+
+    for (const rawLine of lines) {
+      const line = rawLine.replace(/;$/, '').trim();
+      if (!line || /^(?:subgraph|end|classDef|class|style|linkStyle)\b/i.test(line)) continue;
+      const edge = parseMermaidEdgeLine(line);
+      if (edge) {
+        addFlowNode(nodes, edge.from);
+        addFlowNode(nodes, edge.to);
+        edges.push({ from: edge.from.id, to: edge.to.id, label: edge.label });
+        continue;
+      }
+      const node = parseMermaidNodeToken(line);
+      if (node) addFlowNode(nodes, node);
+    }
+
+    return { direction, nodes, edges };
+  }
+
+  function parseMermaidEdgeLine(line) {
+    let match = line.match(/^(.+?)\s*--\s*([^->]+?)\s*-->\s*(.+)$/);
+    if (match) {
+      return {
+        from: parseMermaidNodeToken(match[1]),
+        to: parseMermaidNodeToken(match[3]),
+        label: match[2].trim(),
+      };
+    }
+    match = line.match(/^(.+?)\s*(-->|---|==>|-.->)(?:\|([^|]+)\|)?\s*(.+)$/);
+    if (!match) return null;
+    const from = parseMermaidNodeToken(match[1]);
+    const to = parseMermaidNodeToken(match[4]);
+    if (!from || !to) return null;
+    return { from, to, label: (match[3] || '').trim() };
+  }
+
+  function parseMermaidNodeToken(value) {
+    const token = String(value || '').trim().replace(/:::[A-Za-z][\w-]*$/, '').trim();
+    const match = token.match(/^([A-Za-z][\w-]*)(?:(\[\[([^\]]+)\]\])|(\[([^\]]+)\])|(\(\(([^\)]+)\)\))|(\(([^\)]+)\))|(\{([^}]+)\})|(>([^\]]+)\]))?$/);
+    if (!match) return null;
+    const label = match[3] || match[5] || match[7] || match[9] || match[11] || match[13] || match[1];
+    let shape = 'rect';
+    if (match[6]) shape = 'circle';
+    if (match[8]) shape = 'stadium';
+    if (match[10]) shape = 'diamond';
+    if (match[12]) shape = 'asymmetric';
+    return { id: match[1], label: label.trim(), shape };
+  }
+
+  function addFlowNode(nodes, node) {
+    if (!node || !node.id) return;
+    const existing = nodes.get(node.id);
+    if (existing && existing.label !== existing.id) return;
+    nodes.set(node.id, node);
+  }
+
+  function layoutFlowchart(parsed) {
+    const ids = Array.from(parsed.nodes.keys());
+    const levels = new Map(ids.map((id) => [id, 0]));
+    for (let pass = 0; pass < ids.length; pass += 1) {
+      let changed = false;
+      for (const edge of parsed.edges) {
+        const next = Math.min((levels.get(edge.from) || 0) + 1, ids.length);
+        if (next > (levels.get(edge.to) || 0)) {
+          levels.set(edge.to, next);
+          changed = true;
+        }
+      }
+      if (!changed) break;
+    }
+
+    const groups = [];
+    for (const id of ids) {
+      const level = levels.get(id) || 0;
+      groups[level] ||= [];
+      groups[level].push(id);
+    }
+
+    const horizontal = ['LR', 'RL'].includes(parsed.direction);
+    const nodeWidth = 180;
+    const nodeHeight = 58;
+    const levelGap = 72;
+    const itemGap = 40;
+    const pad = 34;
+    const maxItems = Math.max(1, ...groups.map((group) => group.length));
+    const levelCount = Math.max(1, groups.length);
+    const width = horizontal ? pad * 2 + levelCount * nodeWidth + (levelCount - 1) * levelGap : pad * 2 + maxItems * nodeWidth + (maxItems - 1) * itemGap;
+    const height = horizontal ? pad * 2 + maxItems * nodeHeight + (maxItems - 1) * itemGap : pad * 2 + levelCount * nodeHeight + (levelCount - 1) * levelGap;
+    const positions = new Map();
+
+    groups.forEach((group, level) => {
+      const groupSpan = group.length * (horizontal ? nodeHeight : nodeWidth) + (group.length - 1) * itemGap;
+      const crossStart = ((horizontal ? height : width) - groupSpan) / 2;
+      group.forEach((id, index) => {
+        const main = pad + level * ((horizontal ? nodeWidth : nodeHeight) + levelGap);
+        const cross = crossStart + index * ((horizontal ? nodeHeight : nodeWidth) + itemGap);
+        positions.set(id, horizontal
+          ? { x: main, y: cross, width: nodeWidth, height: nodeHeight }
+          : { x: cross, y: main, width: nodeWidth, height: nodeHeight });
+      });
+    });
+
+    return { width, height, positions };
+  }
+
+  function renderFlowNode(node, box) {
+    if (!box) return '';
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
+    const text = renderSvgText(node.label, cx, cy, 18, 'mermaid-node-label');
+    if (node.shape === 'diamond') {
+      const points = `${cx},${box.y} ${box.x + box.width},${cy} ${cx},${box.y + box.height} ${box.x},${cy}`;
+      return `<g class="mermaid-node mermaid-node-diamond"><polygon points="${points}"></polygon>${text}</g>`;
+    }
+    if (node.shape === 'circle') {
+      return `<g class="mermaid-node mermaid-node-circle"><ellipse cx="${cx}" cy="${cy}" rx="${box.width / 2}" ry="${box.height / 2}"></ellipse>${text}</g>`;
+    }
+    const rx = node.shape === 'stadium' ? box.height / 2 : 10;
+    return `<g class="mermaid-node mermaid-node-${escapeAttribute(node.shape)}"><rect x="${box.x}" y="${box.y}" width="${box.width}" height="${box.height}" rx="${rx}"></rect>${text}</g>`;
+  }
+
+  function renderFlowEdge(edge, positions, direction, markerId) {
+    const from = positions.get(edge.from);
+    const to = positions.get(edge.to);
+    if (!from || !to) return '';
+    const horizontal = ['LR', 'RL'].includes(direction);
+    const x1 = horizontal ? from.x + from.width : from.x + from.width / 2;
+    const y1 = horizontal ? from.y + from.height / 2 : from.y + from.height;
+    const x2 = horizontal ? to.x : to.x + to.width / 2;
+    const y2 = horizontal ? to.y + to.height / 2 : to.y;
+    const label = edge.label
+      ? `<text class="mermaid-edge-label" x="${(x1 + x2) / 2}" y="${(y1 + y2) / 2 - 8}">${escapeHtml(edge.label)}</text>`
+      : '';
+    return `<g class="mermaid-edge"><path d="M ${x1} ${y1} L ${x2} ${y2}" marker-end="url(#${markerId})"></path>${label}</g>`;
+  }
+
+  function renderMermaidSequence(code) {
+    const parsed = parseMermaidSequence(code);
+    if (!parsed.participants.length || !parsed.events.length) return renderMermaidFallback(code, '表示できるシーケンスがありません');
+    const pad = 38;
+    const participantGap = 190;
+    const headerHeight = 52;
+    const rowGap = 58;
+    const width = Math.max(360, pad * 2 + (parsed.participants.length - 1) * participantGap + 150);
+    const height = pad * 2 + headerHeight + parsed.events.length * rowGap + 20;
+    const xFor = new Map(parsed.participants.map((participant, index) => [participant.id, pad + 75 + index * participantGap]));
+    const markerId = `pme-seq-arrow-${hashString(code)}`;
+
+    const lifelines = parsed.participants.map((participant) => {
+      const x = xFor.get(participant.id);
+      return [
+        `<g class="mermaid-seq-participant"><rect x="${x - 68}" y="${pad}" width="136" height="36" rx="8"></rect>`,
+        renderSvgText(participant.label, x, pad + 18, 16, 'mermaid-node-label'),
+        `<path class="mermaid-lifeline" d="M ${x} ${pad + 36} L ${x} ${height - pad}"></path></g>`,
+      ].join('');
+    }).join('');
+
+    const events = parsed.events.map((event, index) => {
+      const y = pad + headerHeight + index * rowGap;
+      if (event.type === 'note') {
+        const ids = event.ids.filter((id) => xFor.has(id));
+        const left = Math.min(...ids.map((id) => xFor.get(id))) - 68;
+        const right = Math.max(...ids.map((id) => xFor.get(id))) + 68;
+        return `<g class="mermaid-note"><rect x="${left}" y="${y - 18}" width="${right - left}" height="38" rx="8"></rect>${renderSvgText(event.text, (left + right) / 2, y + 1, 28, 'mermaid-node-label')}</g>`;
+      }
+      const x1 = xFor.get(event.from);
+      const x2 = xFor.get(event.to);
+      const textX = (x1 + x2) / 2;
+      const textY = y - 8;
+      return `<g class="mermaid-message"><path d="M ${x1} ${y} L ${x2} ${y}" marker-end="url(#${markerId})"></path><text x="${textX}" y="${textY}">${escapeHtml(event.text)}</text></g>`;
+    }).join('');
+
+    return [
+      '<figure class="mermaid-diagram mermaid-sequence">',
+      '<figcaption>Mermaid sequenceDiagram</figcaption>',
+      `<svg class="mermaid-svg" role="img" aria-label="Mermaid sequence diagram" viewBox="0 0 ${width} ${height}">`,
+      `<defs><marker id="${markerId}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>`,
+      lifelines,
+      events,
+      '</svg>',
+      '</figure>',
+    ].join('');
+  }
+
+  function parseMermaidSequence(code) {
+    const lines = normalizeNewlines(code).split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('%%') && !/^sequenceDiagram\b/i.test(line));
+    const participants = new Map();
+    const events = [];
+    const ensureParticipant = (id, label = id) => {
+      if (/^[A-Za-z][\w-]*$/.test(id) && !participants.has(id)) participants.set(id, { id, label });
+    };
+
+    for (const line of lines) {
+      let match = line.match(/^(?:participant|actor)\s+([A-Za-z][\w-]*)(?:\s+as\s+(.+))?$/i);
+      if (match) {
+        ensureParticipant(match[1], (match[2] || match[1]).trim());
+        continue;
+      }
+      match = line.match(/^Note\s+(?:over|right of|left of)\s+([^:]+):\s*(.+)$/i);
+      if (match) {
+        const ids = match[1].split(',').map((item) => item.trim()).filter(Boolean);
+        ids.forEach((id) => ensureParticipant(id));
+        events.push({ type: 'note', ids, text: match[2].trim() });
+        continue;
+      }
+      match = line.match(/^([A-Za-z][\w-]*)\s*(?:-+|=+)[>x.)-]*\s*([A-Za-z][\w-]*)\s*:\s*(.+)$/);
+      if (match) {
+        ensureParticipant(match[1]);
+        ensureParticipant(match[2]);
+        events.push({ type: 'message', from: match[1], to: match[2], text: match[3].trim() });
+      }
+    }
+    return { participants: Array.from(participants.values()), events };
+  }
+
+  function renderSvgText(label, x, y, maxChars, className) {
+    const lines = splitSvgLabel(label, maxChars);
+    const lineHeight = 15;
+    const firstOffset = lines.length > 1 ? -((lines.length - 1) * lineHeight) / 2 : 5;
+    const tspans = lines.map((line, index) => {
+      const dy = index === 0 ? firstOffset : lineHeight;
+      return `<tspan x="${x}" dy="${dy}">${escapeHtml(line)}</tspan>`;
+    }).join('');
+    return `<text class="${escapeAttribute(className || '')}" x="${x}" y="${y}" text-anchor="middle">${tspans}</text>`;
+  }
+
+  function splitSvgLabel(label, maxChars) {
+    const value = String(label || '').trim() || ' ';
+    const words = value.includes(' ') ? value.split(/\s+/) : value.match(new RegExp(`.{1,${maxChars}}`, 'g')) || [value];
+    const lines = [];
+    let current = '';
+    for (const word of words) {
+      const next = current ? `${current} ${word}` : word;
+      if (next.length > maxChars && current) {
+        lines.push(current);
+        current = word;
+      } else {
+        current = next;
+      }
+    }
+    if (current) lines.push(current);
+    if (lines.length <= 3) return lines;
+    return [...lines.slice(0, 2), `${lines[2].slice(0, Math.max(1, maxChars - 1))}…`];
+  }
+
+  function hashString(value) {
+    let hash = 2166136261;
+    const text = String(value || '');
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
   function buildExportHtml(markdown, fileName) {
     const title = escapeHtml(stripExtension(fileName || 'Markdown Document'));
     const body = renderMarkdownHtml(markdown);
@@ -962,10 +1545,10 @@ console.log(message);
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data: blob: file:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none';">
 <title>${title}</title>
 <style>
-body{margin:0;padding:clamp(1rem,4vw,4rem);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.75;color:#111827;background:#fff}main{max-width:920px;margin:auto}h1,h2{border-bottom:1px solid #e5e7eb;padding-bottom:.25rem}pre{overflow:auto;background:#0f172a;color:#e5e7eb;border-radius:.75rem;padding:1rem}code{font-family:Consolas,monospace;background:#f3f4f6;border-radius:.25rem;padding:.1rem .25rem}pre code{background:transparent;padding:0}blockquote{border-left:.25rem solid #2563eb;margin:1rem 0;padding:.25rem 1rem;background:#eff6ff}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d1d5db;padding:.5rem}.align-left{text-align:left}.align-center{text-align:center}.align-right{text-align:right}img{max-width:100%}.meta{color:#6b7280;font-size:.9rem}.blocked-image,.blocked-link{color:#b42318;border:1px solid #f3b8b1;border-radius:.3rem;padding:.1rem .3rem}.toc{border:1px solid #e5e7eb;border-radius:.75rem;padding:1rem}.toc a{display:block;color:#2563eb;text-decoration:none}
+body{margin:0;padding:clamp(1rem,4vw,4rem);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.75;color:#111827;background:#fff}main{max-width:920px;margin:auto}h1,h2{border-bottom:1px solid #e5e7eb;padding-bottom:.25rem}pre{overflow:auto;background:#0f172a;color:#e5e7eb;border-radius:.75rem;padding:1rem}code{font-family:Consolas,monospace;background:#f3f4f6;border-radius:.25rem;padding:.1rem .25rem}pre code{background:transparent;padding:0}.code-lang{float:right;color:#94a3b8;font:700 .72rem system-ui}.tok-comment{color:#94a3b8}.tok-string{color:#a7f3d0}.tok-number{color:#fde68a}.tok-keyword{color:#93c5fd}.tok-function{color:#f9a8d4}.tok-property{color:#c4b5fd}.tok-tag{color:#fca5a5}.tok-operator{color:#cbd5e1}blockquote{border-left:.25rem solid #2563eb;margin:1rem 0;padding:.25rem 1rem;background:#eff6ff}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d1d5db;padding:.5rem}.align-left{text-align:left}.align-center{text-align:center}.align-right{text-align:right}img{max-width:100%}.meta{color:#6b7280;font-size:.9rem}.blocked-image,.blocked-link{color:#b42318;border:1px solid #f3b8b1;border-radius:.3rem;padding:.1rem .3rem}.toc{border:1px solid #e5e7eb;border-radius:.75rem;padding:1rem}.toc a{display:block;color:#2563eb;text-decoration:none}.mermaid-diagram{margin:1.25rem 0}.mermaid-diagram figcaption{font-weight:700;color:#475569;margin-bottom:.4rem}.mermaid-svg{width:100%;height:auto;border:1px solid #d1d5db;border-radius:.75rem;background:#f8fafc}.mermaid-node rect,.mermaid-node ellipse,.mermaid-node polygon,.mermaid-seq-participant rect{fill:#fff;stroke:#2563eb;stroke-width:1.5}.mermaid-edge path,.mermaid-message path{stroke:#334155;stroke-width:1.6;fill:none}.mermaid-edge-label,.mermaid-message text{font:12px system-ui;fill:#475569;text-anchor:middle}.mermaid-node-label{font:12px system-ui;fill:#0f172a}.mermaid-lifeline{stroke:#94a3b8;stroke-dasharray:5 5}.mermaid-note rect{fill:#fef3c7;stroke:#f59e0b}
 </style>
 </head>
 <body>
@@ -993,15 +1576,73 @@ ${body}
   }
 
   function sanitizeImageUrl(raw) {
-    const value = cleanupUrl(raw);
+    const value = cleanupUrl(raw, { keepSpaces: true });
+    const compact = cleanupUrl(raw);
     if (!value) return '';
-    if (value.startsWith('blob:')) return value;
-    if (/^data:image\/(png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=\s]+$/i.test(value)) return value.replace(/\s/g, '');
+    if (compact.startsWith('blob:')) return compact;
+    if (/^data:image\/(png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=\s]+$/i.test(compact)) return compact.replace(/\s/g, '');
+    const local = normalizeLocalImageUrl(value);
+    if (local) return local;
     return '';
   }
 
-  function cleanupUrl(raw) {
-    return String(raw || '').trim().replace(/[\u0000-\u001F\u007F\s]+/g, '').slice(0, 200000);
+  function normalizeLocalImageUrl(raw) {
+    const value = String(raw || '').trim().replace(/[\u0000-\u001F\u007F]/g, '');
+    if (!value || value.startsWith('//')) return '';
+    if (/^file:/i.test(value)) return normalizeFileImageUrl(value);
+    if (/^[A-Za-z]:[\\/]/.test(value)) return windowsPathToFileUrl(value);
+    if (/^\\\\[^\\]+\\[^\\]+/.test(value)) return uncPathToFileUrl(value);
+    if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) return '';
+    return relativeImageUrl(value);
+  }
+
+  function normalizeFileImageUrl(value) {
+    try {
+      const url = new URL(value);
+      if (url.protocol !== 'file:') return '';
+      const path = decodeURIComponent(url.pathname || '');
+      if (!hasRasterImageExtension(path)) return '';
+      return url.href;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function windowsPathToFileUrl(value) {
+    const normalized = value.replace(/\\/g, '/');
+    if (!hasRasterImageExtension(normalized)) return '';
+    const drive = normalized.slice(0, 2);
+    const rest = normalized.slice(2).replace(/^\/+/, '');
+    return `file:///${drive}/${encodePathSegments(rest)}`;
+  }
+
+  function uncPathToFileUrl(value) {
+    const normalized = value.replace(/^\\\\/, '').replace(/\\/g, '/');
+    if (!hasRasterImageExtension(normalized)) return '';
+    const parts = normalized.split('/').filter(Boolean);
+    if (parts.length < 3) return '';
+    const [host, ...pathParts] = parts;
+    return `file://${encodeURIComponent(host)}/${pathParts.map((part) => encodeURIComponent(part)).join('/')}`;
+  }
+
+  function relativeImageUrl(value) {
+    if (value.includes(':') || value.startsWith('//')) return '';
+    const normalized = value.replace(/\\/g, '/');
+    if (!hasRasterImageExtension(normalized)) return '';
+    return encodePathSegments(normalized);
+  }
+
+  function hasRasterImageExtension(value) {
+    return IMAGE_EXTENSION_PATTERN.test(String(value || '').split(/[?#]/, 1)[0]);
+  }
+
+  function encodePathSegments(value) {
+    return String(value || '').split('/').map((segment) => encodeURIComponent(segment)).join('/');
+  }
+
+  function cleanupUrl(raw, options = {}) {
+    const value = String(raw || '').trim().replace(/[\u0000-\u001F\u007F]+/g, '').slice(0, 200000);
+    return options.keepSpaces ? value : value.replace(/\s+/g, '');
   }
 
   function parseMarkdownTarget(target) {

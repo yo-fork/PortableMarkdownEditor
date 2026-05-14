@@ -30,10 +30,10 @@ The app intentionally does not support raw HTML rendering.
 
 | Type | Allowed | Blocked examples |
 | --- | --- | --- |
-| Link | relative, `#anchor`, `http`, `https`, `mailto`, `tel` | `javascript:`, `vbscript:`, protocol-relative URLs |
-| Image | `data:image/png`, `data:image/jpeg`, `data:image/gif`, `data:image/webp`, `blob:` | `https://...`, `data:text/html`, `data:image/svg+xml` |
+| Link | relative, `#anchor` | `javascript:`, `vbscript:`, protocol-relative URLs, `http`, `https`, `mailto`, `tel`, `file` |
+| Image | raster `data:` URL, `blob:`, relative path, `file:` URL, Windows drive path, UNC path | `https://...`, `data:text/html`, `data:image/svg+xml`, non-raster file extensions |
 
-Remote images are blocked to avoid tracking pixels and accidental network access.
+Remote images are blocked to avoid tracking pixels and accidental network access. Local and network-drive image references are allowed only for PNG/JPEG/GIF/WebP paths visible to the current PC.
 
 ## Local storage
 

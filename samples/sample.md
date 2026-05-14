@@ -30,3 +30,17 @@
 ```js
 console.log('完全ローカルで動作します');
 ```
+
+```python
+def greet(name: str) -> str:
+    return f"Hello, {name}"
+```
+
+## Mermaid
+
+```mermaid
+flowchart TD
+  A[Markdownを書く] --> B{プレビュー}
+  B -->|OK| C[保存]
+  B -->|修正| A
+```

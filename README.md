@@ -5,9 +5,10 @@ Windowsでインストールせずに使える、完全ローカル実行のMark
 - `index.html` をブラウザで開くだけで起動します。
 - CDN、npm、外部JavaScript、外部CSS、外部API通信は使いません。
 - Typora風のリッチ編集、ソース編集、分割プレビュー、プレビュー専用、集中モードを切り替えられます。
+- 初期表示はリッチ編集モードです。
 - Markdownの読み込み、保存、HTML出力、HTMLコピー、PDF/印刷に対応します。
 - Markdown内のHTMLは実行せず文字として扱います。
-- 完全ローカル性を優先し、外部リンク、`javascript:` など危険なリンク、外部画像、SVG data画像はブロックします。
+- 完全ローカル性を優先し、外部リンク、`javascript:` など危険なリンク、遠隔画像、SVG data画像はブロックします。
 
 ## 使い方
 
@@ -29,7 +30,9 @@ Windowsでインストールせずに使える、完全ローカル実行のMark
 
 ## 対応Markdown
 
-見出し、段落、引用、箇条書き、番号リスト、チェックリスト、表、コードブロック、インラインコード、太字、斜体、打ち消し線、リンク、data URL画像、目次 `[toc]` に対応しています。
+見出し、段落、引用、箇条書き、番号リスト、チェックリスト、表、コードブロック、インラインコード、太字、斜体、打ち消し線、リンク、data URL画像、ローカル画像参照、目次 `[toc]` に対応しています。
+
+コードブロックは `js`, `ts`, `python`, `html`, `css`, `json`, `bash`, `powershell`, `sql`, `yaml` などの主要言語をローカル実装でハイライトします。`mermaid` コードブロックは外部ライブラリを使わず、`flowchart` と `sequenceDiagram` を安全なSVGとして表示します。
 
 ## セキュリティ設計
 
@@ -40,7 +43,7 @@ Windowsでインストールせずに使える、完全ローカル実行のMark
 - アプリ本体に Content Security Policy を設定し、外部通信、外部埋め込み、フォーム送信を禁止。
 - raw HTMLはMarkdownとして解釈せず、エスケープして表示。
 - リンクURLは許可制。相対リンクとアンカーのみ許可し、外部リンクや危険なスキームはリンク化しない。
-- 画像はアプリ内で挿入した PNG/JPEG/GIF/WebP の Data URL のみを想定。遠隔画像は読み込まない。
+- 画像は PNG/JPEG/GIF/WebP のみ許可。Data URL、相対パス、`file:` URL、Windowsドライブパス、UNCパスを参照でき、遠隔画像は読み込まない。
 - `eval`、`new Function`、外部ライブラリ、Web Worker、fetch/XHRは不使用。
 
 ## GitHubへ反映する方法

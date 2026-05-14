@@ -40,7 +40,7 @@ html, body {
 
 body {
   font-family: var(--sans);
-  background: radial-gradient(circle at top left, var(--accent-soft), transparent 32rem), var(--bg);
+  background: var(--bg);
   color: var(--text);
   overflow: hidden;
 }
@@ -122,7 +122,7 @@ button[aria-pressed="true"], .view-controls button.is-active {
   background: var(--accent);
   color: white;
   font-weight: 800;
-  letter-spacing: -0.06em;
+  letter-spacing: 0;
   box-shadow: 0 10px 30px color-mix(in srgb, var(--accent) 38%, transparent);
 }
 
@@ -330,19 +330,19 @@ body.outline-collapsed .sidebar { display: none; }
 .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6,
 .rich-editor h1, .rich-editor h2, .rich-editor h3, .rich-editor h4, .rich-editor h5, .rich-editor h6 {
   font-family: var(--sans);
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   line-height: 1.25;
   margin: 1.35em 0 0.55em;
 }
 
 .markdown-body h1, .rich-editor h1 {
-  font-size: clamp(1.8rem, 4vw, 2.65rem);
+  font-size: 2.25rem;
   padding-bottom: 0.35rem;
   border-bottom: 1px solid var(--border);
 }
 
 .markdown-body h2, .rich-editor h2 {
-  font-size: clamp(1.42rem, 2.8vw, 2rem);
+  font-size: 1.65rem;
   padding-bottom: 0.2rem;
   border-bottom: 1px solid var(--border);
 }
@@ -372,12 +372,103 @@ body.outline-collapsed .sidebar { display: none; }
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
 }
 
+.code-block .code-lang {
+  position: sticky;
+  float: right;
+  right: 0;
+  top: 0;
+  margin-left: 1rem;
+  color: #94a3b8;
+  font-family: var(--sans);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
 .markdown-body pre code, .rich-editor pre code {
   display: block;
   background: transparent;
   border: 0;
   padding: 0;
   color: inherit;
+}
+
+.tok-comment { color: #94a3b8; }
+.tok-string { color: #a7f3d0; }
+.tok-number { color: #fde68a; }
+.tok-keyword { color: #93c5fd; }
+.tok-function { color: #f9a8d4; }
+.tok-property { color: #c4b5fd; }
+.tok-tag { color: #fca5a5; }
+.tok-operator { color: #cbd5e1; }
+
+.mermaid-diagram {
+  margin: 1.2rem 0;
+  font-family: var(--sans);
+}
+
+.mermaid-diagram figcaption {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.45rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.mermaid-diagram figcaption span { font-weight: 500; }
+
+.mermaid-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.8rem;
+  background: color-mix(in srgb, var(--panel) 92%, var(--panel-soft));
+}
+
+.mermaid-svg marker path { fill: var(--accent); }
+.mermaid-node rect,
+.mermaid-node ellipse,
+.mermaid-node polygon,
+.mermaid-seq-participant rect {
+  fill: var(--panel);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.mermaid-node-diamond polygon { fill: color-mix(in srgb, var(--accent-soft) 54%, var(--panel)); }
+.mermaid-node-label {
+  fill: var(--text);
+  font-family: var(--sans);
+  font-size: 12px;
+}
+
+.mermaid-edge path,
+.mermaid-message path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.6;
+}
+
+.mermaid-edge-label,
+.mermaid-message text {
+  fill: var(--muted);
+  font-family: var(--sans);
+  font-size: 12px;
+  text-anchor: middle;
+}
+
+.mermaid-lifeline {
+  fill: none;
+  stroke: var(--muted);
+  stroke-dasharray: 5 5;
+}
+
+.mermaid-note rect {
+  fill: color-mix(in srgb, #fef3c7 70%, var(--panel));
+  stroke: #d97706;
 }
 
 .markdown-body blockquote, .rich-editor blockquote {
