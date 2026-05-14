@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src data: blob:; media-src data: blob:; font-src 'self' data:; connect-src 'none'; worker-src 'none'; manifest-src 'none';">
+  <title>Portable Markdown Editer</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./app.js" defer></script>
+</head>
+<body data-mode="split">
+  <a class="skip-link" href="#mainWorkspace">本文へ移動</a>
+
+  <div class="app-shell" id="appShell">
+    <header class="topbar" aria-label="アプリ操作">
+      <div class="brand" aria-label="Portable Markdown Editer">
+        <span class="brand-mark" aria-hidden="true">M</span>
+        <div>
+          <h1>Portable Markdown Editer</h1>
+          <p>完全ローカル / Typora風Markdownエディタ</p>
+        </div>
+      </div>
+
+      <nav class="toolbar" aria-label="ファイル操作">
+        <button type="button" data-action="new" title="新規作成">新規</button>
+        <button type="button" data-action="open" title="Markdownファイルを開く">開く</button>
+        <button type="button" data-action="save-md" title="Markdownとして保存">保存</button>
+        <button type="button" data-action="export-html" title="安全化済みHTMLを書き出す">HTML</button>
+        <button type="button" data-action="print" title="PDF化・印刷">PDF/印刷</button>
+        <button type="button" data-action="copy-html" title="HTMLをクリップボードへコピー">HTMLコピー</button>
+      </nav>
+
+      <nav class="toolbar compact" aria-label="Markdown挿入">
+        <button type="button" data-action="format" data-format="h1" title="見出し1">H1</button>
+        <button type="button" data-action="format" data-format="h2" title="見出し2">H2</button>
+        <button type="button" data-action="format" data-format="bold" title="太字">B</button>
+        <button type="button" data-action="format" data-format="italic" title="斜体">I</button>
+        <button type="button" data-action="format" data-format="code" title="コード">{ }</button>
+        <button type="button" data-action="format" data-format="quote" title="引用">”</button>
+        <button type="button" data-action="format" data-format="list" title="箇条書き">•</button>
+        <button type="button" data-action="format" data-format="table" title="表">表</button>
+        <button type="button" data-action="format" data-format="toc" title="目次">TOC</button>
+        <button type="button" data-action="insert-link" title="リンク">リンク</button>
+        <button type="button" data-action="insert-image" title="画像をData URLとして埋め込む">画像</button>
+      </nav>
+
+      <div class="view-controls" role="group" aria-label="表示モード">
+        <button type="button" data-action="mode" data-mode="rich" title="Typora風リッチ編集">リッチ</button>
+        <button type="button" data-action="mode" data-mode="split" title="編集とプレビュー">分割</button>
+        <button type="button" data-action="mode" data-mode="source" title="Markdownソースのみ">ソース</button>
+        <button type="button" data-action="mode" data-mode="preview" title="プレビューのみ">プレビュー</button>
+        <button type="button" data-action="mode" data-mode="focus" title="集中執筆">集中</button>
+      </div>
+
+      <div class="security-badges" aria-label="セキュリティ状態">
+        <span title="ネットワーク通信を使いません">LOCAL</span>
+        <span title="CDNや外部ライブラリを使いません">NO CDN</span>
+        <span title="Markdown内のHTMLは実行しません">HTML OFF</span>
+      </div>
+
+      <div class="top-actions">
+        <button type="button" class="icon-button" data-action="toggle-theme" title="ライト/ダーク切り替え" aria-label="ライト/ダーク切り替え">◐</button>
+        <button type="button" class="icon-button" data-action="security" title="セキュリティモデル" aria-label="セキュリティモデル">🔒</button>
+      </div>
+    </header>
+
+    <main class="workspace" id="mainWorkspace">
+      <aside class="sidebar" aria-label="アウトライン">
+        <div class="sidebar-header">
+          <strong>アウトライン</strong>
+          <button type="button" data-action="collapse-outline" aria-label="アウトラインを折りたたむ">×</button>
+        </div>
+        <nav id="outline" class="outline" aria-label="文書の見出し"></nav>
+      </aside>
+
+      <section class="editor-grid" aria-label="Markdown編集領域">
+        <section class="rich-pane" aria-label="Typora風リッチ編集">
+          <div class="pane-title">リッチ編集 <span>ブロックをクリックして直接編集</span></div>
+          <div id="richEditor" class="rich-editor" tabindex="0"></div>
+        </section>
+
+        <section class="source-pane" aria-label="Markdownソース編集">
+          <div class="pane-title">Markdown <span id="fileNameLabel">untitled.md</span></div>
+          <textarea id="sourceEditor" spellcheck="true" autocomplete="off" autocapitalize="off" aria-label="Markdownソース"></textarea>
+        </section>
+
+        <section class="preview-pane" aria-label="プレビュー">
+          <div class="pane-title">Preview <span>安全化済みHTML</span></div>
+          <article id="preview" class="markdown-body" tabindex="0"></article>
+        </section>
+      </section>
+    </main>
+
+    <footer class="statusbar" aria-live="polite">
+      <span id="statusMessage">準備完了</span>
+      <span id="documentStats">0文字 / 0語</span>
+      <span id="saveState">自動保存: 未保存</span>
+    </footer>
+  </div>
+
+  <input id="fileInput" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden>
+  <input id="imageInput" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+
+  <dialog id="securityDialog" aria-labelledby="securityTitle">
+    <form method="dialog" class="dialog-card">
+      <h2 id="securityTitle">セキュリティモデル</h2>
+      <p>このエディタは完全ローカル実行を前提にしています。CDN、外部JavaScript、外部CSS、ネットワークAPIは使いません。</p>
+      <ul>
+        <li>Content Security Policyで通信、埋め込み、フォーム送信、外部スクリプトを禁止。</li>
+        <li>Markdown内のHTMLは実行せず、文字としてエスケープ。</li>
+        <li>JavaScript URL、危険なプロトコル、外部画像読み込みをブロック。</li>
+        <li>画像はPNG/JPEG/GIF/WebPをData URLで埋め込む方式。</li>
+        <li>データ保存はブラウザのlocalStorageとユーザー操作によるダウンロードのみ。</li>
+      </ul>
+      <menu>
+        <button type="submit">閉じる</button>
+      </menu>
+    </form>
+  </dialog>
+</body>
+</html>
