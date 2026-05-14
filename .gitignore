@@ -3,3 +3,5 @@ Thumbs.db
 *.tmp
 *.bak
 node_modules/
+.vendor-cache/
+downloads/

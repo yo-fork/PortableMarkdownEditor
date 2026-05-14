@@ -7,7 +7,9 @@
   const MAX_HIGHLIGHT_CHARS = 120000;
   const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
   const IMAGE_EXTENSION_PATTERN = /\.(?:png|jpe?g|gif|webp)(?:[?#].*)?$/i;
+  const VENDOR_TOC_MARKER = 'PME_TOC_MARKER_7B4E2D8C';
   let mermaidRenderSerial = 0;
+  let vendorMarkdownRenderer = null;
 
   const DEFAULT_MARKDOWN = `# Portable Markdown Editer
 
@@ -18,18 +20,18 @@
 ## できること
 
 - **ライブプレビュー**
-- Typora風のリッチ編集モード
+- ブロック単位のリッチ編集モード
 - Mermaid図
 - 主要言語のコードハイライト
 - Markdown / HTML の保存
 - PDF化・印刷
 - 自動復元
-- 外部ライブラリなし
+- ローカル同梱ライブラリ
 - Markdown内HTMLの無効化
 
 ## セキュリティ方針
 
-> このエディタは外部CDN、外部JavaScript、外部CSS、ネットワーク通信を使いません。
+> このエディタはCDN、外部配信JavaScript、外部配信CSS、ネットワーク通信を使いません。
 
 危険なURL例は表示時にブロックされます。
 
@@ -84,6 +86,9 @@ flowchart TD
     saveTimer: 0,
     renderTimer: 0,
     currentBlockEditor: null,
+    allowedLinkDomains: [],
+    assetUrls: new Map(),
+    markdownRelativePath: '',
   };
 
   const els = {};
@@ -96,6 +101,7 @@ flowchart TD
     restoreDraft();
     bindEvents();
     applyTheme();
+    initializeVendorLibraries();
     applyMode(state.mode);
     els.source.value = state.markdown;
     renderAll('init');
@@ -109,12 +115,15 @@ flowchart TD
     els.rich = document.getElementById('richEditor');
     els.outline = document.getElementById('outline');
     els.fileInput = document.getElementById('fileInput');
+    els.folderInput = document.getElementById('folderInput');
     els.imageInput = document.getElementById('imageInput');
     els.status = document.getElementById('statusMessage');
     els.stats = document.getElementById('documentStats');
     els.saveState = document.getElementById('saveState');
     els.fileNameLabel = document.getElementById('fileNameLabel');
     els.securityDialog = document.getElementById('securityDialog');
+    els.linkDomainDialog = document.getElementById('linkDomainDialog');
+    els.allowedDomainsInput = document.getElementById('allowedDomainsInput');
   }
 
   function restoreSettings() {
@@ -123,6 +132,7 @@ flowchart TD
     state.theme = settings?.theme || (prefersDark ? 'dark' : 'light');
     state.mode = settings?.mode || 'rich';
     state.outlineCollapsed = Boolean(settings?.outlineCollapsed);
+    state.allowedLinkDomains = normalizeDomainList(settings?.allowedLinkDomains || []);
   }
 
   function restoreDraft() {
@@ -130,6 +140,7 @@ flowchart TD
     if (!draft || typeof draft.markdown !== 'string') return;
     state.markdown = draft.markdown;
     state.fileName = safeFileName(draft.fileName || 'untitled.md');
+    state.markdownRelativePath = normalizeAssetPath(draft.markdownRelativePath || '');
     state.lastAutoSaved = draft.savedAt || null;
   }
 
@@ -153,6 +164,7 @@ flowchart TD
 
   function bindEvents() {
     document.addEventListener('click', onDocumentClick);
+    document.addEventListener('change', onDocumentChange);
     document.addEventListener('keydown', onKeyDown);
 
     els.source.addEventListener('input', () => {
@@ -164,10 +176,11 @@ flowchart TD
 
     els.source.addEventListener('scroll', syncPreviewScroll);
     els.fileInput.addEventListener('change', onFileChosen);
+    els.folderInput.addEventListener('change', onFolderChosen);
     els.imageInput.addEventListener('change', onImageChosen);
 
     els.rich.addEventListener('click', (event) => {
-      if (event.target.closest('button')) return;
+      if (event.target.closest('button, input, select, textarea')) return;
       const block = event.target.closest('.rich-block');
       if (state.currentBlockEditor && block !== state.currentBlockEditor) {
         cancelCurrentBlockEditor(block);
@@ -206,6 +219,9 @@ flowchart TD
       case 'open':
         els.fileInput.click();
         break;
+      case 'open-folder':
+        els.folderInput.click();
+        break;
       case 'save-md':
         downloadMarkdown();
         break;
@@ -217,6 +233,12 @@ flowchart TD
         break;
       case 'copy-html':
         copyHtml();
+        break;
+      case 'link-settings':
+        showLinkDomainDialog();
+        break;
+      case 'save-link-domains':
+        saveLinkDomains();
         break;
       case 'format':
         applyFormat(actionButton.dataset.format);
@@ -269,7 +291,29 @@ flowchart TD
     }
   }
 
+  function onDocumentChange(event) {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.classList.contains('task-checkbox')) {
+      updateTaskCheckbox(target);
+    } else if (target.classList.contains('code-language-input')) {
+      updateCodeBlockLanguage(target);
+    }
+  }
+
   function onKeyDown(event) {
+    if (event.target instanceof HTMLInputElement && event.target.classList.contains('code-language-input')) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        updateCodeBlockLanguage(event.target);
+        event.target.blur();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        event.target.blur();
+      }
+      return;
+    }
+
     if (!event.ctrlKey && !event.metaKey) return;
     const key = event.key.toLowerCase();
     if (key === 's') {
@@ -298,8 +342,10 @@ flowchart TD
 
   function newDocument() {
     if (state.dirty && !confirm('未保存の変更があります。新規作成しますか？')) return;
+    clearAssetUrls();
     state.markdown = '# 無題\n\nここにMarkdownを書いてください。\n';
     state.fileName = 'untitled.md';
+    state.markdownRelativePath = '';
     state.dirty = false;
     els.source.value = state.markdown;
     renderAll('new');
@@ -318,8 +364,10 @@ flowchart TD
 
     const reader = new FileReader();
     reader.onload = () => {
+      clearAssetUrls();
       state.markdown = normalizeNewlines(String(reader.result || ''));
       state.fileName = safeFileName(file.name || 'untitled.md');
+      state.markdownRelativePath = '';
       state.dirty = false;
       els.source.value = state.markdown;
       renderAll('open');
@@ -328,6 +376,42 @@ flowchart TD
     };
     reader.onerror = () => setStatus('ファイルの読み込みに失敗しました');
     reader.readAsText(file, 'utf-8');
+  }
+
+  function onFolderChosen(event) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    if (!files.length) return;
+
+    const markdownFiles = files.filter((file) => isMarkdownFile(file));
+    if (!markdownFiles.length) {
+      setStatus('フォルダ内にMarkdownファイルがありません');
+      return;
+    }
+
+    const chosen = chooseMarkdownFile(markdownFiles);
+    if (!chosen) return;
+    if (chosen.size > 10 * 1024 * 1024) {
+      setStatus('10MBを超えるファイルは読み込みません');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      clearAssetUrls();
+      state.markdown = normalizeNewlines(String(reader.result || ''));
+      state.fileName = safeFileName(chosen.name || 'untitled.md');
+      state.markdownRelativePath = normalizeAssetPath(chosen.webkitRelativePath || chosen.name || '');
+      buildFolderAssetUrls(files, dirnamePath(state.markdownRelativePath));
+      state.dirty = false;
+      els.source.value = state.markdown;
+      renderAll('open-folder');
+      persistDraft();
+      const count = state.assetUrls.size;
+      setStatus(`${state.fileName} をフォルダ基準で開きました。画像候補: ${count}`);
+    };
+    reader.onerror = () => setStatus('ファイルの読み込みに失敗しました');
+    reader.readAsText(chosen, 'utf-8');
   }
 
   function onImageChosen(event) {
@@ -492,9 +576,7 @@ flowchart TD
   function insertCodeBlock() {
     focusMarkdownInput();
     const selected = getSelectedText();
-    const lang = safeCodeLanguage(prompt('言語名を入力してください。例: js, ts, python, html, css, json, bash, powershell, sql', 'js') || '');
-    const fence = lang ? `\`\`\`${lang}` : '```';
-    replaceSelection(`${fence}\n${selected || 'code'}\n\`\`\``);
+    replaceSelection(`\`\`\`\n${selected || 'code'}\n\`\`\``);
   }
 
   function insertMermaid() {
@@ -587,11 +669,80 @@ flowchart TD
   function toggleTheme() {
     state.theme = state.theme === 'dark' ? 'light' : 'dark';
     applyTheme();
+    initializeVendorLibraries();
     persistSettings();
+    renderAll('theme');
   }
 
   function applyTheme() {
     document.documentElement.dataset.theme = state.theme;
+  }
+
+  function initializeVendorLibraries() {
+    if (window.mermaid?.initialize) {
+      window.mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: 'strict',
+        theme: 'base',
+        htmlLabels: true,
+        flowchart: { htmlLabels: true, useMaxWidth: true },
+        sequence: { useMaxWidth: true },
+        themeVariables: mermaidThemeVariables(),
+      });
+    }
+  }
+
+  function mermaidThemeVariables() {
+    if (state.theme === 'dark') {
+      return {
+        background: 'transparent',
+        primaryColor: '#1f2937',
+        primaryTextColor: '#f8fafc',
+        primaryBorderColor: '#7aa2f7',
+        lineColor: '#9ca3af',
+        defaultLinkColor: '#7aa2f7',
+        secondaryColor: '#0f172a',
+        secondaryTextColor: '#f8fafc',
+        tertiaryColor: '#111827',
+        tertiaryTextColor: '#f8fafc',
+        mainBkg: '#1f2937',
+        secondBkg: '#0f172a',
+        nodeTextColor: '#f8fafc',
+        textColor: '#f8fafc',
+        labelTextColor: '#f8fafc',
+        labelBackground: '#111827',
+        edgeLabelBackground: '#111827',
+        clusterBkg: '#111827',
+        clusterBorder: '#475569',
+        noteBkgColor: '#3b2f0b',
+        noteTextColor: '#fef3c7',
+        fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+      };
+    }
+    return {
+      background: 'transparent',
+      primaryColor: '#ffffff',
+      primaryTextColor: '#111827',
+      primaryBorderColor: '#2563eb',
+      lineColor: '#334155',
+      defaultLinkColor: '#2563eb',
+      secondaryColor: '#eff6ff',
+      secondaryTextColor: '#111827',
+      tertiaryColor: '#f8fafc',
+      tertiaryTextColor: '#111827',
+      mainBkg: '#ffffff',
+      secondBkg: '#eff6ff',
+      nodeTextColor: '#111827',
+      textColor: '#111827',
+      labelTextColor: '#111827',
+      labelBackground: '#ffffff',
+      edgeLabelBackground: '#ffffff',
+      clusterBkg: '#f8fafc',
+      clusterBorder: '#cbd5e1',
+      noteBkgColor: '#fef3c7',
+      noteTextColor: '#713f12',
+      fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    };
   }
 
   function toggleOutline() {
@@ -604,8 +755,24 @@ flowchart TD
     if (els.securityDialog && typeof els.securityDialog.showModal === 'function') {
       els.securityDialog.showModal();
     } else {
-      alert('完全ローカル実行、CSP有効、外部ライブラリなし、Markdown内HTMLは無効です。');
+      alert('完全ローカル実行、CSP有効、CDN不使用、Markdown内HTMLは無効です。');
     }
+  }
+
+  function showLinkDomainDialog() {
+    if (!els.linkDomainDialog || !els.allowedDomainsInput) return;
+    els.allowedDomainsInput.value = state.allowedLinkDomains.join('\n');
+    if (typeof els.linkDomainDialog.showModal === 'function') {
+      els.linkDomainDialog.showModal();
+    }
+  }
+
+  function saveLinkDomains() {
+    state.allowedLinkDomains = normalizeDomainList(splitDomainInput(els.allowedDomainsInput?.value || ''));
+    persistSettings();
+    renderAll('link-settings');
+    if (els.linkDomainDialog?.open) els.linkDomainDialog.close();
+    setStatus(`外部リンク許可ドメイン: ${state.allowedLinkDomains.length}件`);
   }
 
   function markDirty() {
@@ -627,6 +794,7 @@ flowchart TD
     const ok = writeJson(STORAGE_KEY, {
       markdown: state.markdown,
       fileName: state.fileName,
+      markdownRelativePath: state.markdownRelativePath,
       savedAt: new Date().toISOString(),
     });
     if (ok) {
@@ -642,6 +810,7 @@ flowchart TD
       theme: state.theme,
       mode: state.mode,
       outlineCollapsed: state.outlineCollapsed,
+      allowedLinkDomains: state.allowedLinkDomains,
     });
   }
 
@@ -770,6 +939,47 @@ flowchart TD
     setStatus('ブロックを反映しました');
   }
 
+  function updateTaskCheckbox(input) {
+    const position = Number(input.dataset.taskPos);
+    if (!Number.isInteger(position) || !/^[ xX]$/.test(state.markdown[position] || '')) {
+      renderAll('task-toggle-invalid');
+      setStatus('チェックリストの位置を特定できませんでした');
+      return;
+    }
+    const mark = input.checked ? 'x' : ' ';
+    state.markdown = state.markdown.slice(0, position) + mark + state.markdown.slice(position + 1);
+    els.source.value = state.markdown;
+    markDirty();
+    renderAll('task-toggle');
+    persistDraft();
+    setStatus(input.checked ? 'チェックを付けました' : 'チェックを外しました');
+  }
+
+  function updateCodeBlockLanguage(input) {
+    const start = Number(input.dataset.codeStart);
+    const end = Number(input.dataset.codeEnd);
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start) {
+      setStatus('コードブロックの位置を特定できませんでした');
+      return;
+    }
+    const lineEnd = state.markdown.indexOf('\n', start);
+    const fenceEnd = lineEnd === -1 || lineEnd > end ? end : lineEnd;
+    const fenceLine = state.markdown.slice(start, fenceEnd);
+    const match = fenceLine.match(/^(\s*```)\s*([A-Za-z0-9_+.-]*)\s*$/);
+    if (!match) {
+      setStatus('コードブロックの言語行を更新できませんでした');
+      return;
+    }
+    const language = safeCodeLanguage(input.value || '');
+    const replacement = `${match[1]}${language}`;
+    state.markdown = state.markdown.slice(0, start) + replacement + state.markdown.slice(fenceEnd);
+    els.source.value = state.markdown;
+    markDirty();
+    renderAll('code-language');
+    persistDraft();
+    setStatus(language ? `コード言語: ${language}` : 'コード言語を未指定にしました');
+  }
+
   function insertBlockNear(block, direction) {
     if (!block) return;
     const start = Number(block.dataset.start);
@@ -798,18 +1008,7 @@ flowchart TD
       els.outline.appendChild(empty);
       return;
     }
-    for (const heading of headings) {
-      const link = document.createElement('a');
-      link.href = `#${heading.id}`;
-      link.className = `level-${heading.level}`;
-      link.textContent = heading.text;
-      link.addEventListener('click', (event) => {
-        event.preventDefault();
-        const target = document.getElementById(heading.id);
-        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      });
-      els.outline.appendChild(link);
-    }
+    els.outline.appendChild(buildOutlineTreeElement(buildHeadingTree(headings), true));
   }
 
   function updateStatusBar() {
@@ -838,6 +1037,188 @@ flowchart TD
     const blocks = splitMarkdownBlocks(markdown);
     const headings = buildHeadingIndex(blocks);
     return blocks.map((block) => renderBlockHtml(block, headings)).join('\n');
+  }
+
+  function renderMarkdownWithVendor(markdown) {
+    const md = getVendorMarkdownRenderer();
+    if (!md) return '';
+    const headings = buildHeadingIndex(splitMarkdownBlocks(markdown)).items;
+    return md.render(preprocessVendorMarkdown(markdown))
+      .replaceAll(`<p>${VENDOR_TOC_MARKER}</p>\n`, renderToc(headings))
+      .replaceAll(VENDOR_TOC_MARKER, renderToc(headings));
+  }
+
+  function getVendorMarkdownRenderer() {
+    if (vendorMarkdownRenderer) return vendorMarkdownRenderer;
+    const markdownit = window.markdownit || window.markdownIt;
+    if (typeof markdownit !== 'function') return null;
+
+    const md = markdownit({
+      html: false,
+      linkify: false,
+      typographer: true,
+      breaks: false,
+      highlight(code, lang) {
+        return highlightCodeWithVendor(code, normalizeCodeLanguage(lang));
+      },
+    });
+
+    md.renderer.rules.fence = (tokens, index) => {
+      const token = tokens[index];
+      const lang = safeCodeLanguage((token.info || '').trim());
+      const normalized = normalizeCodeLanguage(lang);
+      const codeText = token.content || '';
+      if (normalized === 'mermaid') return `${renderMermaidPlaceholder(codeText)}\n`;
+      const langAttr = lang ? ` data-lang="${escapeAttribute(lang)}"` : '';
+      const langClass = normalized ? ` language-${escapeAttribute(normalized)}` : '';
+      const label = normalized ? `<span class="code-lang">${escapeHtml(normalized)}</span>` : '';
+      return `<pre class="code-block${langClass}">${label}<code class="hljs"${langAttr}>${highlightCodeWithVendor(codeText, normalized)}</code></pre>\n`;
+    };
+
+    const defaultLinkOpen = md.renderer.rules.link_open || defaultMarkdownItRule;
+    md.renderer.rules.link_open = (tokens, index, options, env, self) => {
+      const hrefIndex = tokens[index].attrIndex('href');
+      const href = hrefIndex >= 0 ? tokens[index].attrs[hrefIndex][1] : '';
+      const safe = sanitizeLinkUrl(href);
+      if (!safe) {
+        tokens[index].tag = 'span';
+        tokens[index].attrs = [['class', 'blocked-link']];
+        return self.renderToken(tokens, index, options);
+      }
+      tokens[index].attrs[hrefIndex][1] = safe;
+      tokens[index].attrSet('rel', 'noopener noreferrer');
+      tokens[index].attrSet('target', '_blank');
+      return defaultLinkOpen(tokens, index, options, env, self);
+    };
+
+    const defaultLinkClose = md.renderer.rules.link_close || defaultMarkdownItRule;
+    md.renderer.rules.link_close = (tokens, index, options, env, self) => {
+      const previous = findPreviousOpenToken(tokens, index);
+      if (previous?.tag === 'span' && previous.attrGet('class') === 'blocked-link') {
+        tokens[index].tag = 'span';
+      }
+      return defaultLinkClose(tokens, index, options, env, self);
+    };
+
+    md.renderer.rules.image = (tokens, index) => {
+      const token = tokens[index];
+      const src = token.attrGet('src') || '';
+      const safe = sanitizeImageUrl(src);
+      const alt = token.content || token.attrGet('alt') || 'no alt';
+      if (!safe) return `<span class="blocked-image">画像ブロック: ${escapeHtml(alt)}</span>`;
+      return `<img alt="${escapeAttribute(alt)}" src="${escapeAttribute(safe)}">`;
+    };
+
+    enableTaskListRendering(md);
+    vendorMarkdownRenderer = md;
+    return vendorMarkdownRenderer;
+  }
+
+  function enableTaskListRendering(md) {
+    md.core.ruler.after('inline', 'pme_task_lists', (state) => {
+      for (let index = 2; index < state.tokens.length; index += 1) {
+        const inlineToken = state.tokens[index];
+        const paragraphOpen = state.tokens[index - 1];
+        const listItemOpen = state.tokens[index - 2];
+        if (inlineToken.type !== 'inline' || paragraphOpen.type !== 'paragraph_open' || listItemOpen.type !== 'list_item_open') continue;
+
+        const match = inlineToken.content.match(/^\[([ xX])\]\s+/);
+        if (!match) continue;
+
+        const checked = match[1].toLowerCase() === 'x';
+        const sourceOffset = sourceOffsetForMarkdownItLine(state.env, listItemOpen.map?.[0], inlineToken.content, match.index);
+        inlineToken.content = inlineToken.content.slice(match[0].length);
+        inlineToken.children = stripTaskMarkerFromInlineChildren(
+          inlineToken.children || [],
+          match[0].length,
+          state.Token,
+          checked,
+          sourceOffset,
+        );
+        listItemOpen.attrJoin('class', 'task-list-item');
+        const listOpen = findParentListOpenToken(state.tokens, index - 2);
+        if (listOpen) listOpen.attrJoin('class', 'task-list');
+      }
+    });
+  }
+
+  function sourceOffsetForMarkdownItLine(env, lineNumber, inlineContent, markerIndex) {
+    const base = Number.isFinite(env?.baseOffset) ? env.baseOffset : 0;
+    const lineOffset = Number.isInteger(lineNumber) ? env?.lineOffsets?.[lineNumber] : 0;
+    if (!Number.isFinite(lineOffset)) return '';
+    const markerStart = String(inlineContent || '').indexOf('[');
+    return base + lineOffset + Math.max(0, markerStart) + markerIndex + 1;
+  }
+
+  function stripTaskMarkerFromInlineChildren(children, markerLength, Token, checked, sourceOffset = '') {
+    let remaining = markerLength;
+    const nextChildren = [];
+    for (const child of children) {
+      if (remaining > 0 && child.type === 'text') {
+        if (child.content.length <= remaining) {
+          remaining -= child.content.length;
+          continue;
+        }
+        child.content = child.content.slice(remaining);
+        remaining = 0;
+      }
+      nextChildren.push(child);
+    }
+    const checkbox = new Token('html_inline', '', 0);
+    const offsetAttr = sourceOffset === '' ? '' : ` data-task-pos="${escapeAttribute(sourceOffset)}"`;
+    checkbox.content = `<input class="task-checkbox" type="checkbox"${offsetAttr}${checked ? ' checked' : ''}>`;
+    return [checkbox, ...nextChildren];
+  }
+
+  function findParentListOpenToken(tokens, listItemIndex) {
+    for (let index = listItemIndex - 1; index >= 0; index -= 1) {
+      if (tokens[index].type === 'bullet_list_open' || tokens[index].type === 'ordered_list_open') return tokens[index];
+    }
+    return null;
+  }
+
+  function defaultMarkdownItRule(tokens, index, options, _env, self) {
+    return self.renderToken(tokens, index, options);
+  }
+
+  function findPreviousOpenToken(tokens, closeIndex) {
+    let depth = 0;
+    for (let index = closeIndex - 1; index >= 0; index -= 1) {
+      if (tokens[index].type.endsWith('_close')) depth += 1;
+      if (tokens[index].type.endsWith('_open')) {
+        if (depth === 0) return tokens[index];
+        depth -= 1;
+      }
+    }
+    return null;
+  }
+
+  function preprocessVendorMarkdown(markdown) {
+    return normalizeNewlines(markdown).replace(/^\s*\[toc\]\s*$/gim, VENDOR_TOC_MARKER);
+  }
+
+  function highlightCodeWithVendor(code, lang) {
+    if (!window.hljs) return escapeHtml(code);
+    try {
+      if (lang && window.hljs.getLanguage?.(lang)) {
+        return window.hljs.highlight(code, { language: lang, ignoreIllegals: true }).value;
+      }
+      return window.hljs.highlightAuto(code).value;
+    } catch (_) {
+      return escapeHtml(code);
+    }
+  }
+
+  function renderMermaidPlaceholder(code) {
+    const id = nextMermaidId('diagram', code);
+    return [
+      '<figure class="mermaid-diagram">',
+      '<figcaption>Mermaid</figcaption>',
+      `<div class="mermaid-render-target" data-mermaid-render-id="${escapeAttribute(id)}" data-mermaid-source="${escapeAttribute(code)}">`,
+      `<pre class="code-block language-mermaid"><code data-lang="mermaid">${escapeHtml(code)}</code></pre>`,
+      '</div>',
+      '</figure>',
+    ].join('');
   }
 
   function splitMarkdownBlocks(markdown) {
@@ -925,18 +1306,25 @@ flowchart TD
 
   function renderBlockHtml(block, headingIndex) {
     switch (block.type) {
-      case 'code':
-        return renderCodeBlock(block.raw);
       case 'heading':
         return renderHeading(block, headingIndex);
-      case 'rule':
-        return '<hr>';
       case 'toc':
         return renderToc(headingIndex.items);
+      case 'code':
+        return renderCodeBlock(block.raw, block);
+      case 'list':
+        return renderList(block.raw, block);
+      default: {
+        const vendorHtml = renderBlockWithVendor(block.raw, block);
+        if (vendorHtml) return vendorHtml;
+      }
+    }
+
+    switch (block.type) {
+      case 'rule':
+        return '<hr>';
       case 'table':
         return renderTable(block.raw);
-      case 'list':
-        return renderList(block.raw);
       case 'quote':
         return renderQuote(block.raw);
       default:
@@ -951,22 +1339,68 @@ flowchart TD
     const level = match[1].length;
     const text = stripInlineMarkdown(match[2]);
     const id = headingIndex.byOffset.get(block.start) || slugify(text);
-    return `<h${level} id="${escapeAttribute(id)}">${renderInline(match[2])}</h${level}>`;
+    return `<h${level} id="${escapeAttribute(id)}">${renderInlineMarkdown(match[2])}</h${level}>`;
   }
 
-  function renderCodeBlock(raw) {
+  function renderBlockWithVendor(raw, block = null) {
+    const md = getVendorMarkdownRenderer();
+    if (!md) return '';
+    return md.render(preprocessVendorMarkdown(raw), buildMarkdownItEnv(raw, block)).trimEnd();
+  }
+
+  function buildMarkdownItEnv(raw, block) {
+    return {
+      baseOffset: Number.isFinite(block?.start) ? block.start : 0,
+      lineOffsets: getLineStartOffsets(raw),
+    };
+  }
+
+  function getLineStartOffsets(raw) {
+    const offsets = [0];
+    const text = String(raw || '');
+    for (let index = 0; index < text.length; index += 1) {
+      if (text[index] === '\n' && index + 1 < text.length) offsets.push(index + 1);
+    }
+    return offsets;
+  }
+
+  function renderInlineMarkdown(raw) {
+    const md = getVendorMarkdownRenderer();
+    if (!md) return renderInline(raw);
+    return md.renderInline(String(raw || ''));
+  }
+
+  function renderCodeBlock(raw, block = null) {
     const lines = raw.split('\n');
     const first = lines.shift() || '';
     if (lines.length && /^\s*```\s*$/.test(lines[lines.length - 1])) lines.pop();
     const lang = safeCodeLanguage(first.replace(/^\s*```/, ''));
     const codeText = lines.join('\n');
     const normalizedLang = normalizeCodeLanguage(lang);
-    if (normalizedLang === 'mermaid') return renderMermaidBlock(codeText);
-    const code = highlightCode(codeText, normalizedLang);
+    if (normalizedLang === 'mermaid') {
+      return window.mermaid?.render ? renderMermaidPlaceholder(codeText) : renderMermaidBlock(codeText);
+    }
+    const code = window.hljs ? highlightCodeWithVendor(codeText, normalizedLang) : highlightCode(codeText, normalizedLang);
     const langAttr = lang ? ` data-lang="${escapeAttribute(lang)}"` : '';
     const langClass = normalizedLang ? ` language-${escapeAttribute(normalizedLang)}` : '';
-    const label = normalizedLang ? `<span class="code-lang">${escapeHtml(normalizedLang)}</span>` : '';
-    return `<pre class="code-block${langClass}">${label}<code${langAttr}>${code}</code></pre>`;
+    const offsetAttrs = Number.isFinite(block?.start)
+      ? ` data-code-start="${escapeAttribute(block.start)}" data-code-end="${escapeAttribute(block.end)}"`
+      : '';
+    const languageControl = [
+      '<input class="code-language-input"',
+      ' type="text"',
+      ' list="codeLanguageOptions"',
+      ' spellcheck="false"',
+      ' autocomplete="off"',
+      ' autocapitalize="off"',
+      ' aria-label="コードブロックの言語"',
+      ' placeholder="text"',
+      ` value="${escapeAttribute(lang)}"`,
+      offsetAttrs,
+      '>',
+    ].join('');
+    const codeClass = window.hljs ? ' class="hljs"' : '';
+    return `<pre class="code-block${langClass}">${languageControl}<code${codeClass}${langAttr}>${code}</code></pre>`;
   }
 
   function renderParagraph(raw) {
@@ -982,22 +1416,30 @@ flowchart TD
     return `<blockquote>${body}</blockquote>`;
   }
 
-  function renderList(raw) {
-    const lines = raw.split('\n').filter((line) => line.trim() !== '');
-    const ordered = /^\s*\d+\.\s+/.test(lines[0] || '');
+  function renderList(raw, block = null) {
+    const lines = getLines(raw).filter((line) => line.text.trim() !== '');
+    const ordered = /^\s*\d+\.\s+/.test(lines[0]?.text || '');
     const tag = ordered ? 'ol' : 'ul';
+    let hasTasks = false;
     const items = lines.map((line) => {
-      let text = line.replace(/^\s*(?:[-+*]|\d+\.)\s+/, '');
-      const task = text.match(/^\[( |x|X)\]\s+(.*)$/);
+      const textLine = line.text.replace(/\n$/, '');
+      const taskLine = textLine.match(/^(\s*(?:[-+*]|\d+\.)\s+)\[( |x|X)\]\s+(.*)$/);
+      let text = textLine.replace(/^\s*(?:[-+*]|\d+\.)\s+/, '');
       let checkbox = '';
-      if (task) {
-        const checked = task[1].toLowerCase() === 'x' ? ' checked' : '';
-        checkbox = `<input class="task-checkbox" type="checkbox" disabled${checked}>`;
-        text = task[2];
+      let className = '';
+      if (taskLine) {
+        hasTasks = true;
+        className = ' class="task-list-item"';
+        const checked = taskLine[2].toLowerCase() === 'x' ? ' checked' : '';
+        const taskOffset = Number.isFinite(block?.start) ? block.start + line.start + taskLine[1].length + 1 : '';
+        const offsetAttr = taskOffset === '' ? '' : ` data-task-pos="${escapeAttribute(taskOffset)}"`;
+        checkbox = `<input class="task-checkbox" type="checkbox"${offsetAttr}${checked}>`;
+        text = taskLine[3];
       }
-      return `<li>${checkbox}${renderInline(text)}</li>`;
+      return `<li${className}>${checkbox}${renderInlineMarkdown(text)}</li>`;
     }).join('');
-    return `<${tag}>${items}</${tag}>`;
+    const classAttr = hasTasks ? ' class="task-list"' : '';
+    return `<${tag}${classAttr}>${items}</${tag}>`;
   }
 
   function renderTable(raw) {
@@ -1013,10 +1455,7 @@ flowchart TD
 
   function renderToc(headings) {
     if (!headings.length) return '<div class="toc"><strong>目次</strong><p>見出しはありません。</p></div>';
-    const links = headings.map((heading) => (
-      `<a class="level-${heading.level}" href="#${escapeAttribute(heading.id)}">${escapeHtml(heading.text)}</a>`
-    )).join('');
-    return `<nav class="toc" aria-label="目次"><strong>目次</strong>${links}</nav>`;
+    return `<nav class="toc" aria-label="目次"><strong>目次</strong>${renderTocTree(buildHeadingTree(headings), true)}</nav>`;
   }
 
   function renderInline(raw) {
@@ -1074,6 +1513,58 @@ flowchart TD
       byOffset.set(block.start, id);
     }
     return { items, byOffset };
+  }
+
+  function buildHeadingTree(headings) {
+    const root = [];
+    const stack = [{ level: 0, children: root }];
+    for (const heading of headings) {
+      const node = { ...heading, children: [] };
+      while (stack.length > 1 && stack[stack.length - 1].level >= heading.level) stack.pop();
+      stack[stack.length - 1].children.push(node);
+      stack.push(node);
+    }
+    return root;
+  }
+
+  function renderTocTree(nodes, expanded) {
+    if (!nodes.length) return '';
+    const items = nodes.map((node) => {
+      const link = `<a class="level-${node.level}" href="#${escapeAttribute(node.id)}">${escapeHtml(node.text)}</a>`;
+      if (!node.children.length) return `<li>${link}</li>`;
+      return `<li><details${expanded ? ' open' : ''}><summary>${link}</summary>${renderTocTree(node.children, false)}</details></li>`;
+    }).join('');
+    return `<ol class="toc-tree">${items}</ol>`;
+  }
+
+  function buildOutlineTreeElement(nodes, expanded) {
+    const list = document.createElement('ol');
+    list.className = 'outline-tree';
+    for (const node of nodes) {
+      const item = document.createElement('li');
+      const link = document.createElement('a');
+      link.href = `#${node.id}`;
+      link.className = `level-${node.level}`;
+      link.textContent = node.text;
+      link.addEventListener('click', (event) => {
+        event.preventDefault();
+        const target = document.getElementById(node.id);
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+      if (node.children.length) {
+        const details = document.createElement('details');
+        if (expanded) details.open = true;
+        const summary = document.createElement('summary');
+        summary.appendChild(link);
+        details.appendChild(summary);
+        details.appendChild(buildOutlineTreeElement(node.children, false));
+        item.appendChild(details);
+      } else {
+        item.appendChild(link);
+      }
+      list.appendChild(item);
+    }
+    return list;
   }
 
   function normalizeCodeLanguage(lang) {
@@ -1609,6 +2100,124 @@ ${body}
 
   function safeSetHtml(element, html) {
     element.innerHTML = html;
+    enhanceRenderedHtml(element);
+  }
+
+  function enhanceRenderedHtml(root) {
+    renderKaTeXIn(root);
+    renderMermaidIn(root);
+  }
+
+  function renderMermaidIn(root) {
+    if (!window.mermaid?.render) return;
+    root.querySelectorAll('.mermaid-render-target[data-mermaid-source]').forEach((target) => {
+      const source = target.getAttribute('data-mermaid-source') || '';
+      const id = target.getAttribute('data-mermaid-render-id') || nextMermaidId('diagram', source);
+      Promise.resolve(window.mermaid.render(id, source))
+        .then((result) => {
+          const svg = typeof result === 'string' ? result : result?.svg;
+          if (svg) target.innerHTML = sanitizeSvgMarkup(svg);
+        })
+        .catch(() => {
+          target.classList.add('mermaid-fallback');
+        });
+    });
+  }
+
+  function sanitizeSvgMarkup(svg) {
+    if (!window.DOMParser) return '';
+    const doc = new DOMParser().parseFromString(String(svg || ''), 'image/svg+xml');
+    doc.querySelectorAll('script, iframe, object, embed, form, input, button, select, textarea, link, meta').forEach((node) => node.remove());
+    doc.querySelectorAll('*').forEach((node) => {
+      for (const attr of Array.from(node.attributes)) {
+        const name = attr.name.toLowerCase();
+        const value = attr.value.trim().toLowerCase();
+        if (name.startsWith('on') || value.startsWith('javascript:') || name === 'srcdoc') {
+          node.removeAttribute(attr.name);
+          continue;
+        }
+        if (['href', 'xlink:href', 'src'].includes(name) && !isSafeSvgLink(attr.value)) {
+          node.removeAttribute(attr.name);
+        }
+      }
+    });
+    const svgElement = doc.documentElement;
+    if (svgElement?.tagName?.toLowerCase() === 'svg') {
+      svgElement.classList.add('mermaid-svg');
+      svgElement.removeAttribute('style');
+    }
+    return svgElement?.outerHTML || '';
+  }
+
+  function isSafeSvgLink(value) {
+    if (!value || String(value).startsWith('#')) return true;
+    return Boolean(sanitizeLinkUrl(value));
+  }
+
+  function renderKaTeXIn(root) {
+    if (!window.katex?.renderToString || !document.createTreeWalker) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue || !/[\\$]/.test(node.nodeValue)) return NodeFilter.FILTER_REJECT;
+        if (node.parentElement?.closest('pre, code, textarea, .katex')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    nodes.forEach(replaceMathTextNode);
+  }
+
+  function replaceMathTextNode(node) {
+    const parts = splitMathSegments(node.nodeValue || '');
+    if (parts.length === 1 && parts[0].type === 'text') return;
+    const fragment = document.createDocumentFragment();
+    for (const part of parts) {
+      if (part.type === 'text') {
+        fragment.appendChild(document.createTextNode(part.value));
+        continue;
+      }
+      const span = document.createElement(part.display ? 'div' : 'span');
+      span.className = part.display ? 'math-display' : 'math-inline';
+      span.innerHTML = renderKaTeX(part.value, part.display);
+      fragment.appendChild(span);
+    }
+    node.replaceWith(fragment);
+  }
+
+  function splitMathSegments(text) {
+    const pattern = /(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^\s$][^\n$]*?\$)/g;
+    const parts = [];
+    let last = 0;
+    for (const match of text.matchAll(pattern)) {
+      if (match.index > last) parts.push({ type: 'text', value: text.slice(last, match.index) });
+      const token = match[0];
+      const display = token.startsWith('$$') || token.startsWith('\\[');
+      const value = token.startsWith('$$')
+        ? token.slice(2, -2)
+        : token.startsWith('\\[')
+          ? token.slice(2, -2)
+          : token.startsWith('\\(')
+            ? token.slice(2, -2)
+            : token.slice(1, -1);
+      parts.push({ type: 'math', value, display });
+      last = match.index + token.length;
+    }
+    if (last < text.length) parts.push({ type: 'text', value: text.slice(last) });
+    return parts;
+  }
+
+  function renderKaTeX(source, displayMode) {
+    try {
+      return window.katex.renderToString(source, {
+        displayMode,
+        throwOnError: false,
+        strict: 'ignore',
+        trust: false,
+      });
+    } catch (_) {
+      return escapeHtml(source);
+    }
   }
 
   function sanitizeLinkUrl(raw) {
@@ -1616,10 +2225,24 @@ ${body}
     if (!value) return '';
     if (value.startsWith('#')) return value;
     if (value.startsWith('//')) return '';
-    // 完全ローカル性を優先し、http/https/mailto/tel/file などのスキーム付きURLはリンク化しない。
-    // 相対パスとページ内アンカーのみ許可する。
+    const external = sanitizeAllowedExternalLink(value);
+    if (external) return external;
     if (/^[./A-Za-z0-9_-]/.test(value) && !value.includes(':')) return value;
     return '';
+  }
+
+  function sanitizeAllowedExternalLink(value) {
+    if (!/^https?:\/\//i.test(value) || !state.allowedLinkDomains.length) return '';
+    try {
+      const url = new URL(value);
+      if (!['http:', 'https:'].includes(url.protocol)) return '';
+      if (url.username || url.password) return '';
+      const host = url.hostname.toLowerCase();
+      if (!state.allowedLinkDomains.some((domain) => host === domain || host.endsWith(`.${domain}`))) return '';
+      return url.href;
+    } catch (_) {
+      return '';
+    }
   }
 
   function sanitizeImageUrl(raw) {
@@ -1676,7 +2299,18 @@ ${body}
     if (value.includes(':') || value.startsWith('//')) return '';
     const normalized = value.replace(/\\/g, '/');
     if (!hasRasterImageExtension(normalized)) return '';
+    const asset = resolveFolderAssetUrl(normalized);
+    if (asset) return asset;
     return encodePathSegments(normalized);
+  }
+
+  function resolveFolderAssetUrl(value) {
+    const key = normalizeAssetPath(value);
+    if (!key || isUnsafeRelativePath(key)) return '';
+    return state.assetUrls.get(key)
+      || state.assetUrls.get(key.replace(/^\.\//, ''))
+      || state.assetUrls.get(`./${key}`)
+      || '';
   }
 
   function hasRasterImageExtension(value) {
@@ -1699,6 +2333,89 @@ ${body}
     if (quoted) return quoted[1];
     const first = trimmed.match(/^[^\s]+/);
     return first ? first[0] : '';
+  }
+
+  function isMarkdownFile(file) {
+    const name = String(file?.name || '').toLowerCase();
+    return /\.(?:md|markdown|txt)$/.test(name) || ['text/markdown', 'text/plain'].includes(file?.type || '');
+  }
+
+  function chooseMarkdownFile(files) {
+    if (files.length === 1) return files[0];
+    const names = files.map((file) => normalizeAssetPath(file.webkitRelativePath || file.name || ''));
+    const answer = prompt(`開くMarkdownファイル名を入力してください。\n\n${names.join('\n')}`, names[0] || '');
+    if (!answer) return null;
+    const normalized = normalizeAssetPath(answer);
+    return files.find((file) => normalizeAssetPath(file.webkitRelativePath || file.name || '') === normalized)
+      || files.find((file) => file.name === answer)
+      || null;
+  }
+
+  function buildFolderAssetUrls(files, baseDir) {
+    const base = normalizeAssetPath(baseDir);
+    for (const file of files) {
+      if (!isAllowedImageFile(file)) continue;
+      const fullPath = normalizeAssetPath(file.webkitRelativePath || file.name || '');
+      const relative = makeRelativePath(base, fullPath);
+      if (!relative || isUnsafeRelativePath(relative)) continue;
+      const url = URL.createObjectURL(file);
+      state.assetUrls.set(relative, url);
+      state.assetUrls.set(`./${relative}`, url);
+    }
+  }
+
+  function clearAssetUrls() {
+    for (const url of new Set(state.assetUrls.values())) URL.revokeObjectURL(url);
+    state.assetUrls.clear();
+  }
+
+  function isAllowedImageFile(file) {
+    return ALLOWED_IMAGE_TYPES.has(file.type) || hasRasterImageExtension(file.name || '');
+  }
+
+  function normalizeAssetPath(value) {
+    return String(value || '').replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+/g, '/');
+  }
+
+  function dirnamePath(value) {
+    const normalized = normalizeAssetPath(value);
+    const index = normalized.lastIndexOf('/');
+    return index >= 0 ? normalized.slice(0, index) : '';
+  }
+
+  function makeRelativePath(baseDir, targetPath) {
+    const base = normalizeAssetPath(baseDir).split('/').filter(Boolean);
+    const target = normalizeAssetPath(targetPath).split('/').filter(Boolean);
+    while (base.length && target.length && base[0] === target[0]) {
+      base.shift();
+      target.shift();
+    }
+    return [...base.map(() => '..'), ...target].join('/');
+  }
+
+  function isUnsafeRelativePath(value) {
+    return normalizeAssetPath(value).split('/').includes('..');
+  }
+
+  function splitDomainInput(value) {
+    return String(value || '').split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
+  }
+
+  function normalizeDomainList(values) {
+    const domains = [];
+    for (const raw of values) {
+      const domain = normalizeDomain(raw);
+      if (domain && !domains.includes(domain)) domains.push(domain);
+    }
+    return domains;
+  }
+
+  function normalizeDomain(value) {
+    let raw = String(value || '').trim().toLowerCase();
+    if (!raw) return '';
+    raw = raw.replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/:\d+$/, '').replace(/^\.+|\.+$/g, '');
+    if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])$/.test(raw)) return '';
+    return raw;
   }
 
   function isHeadingLine(line) { return /^\s*#{1,6}\s+\S/.test(line); }

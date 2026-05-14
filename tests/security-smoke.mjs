@@ -27,8 +27,11 @@ assert.match(app, /javascript:alert\(1\)/, 'sample malicious link should exist i
 assert.match(app, /data:image\\\/\(png\|jpeg\|jpg\|gif\|webp\)/, 'only raster data images should be allowed');
 assert.match(securitySample, /https:\/\/example\.com\/tracker\.png/, 'sample remote image should be tested');
 assert.match(securitySample, /\\\\server\\share\\local sample\.webp/, 'UNC image sample should exist');
+assert.match(app, /pme_task_lists/, 'markdown-it task list extension should be enabled');
+assert.match(index, /id="codeLanguageOptions"/, 'code language suggestion list should exist');
+assert.match(app, /code-language-input/, 'rendered code blocks should expose a language input');
 
-const instrumented = app.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml, sanitizeImageUrl, sanitizeLinkUrl };\n})();');
+const instrumented = app.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml, sanitizeImageUrl, sanitizeLinkUrl, state };\n})();');
 const renderer = vm.runInNewContext(instrumented, {
   document: { addEventListener() {} },
   window: {},
@@ -76,5 +79,23 @@ const fallback = renderer.renderMarkdownHtml([
 ].join('\n'));
 assert.match(fallback, /mermaid-fallback/, 'unsupported mermaid should fall back visibly');
 assert.match(fallback, /mindmap/, 'unsupported mermaid source should remain visible');
+
+renderer.state.allowedLinkDomains = ['example.com'];
+assert.equal(renderer.sanitizeLinkUrl('https://example.com/docs'), 'https://example.com/docs');
+assert.equal(renderer.sanitizeLinkUrl('https://docs.example.com/a'), 'https://docs.example.com/a');
+assert.equal(renderer.sanitizeLinkUrl('https://evil.example.net/a'), '');
+
+renderer.state.assetUrls.set('images/a.png', 'blob:local-image');
+assert.match(renderer.renderMarkdownHtml('![a](images/a.png)'), /src="blob:local-image"/);
+
+const toc = renderer.renderMarkdownHtml([
+  '[toc]',
+  '',
+  '# A',
+  '## B',
+  '### C',
+].join('\n'));
+assert.match(toc, /<details open>/, 'top-level TOC entries should be expanded');
+assert.match(toc, /<details>/, 'nested TOC entries should be collapsible');
 
 console.log('security smoke checks passed');

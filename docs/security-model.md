@@ -8,7 +8,7 @@ Portable Markdown Editer protects local editing sessions from common Markdown pr
 2. JavaScript URL execution,
 3. remote image tracking,
 4. accidental network communication,
-5. dependency and CDN tampering.
+5. CDN tampering and runtime dependency fetching.
 
 ## Non-goals
 
@@ -19,9 +19,9 @@ Portable Markdown Editer protects local editing sessions from common Markdown pr
 ## Rendering pipeline
 
 1. Markdown text is normalized to LF line endings.
-2. Block parser classifies blocks such as headings, tables, code, lists, quotes, and paragraphs.
-3. Inline parser escapes text first and only reinserts app-generated placeholders for safe tags.
-4. URLs are sanitized before becoming attributes.
+2. The local bundled Markdown parser renders Markdown with raw HTML disabled.
+3. Renderer hooks sanitize links and images before they become attributes.
+4. Local bundled highlighter, Mermaid, and KaTeX integrations run inside the same CSP without network access.
 5. The result is inserted into the preview container.
 
 The app intentionally does not support raw HTML rendering.
@@ -30,10 +30,10 @@ The app intentionally does not support raw HTML rendering.
 
 | Type | Allowed | Blocked examples |
 | --- | --- | --- |
-| Link | relative, `#anchor` | `javascript:`, `vbscript:`, protocol-relative URLs, `http`, `https`, `mailto`, `tel`, `file` |
-| Image | raster `data:` URL, `blob:`, relative path, `file:` URL, Windows drive path, UNC path | `https://...`, `data:text/html`, `data:image/svg+xml`, non-raster file extensions |
+| Link | relative, `#anchor`, allowlisted `http`/`https` domains | `javascript:`, `vbscript:`, protocol-relative URLs, non-allowlisted `http`/`https`, `mailto`, `tel`, `file` |
+| Image | raster `data:` URL, `blob:`, folder-open relative path, `file:` URL, Windows drive path, UNC path | `https://...`, `data:text/html`, `data:image/svg+xml`, non-raster file extensions |
 
-Remote images are blocked to avoid tracking pixels and accidental network access. Local and network-drive image references are allowed only for PNG/JPEG/GIF/WebP paths visible to the current PC.
+Remote images are blocked to avoid tracking pixels and accidental network access. Local and network-drive image references are allowed only for PNG/JPEG/GIF/WebP paths visible to the current PC. Relative images are resolved against the opened Markdown file only when the user opens a folder, because browser file inputs do not expose the original file-system directory for a single selected file.
 
 ## Local storage
 

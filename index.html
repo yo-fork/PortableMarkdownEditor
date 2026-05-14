@@ -6,7 +6,13 @@
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: file:; media-src data: blob:; font-src 'self' data:; connect-src 'none'; worker-src 'none'; manifest-src 'none';">
   <title>Portable Markdown Editer</title>
+  <link rel="stylesheet" href="./vendor/highlight/styles/github-dark.min.css">
+  <link rel="stylesheet" href="./vendor/katex/katex.min.css">
   <link rel="stylesheet" href="./styles.css">
+  <script src="./vendor/markdown-it/markdown-it.min.js" defer></script>
+  <script src="./vendor/highlight/highlight.min.js" defer></script>
+  <script src="./vendor/mermaid/mermaid.min.js" defer></script>
+  <script src="./vendor/katex/katex.min.js" defer></script>
   <script src="./app.js" defer></script>
 </head>
 <body data-mode="rich">
@@ -18,17 +24,19 @@
         <span class="brand-mark" aria-hidden="true">M</span>
         <div>
           <h1>Portable Markdown Editer</h1>
-          <p>完全ローカル / Typora風Markdownエディタ</p>
+          <p>完全ローカル / リッチMarkdownエディタ</p>
         </div>
       </div>
 
       <nav class="toolbar" aria-label="ファイル操作">
         <button type="button" data-action="new" title="新規作成">新規</button>
         <button type="button" data-action="open" title="Markdownファイルを開く">開く</button>
+        <button type="button" data-action="open-folder" title="Markdownと画像を含むフォルダを開く">フォルダ</button>
         <button type="button" data-action="save-md" title="Markdownとして保存">保存</button>
         <button type="button" data-action="export-html" title="安全化済みHTMLを書き出す">HTML</button>
         <button type="button" data-action="print" title="PDF化・印刷">PDF/印刷</button>
         <button type="button" data-action="copy-html" title="HTMLをクリップボードへコピー">HTMLコピー</button>
+        <button type="button" data-action="link-settings" title="外部リンクを許可するドメイン">リンク許可</button>
       </nav>
 
       <nav class="toolbar compact" aria-label="Markdown挿入">
@@ -49,7 +57,7 @@
       </nav>
 
       <div class="view-controls" role="group" aria-label="表示モード">
-        <button type="button" data-action="mode" data-mode="rich" title="Typora風リッチ編集">リッチ</button>
+        <button type="button" data-action="mode" data-mode="rich" title="リッチ編集">リッチ</button>
         <button type="button" data-action="mode" data-mode="split" title="編集とプレビュー">分割</button>
         <button type="button" data-action="mode" data-mode="source" title="Markdownソースのみ">ソース</button>
         <button type="button" data-action="mode" data-mode="preview" title="プレビューのみ">プレビュー</button>
@@ -58,7 +66,7 @@
 
       <div class="security-badges" aria-label="セキュリティ状態">
         <span title="ネットワーク通信を使いません">LOCAL</span>
-        <span title="CDNや外部ライブラリを使いません">NO CDN</span>
+        <span title="CDNや外部配信のライブラリを使いません">NO CDN</span>
         <span title="Markdown内のHTMLは実行しません">HTML OFF</span>
       </div>
 
@@ -78,7 +86,7 @@
       </aside>
 
       <section class="editor-grid" aria-label="Markdown編集領域">
-        <section class="rich-pane" aria-label="Typora風リッチ編集">
+        <section class="rich-pane" aria-label="リッチ編集">
           <div class="pane-title">リッチ編集 <span>ブロックをクリックして直接編集</span></div>
           <div id="richEditor" class="rich-editor" tabindex="0"></div>
         </section>
@@ -103,12 +111,29 @@
   </div>
 
   <input id="fileInput" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden>
+  <input id="folderInput" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain,image/png,image/jpeg,image/gif,image/webp" webkitdirectory multiple hidden>
   <input id="imageInput" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+  <datalist id="codeLanguageOptions">
+    <option value="text"></option>
+    <option value="js"></option>
+    <option value="ts"></option>
+    <option value="python"></option>
+    <option value="html"></option>
+    <option value="css"></option>
+    <option value="json"></option>
+    <option value="bash"></option>
+    <option value="powershell"></option>
+    <option value="sql"></option>
+    <option value="yaml"></option>
+    <option value="xml"></option>
+    <option value="markdown"></option>
+    <option value="mermaid"></option>
+  </datalist>
 
   <dialog id="securityDialog" aria-labelledby="securityTitle">
     <form method="dialog" class="dialog-card">
       <h2 id="securityTitle">セキュリティモデル</h2>
-      <p>このエディタは完全ローカル実行を前提にしています。CDN、外部JavaScript、外部CSS、ネットワークAPIは使いません。</p>
+      <p>このエディタは完全ローカル実行を前提にしています。CDN、外部配信JavaScript、外部配信CSS、ネットワークAPIは使いません。</p>
       <ul>
         <li>Content Security Policyで通信、埋め込み、フォーム送信、外部スクリプトを禁止。</li>
         <li>Markdown内のHTMLは実行せず、文字としてエスケープ。</li>
@@ -121,5 +146,18 @@
       </menu>
     </form>
   </dialog>
+
+  <dialog id="linkDomainDialog" aria-labelledby="linkDomainTitle">
+    <form method="dialog" class="dialog-card">
+      <h2 id="linkDomainTitle">外部リンクの許可ドメイン</h2>
+      <p>1行に1ドメインを入力します。許可されていない外部リンクはプレビューでリンク化しません。</p>
+      <textarea id="allowedDomainsInput" class="dialog-textarea" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="example.com"></textarea>
+      <menu>
+        <button type="submit">キャンセル</button>
+        <button type="button" data-action="save-link-domains">保存</button>
+      </menu>
+    </form>
+  </dialog>
+
 </body>
 </html>
