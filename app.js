@@ -7,6 +7,7 @@
   const MAX_HIGHLIGHT_CHARS = 120000;
   const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
   const IMAGE_EXTENSION_PATTERN = /\.(?:png|jpe?g|gif|webp)(?:[?#].*)?$/i;
+  let mermaidRenderSerial = 0;
 
   const DEFAULT_MARKDOWN = `# Portable Markdown Editer
 
@@ -166,8 +167,16 @@ flowchart TD
     els.imageInput.addEventListener('change', onImageChosen);
 
     els.rich.addEventListener('click', (event) => {
+      if (event.target.closest('button')) return;
       const block = event.target.closest('.rich-block');
-      if (!block || event.target.closest('button')) return;
+      if (state.currentBlockEditor && block !== state.currentBlockEditor) {
+        cancelCurrentBlockEditor(block);
+        return;
+      }
+      if (!block) {
+        if (state.currentBlockEditor) cancelCurrentBlockEditor(null);
+        return;
+      }
       editRichBlock(block);
     });
 
@@ -724,6 +733,28 @@ flowchart TD
     });
   }
 
+  function cancelCurrentBlockEditor(nextBlock) {
+    const start = nextBlock?.dataset.start || '';
+    const end = nextBlock?.dataset.end || '';
+    state.currentBlockEditor = null;
+    renderRich();
+    if (start && end) {
+      const selector = `.rich-block[data-start="${cssEscape(start)}"][data-end="${cssEscape(end)}"]`;
+      const rerendered = els.rich.querySelector(selector);
+      if (rerendered) {
+        editRichBlock(rerendered);
+        setStatus('ブロック編集を切り替えました');
+        return;
+      }
+    }
+    setStatus('ブロック編集をキャンセルしました');
+  }
+
+  function cssEscape(value) {
+    if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(String(value));
+    return String(value).replace(/["\\]/g, '\\$&');
+  }
+
   function commitBlockEditor(block) {
     const textarea = block && block.querySelector('.block-editor');
     if (!block || !textarea) return;
@@ -1236,9 +1267,13 @@ flowchart TD
       const trimmed = line.trim();
       return trimmed && !trimmed.startsWith('%%');
     }) || '';
-    if (/^(?:graph|flowchart)\b/i.test(first)) return renderMermaidFlowchart(text);
-    if (/^sequenceDiagram\b/i.test(first)) return renderMermaidSequence(text);
-    return renderMermaidFallback(text, '未対応のMermaid構文');
+    try {
+      if (/^(?:graph|flowchart)\b/i.test(first)) return renderMermaidFlowchart(text);
+      if (/^sequenceDiagram\b/i.test(first)) return renderMermaidSequence(text);
+      return renderMermaidFallback(text, '未対応のMermaid構文');
+    } catch (_) {
+      return renderMermaidFallback(text, '描画できない構文をコードとして表示');
+    }
   }
 
   function renderMermaidFallback(code, message) {
@@ -1255,14 +1290,14 @@ flowchart TD
     if (!parsed.nodes.size) return renderMermaidFallback(code, '表示できるノードがありません');
 
     const layout = layoutFlowchart(parsed);
-    const markerId = `pme-arrow-${hashString(code)}`;
+    const markerId = nextMermaidId('arrow', code);
     const nodes = Array.from(parsed.nodes.values()).map((node) => renderFlowNode(node, layout.positions.get(node.id))).join('');
     const edges = parsed.edges.map((edge) => renderFlowEdge(edge, layout.positions, parsed.direction, markerId)).join('');
 
     return [
       '<figure class="mermaid-diagram mermaid-flowchart">',
       '<figcaption>Mermaid flowchart</figcaption>',
-      `<svg class="mermaid-svg" role="img" aria-label="Mermaid flowchart" viewBox="0 0 ${layout.width} ${layout.height}">`,
+      `<svg class="mermaid-svg" role="img" aria-label="Mermaid flowchart" width="${layout.width}" height="${layout.height}" viewBox="0 0 ${layout.width} ${layout.height}" preserveAspectRatio="xMidYMid meet">`,
       `<defs><marker id="${markerId}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>`,
       edges,
       nodes,
@@ -1284,7 +1319,7 @@ flowchart TD
       const line = rawLine.replace(/;$/, '').trim();
       if (!line || /^(?:subgraph|end|classDef|class|style|linkStyle)\b/i.test(line)) continue;
       const edge = parseMermaidEdgeLine(line);
-      if (edge) {
+      if (edge && edge.from && edge.to) {
         addFlowNode(nodes, edge.from);
         addFlowNode(nodes, edge.to);
         edges.push({ from: edge.from.id, to: edge.to.id, label: edge.label });
@@ -1300,11 +1335,10 @@ flowchart TD
   function parseMermaidEdgeLine(line) {
     let match = line.match(/^(.+?)\s*--\s*([^->]+?)\s*-->\s*(.+)$/);
     if (match) {
-      return {
-        from: parseMermaidNodeToken(match[1]),
-        to: parseMermaidNodeToken(match[3]),
-        label: match[2].trim(),
-      };
+      const from = parseMermaidNodeToken(match[1]);
+      const to = parseMermaidNodeToken(match[3]);
+      if (!from || !to) return null;
+      return { from, to, label: match[2].trim() };
     }
     match = line.match(/^(.+?)\s*(-->|---|==>|-.->)(?:\|([^|]+)\|)?\s*(.+)$/);
     if (!match) return null;
@@ -1318,13 +1352,13 @@ flowchart TD
     const token = String(value || '').trim().replace(/:::[A-Za-z][\w-]*$/, '').trim();
     const match = token.match(/^([A-Za-z][\w-]*)(?:(\[\[([^\]]+)\]\])|(\[([^\]]+)\])|(\(\(([^\)]+)\)\))|(\(([^\)]+)\))|(\{([^}]+)\})|(>([^\]]+)\]))?$/);
     if (!match) return null;
-    const label = match[3] || match[5] || match[7] || match[9] || match[11] || match[13] || match[1];
+    const label = cleanMermaidLabel(match[3] || match[5] || match[7] || match[9] || match[11] || match[13] || match[1]);
     let shape = 'rect';
     if (match[6]) shape = 'circle';
     if (match[8]) shape = 'stadium';
     if (match[10]) shape = 'diamond';
     if (match[12]) shape = 'asymmetric';
-    return { id: match[1], label: label.trim(), shape };
+    return { id: match[1], label, shape };
   }
 
   function addFlowNode(nodes, node) {
@@ -1424,7 +1458,7 @@ flowchart TD
     const width = Math.max(360, pad * 2 + (parsed.participants.length - 1) * participantGap + 150);
     const height = pad * 2 + headerHeight + parsed.events.length * rowGap + 20;
     const xFor = new Map(parsed.participants.map((participant, index) => [participant.id, pad + 75 + index * participantGap]));
-    const markerId = `pme-seq-arrow-${hashString(code)}`;
+    const markerId = nextMermaidId('seq-arrow', code);
 
     const lifelines = parsed.participants.map((participant) => {
       const x = xFor.get(participant.id);
@@ -1453,7 +1487,7 @@ flowchart TD
     return [
       '<figure class="mermaid-diagram mermaid-sequence">',
       '<figcaption>Mermaid sequenceDiagram</figcaption>',
-      `<svg class="mermaid-svg" role="img" aria-label="Mermaid sequence diagram" viewBox="0 0 ${width} ${height}">`,
+      `<svg class="mermaid-svg" role="img" aria-label="Mermaid sequence diagram" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet">`,
       `<defs><marker id="${markerId}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>`,
       lifelines,
       events,
@@ -1525,6 +1559,19 @@ flowchart TD
     return [...lines.slice(0, 2), `${lines[2].slice(0, Math.max(1, maxChars - 1))}…`];
   }
 
+  function cleanMermaidLabel(value) {
+    return String(value || '')
+      .trim()
+      .replace(/^["']|["']$/g, '')
+      .replace(/\\n/g, '\n')
+      .trim();
+  }
+
+  function nextMermaidId(prefix, code) {
+    mermaidRenderSerial = (mermaidRenderSerial + 1) % Number.MAX_SAFE_INTEGER;
+    return `pme-${prefix}-${hashString(code)}-${mermaidRenderSerial}`;
+  }
+
   function hashString(value) {
     let hash = 2166136261;
     const text = String(value || '');
@@ -1548,7 +1595,7 @@ flowchart TD
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data: blob: file:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none';">
 <title>${title}</title>
 <style>
-body{margin:0;padding:clamp(1rem,4vw,4rem);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.75;color:#111827;background:#fff}main{max-width:920px;margin:auto}h1,h2{border-bottom:1px solid #e5e7eb;padding-bottom:.25rem}pre{overflow:auto;background:#0f172a;color:#e5e7eb;border-radius:.75rem;padding:1rem}code{font-family:Consolas,monospace;background:#f3f4f6;border-radius:.25rem;padding:.1rem .25rem}pre code{background:transparent;padding:0}.code-lang{float:right;color:#94a3b8;font:700 .72rem system-ui}.tok-comment{color:#94a3b8}.tok-string{color:#a7f3d0}.tok-number{color:#fde68a}.tok-keyword{color:#93c5fd}.tok-function{color:#f9a8d4}.tok-property{color:#c4b5fd}.tok-tag{color:#fca5a5}.tok-operator{color:#cbd5e1}blockquote{border-left:.25rem solid #2563eb;margin:1rem 0;padding:.25rem 1rem;background:#eff6ff}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d1d5db;padding:.5rem}.align-left{text-align:left}.align-center{text-align:center}.align-right{text-align:right}img{max-width:100%}.meta{color:#6b7280;font-size:.9rem}.blocked-image,.blocked-link{color:#b42318;border:1px solid #f3b8b1;border-radius:.3rem;padding:.1rem .3rem}.toc{border:1px solid #e5e7eb;border-radius:.75rem;padding:1rem}.toc a{display:block;color:#2563eb;text-decoration:none}.mermaid-diagram{margin:1.25rem 0}.mermaid-diagram figcaption{font-weight:700;color:#475569;margin-bottom:.4rem}.mermaid-svg{width:100%;height:auto;border:1px solid #d1d5db;border-radius:.75rem;background:#f8fafc}.mermaid-node rect,.mermaid-node ellipse,.mermaid-node polygon,.mermaid-seq-participant rect{fill:#fff;stroke:#2563eb;stroke-width:1.5}.mermaid-edge path,.mermaid-message path{stroke:#334155;stroke-width:1.6;fill:none}.mermaid-edge-label,.mermaid-message text{font:12px system-ui;fill:#475569;text-anchor:middle}.mermaid-node-label{font:12px system-ui;fill:#0f172a}.mermaid-lifeline{stroke:#94a3b8;stroke-dasharray:5 5}.mermaid-note rect{fill:#fef3c7;stroke:#f59e0b}
+body{margin:0;padding:clamp(1rem,4vw,4rem);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.75;color:#111827;background:#fff}main{max-width:920px;margin:auto}h1,h2{border-bottom:1px solid #e5e7eb;padding-bottom:.25rem}pre{overflow:auto;background:#0f172a;color:#e5e7eb;border-radius:.75rem;padding:1rem}code{font-family:Consolas,monospace;background:#f3f4f6;border-radius:.25rem;padding:.1rem .25rem}pre code{background:transparent;padding:0}.code-lang{float:right;color:#94a3b8;font:700 .72rem system-ui}.tok-comment{color:#94a3b8}.tok-string{color:#a7f3d0}.tok-number{color:#fde68a}.tok-keyword{color:#93c5fd}.tok-function{color:#f9a8d4}.tok-property{color:#c4b5fd}.tok-tag{color:#fca5a5}.tok-operator{color:#cbd5e1}blockquote{border-left:.25rem solid #2563eb;margin:1rem 0;padding:.25rem 1rem;background:#eff6ff}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d1d5db;padding:.5rem}.align-left{text-align:left}.align-center{text-align:center}.align-right{text-align:right}img{max-width:100%}.meta{color:#6b7280;font-size:.9rem}.blocked-image,.blocked-link{color:#b42318;border:1px solid #f3b8b1;border-radius:.3rem;padding:.1rem .3rem}.toc{border:1px solid #e5e7eb;border-radius:.75rem;padding:1rem}.toc a{display:block;color:#2563eb;text-decoration:none}.mermaid-diagram{margin:1.25rem 0}.mermaid-diagram figcaption{font-weight:700;color:#475569;margin-bottom:.4rem}.mermaid-svg{width:100%;height:auto;min-height:10rem;max-height:70vh;border:1px solid #d1d5db;border-radius:.75rem;background:#f8fafc}.mermaid-fallback pre{margin:0}.mermaid-node rect,.mermaid-node ellipse,.mermaid-node polygon,.mermaid-seq-participant rect{fill:#fff;stroke:#2563eb;stroke-width:1.5}.mermaid-edge path,.mermaid-message path{stroke:#334155;stroke-width:1.6;fill:none}.mermaid-edge-label,.mermaid-message text{font:12px system-ui;fill:#475569;text-anchor:middle}.mermaid-node-label{font:12px system-ui;fill:#0f172a}.mermaid-lifeline{stroke:#94a3b8;stroke-dasharray:5 5}.mermaid-note rect{fill:#fef3c7;stroke:#f59e0b}
 </style>
 </head>
 <body>

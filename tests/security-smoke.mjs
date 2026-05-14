@@ -61,10 +61,20 @@ const rendered = renderer.renderMarkdownHtml([
 
 assert.match(rendered, /tok-keyword/, 'code blocks should be highlighted');
 assert.match(rendered, /mermaid-diagram/, 'mermaid blocks should render locally');
+assert.match(rendered, /<svg class="mermaid-svg"[^>]+width="\d+"[^>]+height="\d+"/, 'mermaid SVG should have explicit dimensions');
 assert.match(rendered, /file:\/\/\/Z:\/share\/local%20sample\.webp/, 'Windows drive images should render as file URLs');
 assert.match(rendered, /blocked-image/, 'remote images should remain blocked');
 assert.equal(renderer.sanitizeLinkUrl('javascript:alert(1)'), '');
 assert.equal(renderer.sanitizeImageUrl('https://example.com/a.png'), '');
 assert.equal(renderer.sanitizeImageUrl(uncPath), 'file://server/share/local%20sample.webp');
+
+const fallback = renderer.renderMarkdownHtml([
+  '```mermaid',
+  'mindmap',
+  '  root((Markdown))',
+  '```',
+].join('\n'));
+assert.match(fallback, /mermaid-fallback/, 'unsupported mermaid should fall back visibly');
+assert.match(fallback, /mindmap/, 'unsupported mermaid source should remain visible');
 
 console.log('security smoke checks passed');

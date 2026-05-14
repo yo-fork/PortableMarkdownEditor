@@ -423,10 +423,14 @@ body.outline-collapsed .sidebar { display: none; }
   display: block;
   width: 100%;
   height: auto;
+  min-height: 10rem;
+  max-height: 70vh;
   border: 1px solid var(--border);
   border-radius: 0.8rem;
   background: color-mix(in srgb, var(--panel) 92%, var(--panel-soft));
 }
+
+.mermaid-fallback pre { margin: 0; }
 
 .mermaid-svg marker path { fill: var(--accent); }
 .mermaid-node rect,
