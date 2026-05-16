@@ -4,26 +4,26 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: file:; media-src data: blob:; font-src 'self' data:; connect-src 'none'; worker-src 'none'; manifest-src 'none';">
-  <title>Portable Markdown Editer</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; media-src data: blob:; font-src 'self' data:; connect-src 'none'; worker-src 'none'; manifest-src 'none';">
+  <title>Portable Markdown Editor</title>
   <link rel="stylesheet" href="./vendor/highlight/styles/github-dark.min.css">
   <link rel="stylesheet" href="./vendor/katex/katex.min.css">
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./styles.css?v=mermaid-visual-fix-3">
   <script src="./vendor/markdown-it/markdown-it.min.js" defer></script>
   <script src="./vendor/highlight/highlight.min.js" defer></script>
   <script src="./vendor/mermaid/mermaid.min.js" defer></script>
   <script src="./vendor/katex/katex.min.js" defer></script>
-  <script src="./app.js" defer></script>
+  <script src="./app.js?v=mermaid-visual-fix-3" defer></script>
 </head>
 <body data-mode="rich">
   <a class="skip-link" href="#mainWorkspace">本文へ移動</a>
 
   <div class="app-shell" id="appShell">
     <header class="topbar" aria-label="アプリ操作">
-      <div class="brand" aria-label="Portable Markdown Editer">
+      <div class="brand" aria-label="Portable Markdown Editor">
         <span class="brand-mark" aria-hidden="true">M</span>
         <div>
-          <h1>Portable Markdown Editer</h1>
+          <h1>Portable Markdown Editor</h1>
           <p>完全ローカル / リッチMarkdownエディタ</p>
         </div>
       </div>

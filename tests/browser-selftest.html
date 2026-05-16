@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Portable Markdown Editor vendor self-test</title>
+  <link rel="stylesheet" href="../vendor/highlight/styles/github-dark.min.css">
+  <link rel="stylesheet" href="../vendor/katex/katex.min.css">
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; line-height: 1.6; }
+    .pass { color: #047857; }
+    .fail { color: #b91c1c; }
+    pre { padding: 1rem; border-radius: 0.5rem; overflow: auto; }
+    #mermaid-output svg, #katex-output .katex { max-width: 100%; }
+  </style>
+</head>
+<body>
+  <h1>Portable Markdown Editor vendor self-test</h1>
+  <p>All libraries are loaded from local <code>vendor/</code> paths. This page does not use network APIs.</p>
+  <ol id="results"></ol>
+  <div id="markdown-output"></div>
+  <pre><code id="highlight-output" class="language-js"></code></pre>
+  <div id="mermaid-output"></div>
+  <div id="katex-output"></div>
+
+  <script src="../vendor/markdown-it/markdown-it.min.js"></script>
+  <script src="../vendor/highlight/highlight.min.js"></script>
+  <script src="../vendor/mermaid/mermaid.min.js"></script>
+  <script src="../vendor/katex/katex.min.js"></script>
+  <script>
+    const results = document.getElementById('results');
+    const add = (name, ok, detail = '') => {
+      const item = document.createElement('li');
+      item.className = ok ? 'pass' : 'fail';
+      item.textContent = `${ok ? 'PASS' : 'FAIL'}: ${name}${detail ? ` - ${detail}` : ''}`;
+      results.appendChild(item);
+    };
+
+    try {
+      const md = window.markdownit({ html: false });
+      const html = md.render('# Title\n\n**bold**');
+      document.getElementById('markdown-output').innerHTML = html;
+      add('markdown-it renders Markdown', /<h1>Title<\/h1>/.test(html) && /<strong>bold<\/strong>/.test(html));
+    } catch (error) {
+      add('markdown-it renders Markdown', false, error.message);
+    }
+
+    try {
+      const code = 'const value = 1;';
+      const highlighted = window.hljs.highlight(code, { language: 'javascript' }).value;
+      document.getElementById('highlight-output').innerHTML = highlighted;
+      add('highlight.js highlights JavaScript', /hljs-/.test(highlighted));
+    } catch (error) {
+      add('highlight.js highlights JavaScript', false, error.message);
+    }
+
+    try {
+      window.mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: 'strict',
+        htmlLabels: false,
+        flowchart: { htmlLabels: false, useMaxWidth: true },
+      });
+      Promise.resolve()
+        .then(async () => {
+          const simple = await window.mermaid.render('selftest-mermaid-simple', 'flowchart TD\n  A[Start] --> B[End]');
+          const loop = await window.mermaid.render('selftest-mermaid-loop', [
+            'flowchart TD',
+            '  A[Markdownを書く] --> B{プレビュー}',
+            '  B -->|OK| C[保存]',
+            '  B -->|修正| A',
+          ].join('\n'));
+          const simpleSvg = typeof simple === 'string' ? simple : simple.svg;
+          const loopSvg = typeof loop === 'string' ? loop : loop.svg;
+          document.getElementById('mermaid-output').innerHTML = `${simpleSvg}<hr>${loopSvg}`;
+          add('Mermaid renders flowchart SVG', /<svg[\s\S]*<\/svg>/.test(simpleSvg));
+          add('Mermaid renders loop flowchart SVG', /<svg[\s\S]*<\/svg>/.test(loopSvg) && !/NaN/.test(loopSvg));
+        })
+        .catch((error) => add('Mermaid renders flowchart SVG', false, error.message));
+    } catch (error) {
+      add('Mermaid renders flowchart SVG', false, error.message);
+    }
+
+    try {
+      const inline = window.katex.renderToString('x+1', { throwOnError: false });
+      const display = window.katex.renderToString('\\int_0^1 x^2 dx', { displayMode: true, throwOnError: false });
+      document.getElementById('katex-output').innerHTML = `${inline}<hr>${display}`;
+      add('KaTeX renders inline and display math', /katex/.test(inline) && /katex/.test(display));
+    } catch (error) {
+      add('KaTeX renders inline and display math', false, error.message);
+    }
+  </script>
+</body>
+</html>

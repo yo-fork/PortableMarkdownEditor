@@ -2,7 +2,7 @@
 
 ## Goals
 
-Portable Markdown Editer protects local editing sessions from common Markdown preview risks:
+Portable Markdown Editor protects local editing sessions from common Markdown preview risks:
 
 1. raw HTML execution,
 2. JavaScript URL execution,
@@ -26,6 +26,8 @@ Portable Markdown Editer protects local editing sessions from common Markdown pr
 
 The app intentionally does not support raw HTML rendering.
 
+The runtime does not use npm, CDN, external JavaScript, external CSS, external APIs, `fetch`, XHR, WebSocket, Worker, dynamic code evaluation, or package downloads. Browser libraries are fixed local files under `vendor/`.
+
 ## URL policy
 
 | Type | Allowed | Blocked examples |
@@ -33,7 +35,15 @@ The app intentionally does not support raw HTML rendering.
 | Link | relative, `#anchor`, allowlisted `http`/`https` domains | `javascript:`, `vbscript:`, protocol-relative URLs, non-allowlisted `http`/`https`, `mailto`, `tel`, `file` |
 | Image | raster `data:` URL, `blob:`, folder-open relative path, `file:` URL, Windows drive path, UNC path | `https://...`, `data:text/html`, `data:image/svg+xml`, non-raster file extensions |
 
-Remote images are blocked to avoid tracking pixels and accidental network access. Local and network-drive image references are allowed only for PNG/JPEG/GIF/WebP paths visible to the current PC. Relative images are resolved against the opened Markdown file only when the user opens a folder, because browser file inputs do not expose the original file-system directory for a single selected file.
+Remote images are blocked to avoid tracking pixels and accidental network access. Local and network-drive image references are allowed only for PNG/JPEG/GIF/WebP paths visible to the current PC. Relative images are resolved against the opened Markdown file only when the user opens a folder. In browsers with File System Access API support, the folder button reads a user-selected directory handle and maps image files by relative path. Browsers do not expose the absolute folder path to web pages, so the app stores only the selected folder's relative file tree for the current session.
+
+## Bundled libraries
+
+- markdown-it is initialized with raw HTML disabled.
+- Mermaid is initialized with `securityLevel: 'strict'` and `htmlLabels: false`; generated SVG is sanitized before insertion, and failures fall back to escaped source code.
+- KaTeX JavaScript, CSS, and fonts are loaded from `vendor/katex/`; render errors are displayed as escaped math source.
+- CSP keeps `script-src 'self'`, `font-src 'self' data:`, and `connect-src 'none'`.
+- `style-src 'self' 'unsafe-inline'` is allowed for Mermaid/KaTeX generated styles only. Script execution, network connections, and raw HTML remain blocked.
 
 ## Local storage
 

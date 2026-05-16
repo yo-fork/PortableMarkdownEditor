@@ -10,10 +10,14 @@
   const VENDOR_TOC_MARKER = 'PME_TOC_MARKER_7B4E2D8C';
   const RICH_INLINE_SOURCE_SELECTOR = 'strong, b, em, i, del, s, code, a, img, .math-inline';
   const RICH_INLINE_EDIT_BLOCK_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, li, td, th';
+  const DEFAULT_MERMAID_ZOOM = 0.7;
+  const MERMAID_ZOOM_FACTOR = 1.1;
+  const MERMAID_WHEEL_ZOOM_SENSITIVITY = 0.0012;
   let mermaidRenderSerial = 0;
+  let mermaidRenderQueue = Promise.resolve();
   let vendorMarkdownRenderer = null;
 
-  const DEFAULT_MARKDOWN = `# Portable Markdown Editer
+  const DEFAULT_MARKDOWN = `# Portable Markdown Editor
 
 インストール不要で使える、完全ローカル実行のMarkdownエディタです。
 
@@ -93,6 +97,7 @@ flowchart TD
     richInlineSource: null,
     richInlineActivationSuppressed: false,
     richSelectionLock: false,
+    mermaidPan: null,
     allowedLinkDomains: [],
     assetUrls: new Map(),
     markdownRelativePath: '',
@@ -175,6 +180,11 @@ flowchart TD
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('selectionchange', onSelectionChange);
     document.addEventListener('focusin', onDocumentFocusIn);
+    document.addEventListener('wheel', onDocumentWheel, { passive: false });
+    document.addEventListener('pointerdown', onDocumentPointerDown);
+    document.addEventListener('pointermove', onDocumentPointerMove);
+    document.addEventListener('pointerup', onDocumentPointerEnd);
+    document.addEventListener('pointercancel', onDocumentPointerEnd);
 
     els.source.addEventListener('input', () => {
       state.markdown = normalizeNewlines(els.source.value);
@@ -223,7 +233,7 @@ flowchart TD
         els.fileInput.click();
         break;
       case 'open-folder':
-        els.folderInput.click();
+        openFolder();
         break;
       case 'save-md':
         downloadMarkdown();
@@ -261,6 +271,9 @@ flowchart TD
       case 'insert-mermaid':
         insertMermaid();
         break;
+      case 'mermaid-zoom':
+        handleMermaidZoom(actionButton);
+        break;
       case 'mode':
         applyMode(actionButton.dataset.mode || 'split');
         break;
@@ -276,6 +289,60 @@ flowchart TD
       default:
         break;
     }
+  }
+
+  function onDocumentWheel(event) {
+    const target = eventTargetElement(event)?.closest?.('.mermaid-render-target.is-zoomable');
+    if (!target) return;
+    const figure = target.closest('.mermaid-diagram');
+    if (!figure) return;
+    event.preventDefault();
+    const current = mermaidZoomValue(figure);
+    const factor = Math.exp(-event.deltaY * MERMAID_WHEEL_ZOOM_SENSITIVITY);
+    setMermaidZoom(figure, current * factor, {
+      clientX: event.clientX,
+      clientY: event.clientY,
+    });
+  }
+
+  function onDocumentPointerDown(event) {
+    if (event.button !== 0) return;
+    const target = eventTargetElement(event);
+    const renderTarget = target?.closest?.('.mermaid-render-target.is-zoomable');
+    if (!renderTarget || !els.preview.contains(renderTarget)) return;
+    if (target.closest('button, input, textarea, select, a, .rich-source-editor, .rich-source-actions')) return;
+    state.mermaidPan = {
+      target: renderTarget,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      scrollLeft: renderTarget.scrollLeft,
+      scrollTop: renderTarget.scrollTop,
+      moved: false,
+    };
+    renderTarget.classList.add('is-panning');
+    renderTarget.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  }
+
+  function onDocumentPointerMove(event) {
+    const pan = state.mermaidPan;
+    if (!pan || pan.pointerId !== event.pointerId || !pan.target.isConnected) return;
+    const dx = event.clientX - pan.startX;
+    const dy = event.clientY - pan.startY;
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) pan.moved = true;
+    pan.target.scrollLeft = pan.scrollLeft - dx;
+    pan.target.scrollTop = pan.scrollTop - dy;
+    event.preventDefault();
+  }
+
+  function onDocumentPointerEnd(event) {
+    const pan = state.mermaidPan;
+    if (!pan || pan.pointerId !== event.pointerId) return;
+    pan.target.classList.remove('is-panning');
+    pan.target.releasePointerCapture?.(event.pointerId);
+    state.mermaidPan = null;
+    if (pan.moved) event.preventDefault();
   }
 
   function onDocumentChange(event) {
@@ -312,6 +379,14 @@ flowchart TD
     }
 
     if (target.closest('.rich-source-editor, .rich-source-actions')) {
+      event.stopPropagation();
+      return;
+    }
+
+    const mermaidZoomButton = target.closest('[data-action="mermaid-zoom"]');
+    if (mermaidZoomButton && els.rich.contains(mermaidZoomButton)) {
+      event.preventDefault();
+      handleMermaidZoom(mermaidZoomButton);
       event.stopPropagation();
       return;
     }
@@ -385,6 +460,65 @@ flowchart TD
     renderRich();
     setStatus(`${richSourceTitle(active.dataset.richSourceKind)}ソース編集をキャンセルしました`);
     return true;
+  }
+
+  function handleMermaidZoom(button) {
+    const figure = button?.closest?.('.mermaid-diagram');
+    if (!figure) return;
+    const current = mermaidZoomValue(figure);
+    const mode = button.dataset.zoom || 'reset';
+    const next = mode === 'in'
+      ? current * MERMAID_ZOOM_FACTOR
+      : mode === 'out'
+        ? current / MERMAID_ZOOM_FACTOR
+        : 1;
+    setMermaidZoom(figure, next);
+  }
+
+  function mermaidZoomValue(figure) {
+    const value = Number.parseFloat(figure?.dataset?.mermaidZoom || '');
+    return Number.isFinite(value) ? value : DEFAULT_MERMAID_ZOOM;
+  }
+
+  function setMermaidZoom(figure, zoom, options = null) {
+    const next = Number(zoom);
+    if (!Number.isFinite(next) || next <= 0) return;
+    const target = figure.querySelector('.mermaid-render-target');
+    const anchor = mermaidZoomAnchor(target, options);
+    figure.dataset.mermaidZoom = String(next);
+    const label = figure.querySelector('.mermaid-zoom-label');
+    if (label) label.textContent = formatMermaidZoomPercent(next);
+    applyMermaidZoom(target);
+    restoreMermaidZoomAnchor(target, anchor);
+    setStatus(`Mermaid図: ${formatMermaidZoomPercent(next)}`);
+  }
+
+  function mermaidZoomAnchor(target, options) {
+    if (!target || !options || !Number.isFinite(options.clientX) || !Number.isFinite(options.clientY)) return null;
+    const rect = target.getBoundingClientRect();
+    const viewX = options.clientX - rect.left;
+    const viewY = options.clientY - rect.top;
+    if (viewX < 0 || viewY < 0 || viewX > rect.width || viewY > rect.height) return null;
+    return {
+      viewX,
+      viewY,
+      ratioX: (target.scrollLeft + viewX) / Math.max(1, target.scrollWidth),
+      ratioY: (target.scrollTop + viewY) / Math.max(1, target.scrollHeight),
+    };
+  }
+
+  function restoreMermaidZoomAnchor(target, anchor) {
+    if (!target || !anchor) return;
+    target.scrollLeft = (anchor.ratioX * target.scrollWidth) - anchor.viewX;
+    target.scrollTop = (anchor.ratioY * target.scrollHeight) - anchor.viewY;
+  }
+
+  function formatMermaidZoomPercent(zoom) {
+    const percent = Number(zoom) * 100;
+    if (!Number.isFinite(percent) || percent <= 0) return '100%';
+    if (percent >= 10) return `${Math.round(percent)}%`;
+    if (percent >= 1) return `${Math.round(percent * 10) / 10}%`;
+    return `${Number(percent.toPrecision(2))}%`;
   }
 
   function handleRichLinkClick(event, link) {
@@ -1243,20 +1377,58 @@ flowchart TD
     reader.readAsText(file, 'utf-8');
   }
 
+  async function openFolder() {
+    if (window.showDirectoryPicker) {
+      try {
+        const directoryHandle = await window.showDirectoryPicker({ mode: 'read' });
+        const entries = await collectDirectoryEntries(directoryHandle);
+        await openFolderEntries(entries, directoryHandle.name || 'selected folder');
+        return;
+      } catch (error) {
+        if (error?.name !== 'AbortError') setStatus('フォルダの読み込みに失敗しました');
+        return;
+      }
+    }
+    els.folderInput.click();
+  }
+
   function onFolderChosen(event) {
     const files = Array.from(event.target.files || []);
     event.target.value = '';
     if (!files.length) return;
 
-    const markdownFiles = files.filter((file) => isMarkdownFile(file));
-    if (!markdownFiles.length) {
+    openFolderEntries(files.map((file) => fileEntry(file)), '');
+  }
+
+  async function collectDirectoryEntries(directoryHandle, prefix = '') {
+    const entries = [];
+    const iterator = directoryHandle.entries ? directoryHandle.entries() : directoryHandle.values();
+    for await (const item of iterator) {
+      const handle = Array.isArray(item) ? item[1] : item;
+      const name = Array.isArray(item) ? item[0] : handle.name;
+      const relativePath = normalizeAssetPath(`${prefix}${name || handle.name || ''}`);
+      if (handle.kind === 'file') {
+        const file = await handle.getFile();
+        entries.push(fileEntry(file, relativePath));
+      } else if (handle.kind === 'directory') {
+        entries.push(...await collectDirectoryEntries(handle, `${relativePath}/`));
+      }
+    }
+    return entries;
+  }
+
+  async function openFolderEntries(entries, folderName) {
+    if (!entries.length) return;
+
+    const markdownEntries = entries.filter((entry) => isMarkdownFile(entry.file));
+    if (!markdownEntries.length) {
       setStatus('フォルダ内にMarkdownファイルがありません');
       return;
     }
 
-    const chosen = chooseMarkdownFile(markdownFiles);
+    const chosen = chooseMarkdownEntry(markdownEntries);
     if (!chosen) return;
-    if (chosen.size > 10 * 1024 * 1024) {
+    if (chosen.file.size > 10 * 1024 * 1024) {
       setStatus('10MBを超えるファイルは読み込みません');
       return;
     }
@@ -1265,18 +1437,19 @@ flowchart TD
     reader.onload = () => {
       clearAssetUrls();
       state.markdown = normalizeNewlines(String(reader.result || ''));
-      state.fileName = safeFileName(chosen.name || 'untitled.md');
-      state.markdownRelativePath = normalizeAssetPath(chosen.webkitRelativePath || chosen.name || '');
-      buildFolderAssetUrls(files, dirnamePath(state.markdownRelativePath));
+      state.fileName = safeFileName(chosen.file.name || 'untitled.md');
+      state.markdownRelativePath = normalizeAssetPath(chosen.relativePath || chosen.file.name || '');
+      buildFolderAssetUrls(entries, dirnamePath(state.markdownRelativePath));
       state.dirty = false;
       els.source.value = state.markdown;
       renderAll('open-folder');
       persistDraft();
       const count = state.assetUrls.size;
-      setStatus(`${state.fileName} をフォルダ基準で開きました。画像候補: ${count}`);
+      const suffix = folderName ? ` (${folderName})` : '';
+      setStatus(`${state.fileName} をフォルダ基準で開きました${suffix}。画像候補: ${count}`);
     };
     reader.onerror = () => setStatus('ファイルの読み込みに失敗しました');
-    reader.readAsText(chosen, 'utf-8');
+    reader.readAsText(chosen.file, 'utf-8');
   }
 
   function onImageChosen(event) {
@@ -1818,8 +1991,11 @@ flowchart TD
         startOnLoad: false,
         securityLevel: 'strict',
         theme: 'base',
-        htmlLabels: true,
-        flowchart: { htmlLabels: true, useMaxWidth: true },
+        htmlLabels: false,
+        flowchart: {
+          htmlLabels: false,
+          useMaxWidth: true,
+        },
         sequence: { useMaxWidth: true },
         themeVariables: mermaidThemeVariables(),
       });
@@ -1850,6 +2026,42 @@ flowchart TD
         clusterBorder: '#475569',
         noteBkgColor: '#3b2f0b',
         noteTextColor: '#fef3c7',
+        sectionBkgColor: '#172554',
+        altSectionBkgColor: '#064e3b',
+        gridColor: '#64748b',
+        taskBkgColor: '#60a5fa',
+        taskBorderColor: '#93c5fd',
+        taskTextColor: '#0f172a',
+        taskTextLightColor: '#0f172a',
+        taskTextOutsideColor: '#f8fafc',
+        activeTaskBkgColor: '#fbbf24',
+        activeTaskBorderColor: '#fde68a',
+        doneTaskBkgColor: '#64748b',
+        doneTaskBorderColor: '#94a3b8',
+        todayLineColor: '#fb7185',
+        pie1: '#60a5fa',
+        pie2: '#34d399',
+        pie3: '#fbbf24',
+        pie4: '#fb7185',
+        pie5: '#a78bfa',
+        pie6: '#2dd4bf',
+        pie7: '#f472b6',
+        pie8: '#c084fc',
+        pieStrokeColor: '#111827',
+        pieOuterStrokeColor: '#94a3b8',
+        pieTitleTextSize: '18px',
+        pieSectionTextSize: '15px',
+        pieLegendTextSize: '14px',
+        git0: '#60a5fa',
+        git1: '#34d399',
+        git2: '#fbbf24',
+        git3: '#fb7185',
+        git4: '#a78bfa',
+        git5: '#2dd4bf',
+        git6: '#f472b6',
+        git7: '#c084fc',
+        gitBranchLabel0: '#f8fafc',
+        gitBranchLabel1: '#0f172a',
         fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
       };
     }
@@ -1875,6 +2087,42 @@ flowchart TD
       clusterBorder: '#cbd5e1',
       noteBkgColor: '#fef3c7',
       noteTextColor: '#713f12',
+      sectionBkgColor: '#eef4ff',
+      altSectionBkgColor: '#f0fdf4',
+      gridColor: '#9ca3af',
+      taskBkgColor: '#bfdbfe',
+      taskBorderColor: '#2563eb',
+      taskTextColor: '#111827',
+      taskTextLightColor: '#111827',
+      taskTextOutsideColor: '#111827',
+      activeTaskBkgColor: '#fde68a',
+      activeTaskBorderColor: '#d97706',
+      doneTaskBkgColor: '#d1d5db',
+      doneTaskBorderColor: '#6b7280',
+      todayLineColor: '#dc2626',
+      pie1: '#2563eb',
+      pie2: '#16a34a',
+      pie3: '#f59e0b',
+      pie4: '#dc2626',
+      pie5: '#7c3aed',
+      pie6: '#0d9488',
+      pie7: '#db2777',
+      pie8: '#9333ea',
+      pieStrokeColor: '#ffffff',
+      pieOuterStrokeColor: '#334155',
+      pieTitleTextSize: '18px',
+      pieSectionTextSize: '15px',
+      pieLegendTextSize: '14px',
+      git0: '#2563eb',
+      git1: '#16a34a',
+      git2: '#f59e0b',
+      git3: '#dc2626',
+      git4: '#7c3aed',
+      git5: '#0d9488',
+      git6: '#db2777',
+      git7: '#9333ea',
+      gitBranchLabel0: '#ffffff',
+      gitBranchLabel1: '#ffffff',
       fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
     };
   }
@@ -2733,13 +2981,35 @@ flowchart TD
   function renderMermaidPlaceholder(code) {
     const id = nextMermaidId('diagram', code);
     return [
-      '<figure class="mermaid-diagram">',
-      '<figcaption>Mermaid <span>クリックでコード編集</span></figcaption>',
+      `<figure class="mermaid-diagram" data-mermaid-zoom="${DEFAULT_MERMAID_ZOOM}">`,
+      renderMermaidCaption('クリックでコード編集'),
       `<div class="mermaid-render-target" data-mermaid-render-id="${escapeAttribute(id)}" data-mermaid-source="${escapeAttribute(code)}">`,
-      `<pre class="code-block language-mermaid"><code data-lang="mermaid">${escapeHtml(code)}</code></pre>`,
+      renderMermaidFallbackPre(code),
       '</div>',
       '</figure>',
     ].join('');
+  }
+
+  function renderMermaidCaption(hint) {
+    const percent = formatMermaidZoomPercent(DEFAULT_MERMAID_ZOOM);
+    return [
+      '<figcaption>',
+      '<span class="mermaid-caption-title">Mermaid</span>',
+      '<span class="mermaid-caption-tools">',
+      '<span class="mermaid-zoom-controls" aria-label="Mermaid図の拡大縮小">',
+      '<button type="button" class="mermaid-zoom-button" data-action="mermaid-zoom" data-zoom="out" title="縮小" aria-label="Mermaid図を縮小">−</button>',
+      `<span class="mermaid-zoom-label">${percent}</span>`,
+      '<button type="button" class="mermaid-zoom-button" data-action="mermaid-zoom" data-zoom="in" title="拡大" aria-label="Mermaid図を拡大">＋</button>',
+      '<button type="button" class="mermaid-zoom-reset" data-action="mermaid-zoom" data-zoom="reset" title="100%に戻す">100%</button>',
+      '</span>',
+      `<span class="mermaid-edit-hint">${escapeHtml(hint)}</span>`,
+      '</span>',
+      '</figcaption>',
+    ].join('');
+  }
+
+  function renderMermaidFallbackPre(code) {
+    return `<pre class="code-block language-mermaid"><code data-lang="mermaid">${escapeHtml(code)}</code></pre>`;
   }
 
   function splitMarkdownBlocks(markdown) {
@@ -2763,7 +3033,7 @@ flowchart TD
       } else if (displayMathDelimiter(first)) {
         const delimiter = displayMathDelimiter(first);
         endIndex = index + 1;
-        if (!isDisplayMathClosedLine(first, delimiter)) {
+        if (!isDisplayMathSelfContainedLine(first, delimiter)) {
           while (endIndex < lines.length) {
             if (isDisplayMathClosedLine(lines[endIndex].text, delimiter)) {
               endIndex += 1;
@@ -3216,7 +3486,7 @@ flowchart TD
       csharp: 'abstract as base bool break byte case catch char checked class const continue decimal default delegate do double else enum event explicit extern false finally fixed float for foreach goto if implicit in int interface internal is lock long namespace new null object operator out override params private protected public readonly ref return sbyte sealed short sizeof stackalloc static string struct switch this throw true try typeof uint ulong unchecked unsafe ushort using virtual void volatile while',
       go: 'break case chan const continue default defer else fallthrough for func go goto if import interface map package range return select struct switch type var',
       rust: 'as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while',
-      php: 'abstract and array as break callable case catch class clone const continue declare default die do echo else elseif empty enddeclare endfor endforeach endif endswitch endwhile eval exit extends final finally fn for foreach function global goto if implements include include_once instanceof insteadof interface isset list namespace new or print private protected public require require_once return static switch throw trait try unset use var while xor yield',
+      php: 'abstract and array as break callable case catch class clone const continue declare default die do echo else elseif empty enddeclare endfor endforeach endif endswitch endwhile exit extends final finally fn for foreach function global goto if implements include include_once instanceof insteadof interface isset list namespace new or print private protected public require require_once return static switch throw trait try unset use var while xor yield',
       swift: 'as associatedtype break case catch class continue default defer deinit do else enum extension fallthrough false fileprivate for func guard if import in init inout internal is let nil open operator private protocol public repeat rethrows return self static struct subscript super switch throw throws true try typealias var where while',
       kotlin: 'as break class continue do else false for fun if in interface is null object package return super this throw true try typealias val var when while',
     };
@@ -3347,6 +3617,9 @@ flowchart TD
     if (!parsed.nodes.size) return renderMermaidFallback(code, '表示できるノードがありません');
 
     const layout = layoutFlowchart(parsed);
+    if (!Number.isFinite(layout.width) || !Number.isFinite(layout.height)) {
+      return renderMermaidFallback(code, '描画できない構文をコードとして表示');
+    }
     const markerId = nextMermaidId('arrow', code);
     const nodes = Array.from(parsed.nodes.values()).map((node) => renderFlowNode(node, layout.positions.get(node.id))).join('');
     const edges = parsed.edges.map((edge) => renderFlowEdge(edge, layout.positions, parsed.direction, markerId)).join('');
@@ -3427,36 +3700,38 @@ flowchart TD
 
   function layoutFlowchart(parsed) {
     const ids = Array.from(parsed.nodes.keys());
-    const levels = new Map(ids.map((id) => [id, 0]));
-    for (let pass = 0; pass < ids.length; pass += 1) {
-      let changed = false;
-      for (const edge of parsed.edges) {
-        const next = Math.min((levels.get(edge.from) || 0) + 1, ids.length);
-        if (next > (levels.get(edge.to) || 0)) {
-          levels.set(edge.to, next);
-          changed = true;
-        }
-      }
-      if (!changed) break;
-    }
+    const levels = flowchartLevels(parsed, ids);
 
-    const groups = [];
+    const grouped = new Map();
     for (const id of ids) {
-      const level = levels.get(id) || 0;
-      groups[level] ||= [];
-      groups[level].push(id);
+      const rawLevel = levels.get(id);
+      const level = Number.isFinite(rawLevel) && rawLevel >= 0 ? Math.floor(rawLevel) : 0;
+      if (!grouped.has(level)) grouped.set(level, []);
+      grouped.get(level).push(id);
     }
+    const groups = Array.from(grouped.keys())
+      .sort((a, b) => a - b)
+      .map((level) => grouped.get(level).filter((id) => parsed.nodes.has(id)))
+      .filter((group) => group.length);
 
     const horizontal = ['LR', 'RL'].includes(parsed.direction);
-    const nodeWidth = 180;
-    const nodeHeight = 58;
-    const levelGap = 72;
-    const itemGap = 40;
-    const pad = 34;
-    const maxItems = Math.max(1, ...groups.map((group) => group.length));
+    const nodeWidth = 300;
+    const nodeHeight = 96;
+    const levelGap = 126;
+    const itemGap = 86;
+    const pad = 42;
+    const maxItems = groups.reduce((max, group) => Math.max(max, group.length), 1);
     const levelCount = Math.max(1, groups.length);
-    const width = horizontal ? pad * 2 + levelCount * nodeWidth + (levelCount - 1) * levelGap : pad * 2 + maxItems * nodeWidth + (maxItems - 1) * itemGap;
-    const height = horizontal ? pad * 2 + maxItems * nodeHeight + (maxItems - 1) * itemGap : pad * 2 + levelCount * nodeHeight + (levelCount - 1) * levelGap;
+    const minWidth = horizontal ? 0 : 760;
+    const minHeight = horizontal ? 420 : 0;
+    const width = Math.max(
+      minWidth,
+      horizontal ? pad * 2 + levelCount * nodeWidth + (levelCount - 1) * levelGap : pad * 2 + maxItems * nodeWidth + (maxItems - 1) * itemGap,
+    );
+    const height = Math.max(
+      minHeight,
+      horizontal ? pad * 2 + maxItems * nodeHeight + (maxItems - 1) * itemGap : pad * 2 + levelCount * nodeHeight + (levelCount - 1) * levelGap,
+    );
     const positions = new Map();
 
     groups.forEach((group, level) => {
@@ -3474,11 +3749,43 @@ flowchart TD
     return { width, height, positions };
   }
 
+  function flowchartLevels(parsed, ids) {
+    const idSet = new Set(ids);
+    const incoming = new Map(ids.map((id) => [id, 0]));
+    const outgoing = new Map(ids.map((id) => [id, []]));
+    for (const edge of parsed.edges) {
+      if (!idSet.has(edge.from) || !idSet.has(edge.to)) continue;
+      incoming.set(edge.to, (incoming.get(edge.to) || 0) + 1);
+      outgoing.get(edge.from)?.push(edge.to);
+    }
+
+    const roots = ids.filter((id) => (incoming.get(id) || 0) === 0);
+    const queue = roots.length ? roots.slice() : ids.slice(0, 1);
+    const levels = new Map(queue.map((id) => [id, 0]));
+
+    for (let index = 0; index < queue.length; index += 1) {
+      const current = queue[index];
+      const nextLevel = (levels.get(current) || 0) + 1;
+      for (const target of outgoing.get(current) || []) {
+        if (levels.has(target)) continue;
+        levels.set(target, nextLevel);
+        queue.push(target);
+      }
+    }
+
+    let lastLevel = Math.max(0, ...Array.from(levels.values()));
+    for (const id of ids) {
+      if (!levels.has(id)) levels.set(id, ++lastLevel);
+    }
+    return levels;
+  }
+
   function renderFlowNode(node, box) {
     if (!box) return '';
+    if (![box.x, box.y, box.width, box.height].every(Number.isFinite)) return '';
     const cx = box.x + box.width / 2;
     const cy = box.y + box.height / 2;
-    const text = renderSvgText(node.label, cx, cy, 18, 'mermaid-node-label');
+    const text = renderSvgText(node.label, cx, cy, 18, 'mermaid-flow-node-label', 24);
     if (node.shape === 'diamond') {
       const points = `${cx},${box.y} ${box.x + box.width},${cy} ${cx},${box.y + box.height} ${box.x},${cy}`;
       return `<g class="mermaid-node mermaid-node-diamond"><polygon points="${points}"></polygon>${text}</g>`;
@@ -3494,34 +3801,83 @@ flowchart TD
     const from = positions.get(edge.from);
     const to = positions.get(edge.to);
     if (!from || !to) return '';
+    if (![from.x, from.y, from.width, from.height, to.x, to.y, to.width, to.height].every(Number.isFinite)) return '';
     const horizontal = ['LR', 'RL'].includes(direction);
-    const x1 = horizontal ? from.x + from.width : from.x + from.width / 2;
-    const y1 = horizontal ? from.y + from.height / 2 : from.y + from.height;
-    const x2 = horizontal ? to.x : to.x + to.width / 2;
-    const y2 = horizontal ? to.y + to.height / 2 : to.y;
-    const label = edge.label
-      ? `<text class="mermaid-edge-label" x="${(x1 + x2) / 2}" y="${(y1 + y2) / 2 - 8}">${escapeHtml(edge.label)}</text>`
-      : '';
-    return `<g class="mermaid-edge"><path d="M ${x1} ${y1} L ${x2} ${y2}" marker-end="url(#${markerId})"></path>${label}</g>`;
+    const fromCx = from.x + from.width / 2;
+    const fromCy = from.y + from.height / 2;
+    const toCx = to.x + to.width / 2;
+    const toCy = to.y + to.height / 2;
+    let x1 = horizontal ? from.x + from.width : fromCx;
+    let y1 = horizontal ? fromCy : from.y + from.height;
+    let x2 = horizontal ? to.x : toCx;
+    let y2 = horizontal ? toCy : to.y;
+    let path;
+    if (horizontal && toCx < fromCx) {
+      x1 = from.x;
+      x2 = to.x + to.width;
+      const offset = Math.max(54, Math.abs(fromCy - toCy) / 2 + 34);
+      path = `M ${x1} ${y1} C ${x1 - offset} ${y1}, ${x2 - offset} ${y2}, ${x2} ${y2}`;
+    } else if (!horizontal && toCy < fromCy) {
+      x1 = from.x;
+      y1 = fromCy;
+      x2 = to.x;
+      y2 = toCy;
+      const gutter = Math.max(18, Math.min(from.x, to.x) - 54);
+      path = `M ${x1} ${y1} C ${gutter} ${y1}, ${gutter} ${y2}, ${x2} ${y2}`;
+    } else {
+      path = `M ${x1} ${y1} L ${x2} ${y2}`;
+    }
+    let labelX = (x1 + x2) / 2;
+    let labelY = (y1 + y2) / 2 - 8;
+    let labelAnchor = 'middle';
+    if (horizontal && toCx < fromCx) {
+      labelX = Math.min(x1, x2) - 38;
+      labelY = (y1 + y2) / 2;
+    } else if (!horizontal && toCy < fromCy) {
+      const preferredX = Math.min(x1, x2) - 26;
+      labelX = preferredX < 80 ? Math.min(x1, x2) + 18 : preferredX;
+      labelY = (y1 + y2) / 2;
+      labelAnchor = preferredX < 80 ? 'start' : 'end';
+    } else if (horizontal) {
+      labelY = Math.abs(y2 - y1) > 8 ? (y1 + y2) / 2 - 8 : y1 - 18;
+    } else if (Math.abs(x2 - x1) > 8) {
+      labelX = (x1 + x2) / 2 + (x2 > x1 ? 22 : -22);
+      labelY = (y1 + y2) / 2 - 6;
+    } else {
+      labelX = x1 + 18;
+      labelY = (y1 + y2) / 2;
+      labelAnchor = 'start';
+    }
+    const label = edge.label ? renderEdgeLabel(edge.label, labelX, labelY, labelAnchor) : '';
+    return `<g class="mermaid-edge"><path d="${path}" marker-end="url(#${markerId})"></path>${label}</g>`;
+  }
+
+  function renderEdgeLabel(label, x, y, anchor = 'middle') {
+    if (![x, y].every(Number.isFinite)) return '';
+    const text = String(label || '').trim();
+    if (!text) return '';
+    return `<text class="mermaid-edge-label" x="${x}" y="${y + 8}" text-anchor="${escapeAttribute(anchor)}" font-size="18" font-weight="650">${escapeHtml(text)}</text>`;
   }
 
   function renderMermaidSequence(code) {
     const parsed = parseMermaidSequence(code);
     if (!parsed.participants.length || !parsed.events.length) return renderMermaidFallback(code, '表示できるシーケンスがありません');
     const pad = 38;
-    const participantGap = 190;
-    const headerHeight = 52;
-    const rowGap = 58;
-    const width = Math.max(360, pad * 2 + (parsed.participants.length - 1) * participantGap + 150);
+    const participantGap = 260;
+    const headerHeight = 86;
+    const rowGap = 70;
+    const width = Math.max(760, pad * 2 + (parsed.participants.length - 1) * participantGap + 180);
     const height = pad * 2 + headerHeight + parsed.events.length * rowGap + 20;
-    const xFor = new Map(parsed.participants.map((participant, index) => [participant.id, pad + 75 + index * participantGap]));
+    const participantSpan = (parsed.participants.length - 1) * participantGap;
+    const firstParticipantX = width / 2 - participantSpan / 2;
+    const xFor = new Map(parsed.participants.map((participant, index) => [participant.id, firstParticipantX + index * participantGap]));
     const markerId = nextMermaidId('seq-arrow', code);
 
     const lifelines = parsed.participants.map((participant) => {
       const x = xFor.get(participant.id);
       return [
         `<g class="mermaid-seq-participant"><rect x="${x - 68}" y="${pad}" width="136" height="36" rx="8"></rect>`,
-        renderSvgText(participant.label, x, pad + 18, 16, 'mermaid-node-label'),
+        renderSvgText(participant.label, x, pad + 18, 16, 'mermaid-node-label', 16),
         `<path class="mermaid-lifeline" d="M ${x} ${pad + 36} L ${x} ${height - pad}"></path></g>`,
       ].join('');
     }).join('');
@@ -3532,7 +3888,7 @@ flowchart TD
         const ids = event.ids.filter((id) => xFor.has(id));
         const left = Math.min(...ids.map((id) => xFor.get(id))) - 68;
         const right = Math.max(...ids.map((id) => xFor.get(id))) + 68;
-        return `<g class="mermaid-note"><rect x="${left}" y="${y - 18}" width="${right - left}" height="38" rx="8"></rect>${renderSvgText(event.text, (left + right) / 2, y + 1, 28, 'mermaid-node-label')}</g>`;
+        return `<g class="mermaid-note"><rect x="${left}" y="${y - 18}" width="${right - left}" height="38" rx="8"></rect>${renderSvgText(event.text, (left + right) / 2, y + 1, 28, 'mermaid-node-label', 16)}</g>`;
       }
       const x1 = xFor.get(event.from);
       const x2 = xFor.get(event.to);
@@ -3576,7 +3932,7 @@ flowchart TD
         events.push({ type: 'note', ids, text: match[2].trim() });
         continue;
       }
-      match = line.match(/^([A-Za-z][\w-]*)\s*(?:-+|=+)[>x.)-]*\s*([A-Za-z][\w-]*)\s*:\s*(.+)$/);
+      match = line.match(/^([A-Za-z]\w*)\s*(?:-+|=+)[>x.)-]*\s*([A-Za-z]\w*)\s*:\s*(.+)$/);
       if (match) {
         ensureParticipant(match[1]);
         ensureParticipant(match[2]);
@@ -3586,15 +3942,15 @@ flowchart TD
     return { participants: Array.from(participants.values()), events };
   }
 
-  function renderSvgText(label, x, y, maxChars, className) {
+  function renderSvgText(label, x, y, maxChars, className, fontSize = 18) {
     const lines = splitSvgLabel(label, maxChars);
-    const lineHeight = 15;
-    const firstOffset = lines.length > 1 ? -((lines.length - 1) * lineHeight) / 2 : 5;
+    const lineHeight = Math.round(fontSize * 1.2);
+    const firstOffset = lines.length > 1 ? -((lines.length - 1) * lineHeight) / 2 : Math.round(fontSize * 0.35);
     const tspans = lines.map((line, index) => {
       const dy = index === 0 ? firstOffset : lineHeight;
       return `<tspan x="${x}" dy="${dy}">${escapeHtml(line)}</tspan>`;
     }).join('');
-    return `<text class="${escapeAttribute(className || '')}" x="${x}" y="${y}" text-anchor="middle">${tspans}</text>`;
+    return `<text class="${escapeAttribute(className || '')}" x="${x}" y="${y}" text-anchor="middle" font-size="${fontSize}" font-weight="650">${tspans}</text>`;
   }
 
   function splitSvgLabel(label, maxChars) {
@@ -3649,10 +4005,10 @@ flowchart TD
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data: blob: file:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; img-src 'self' data: blob: file:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none';">
 <title>${title}</title>
 <style>
-body{margin:0;padding:clamp(1rem,4vw,4rem);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.75;color:#111827;background:#fff}main{max-width:920px;margin:auto}h1,h2{border-bottom:1px solid #e5e7eb;padding-bottom:.25rem}pre{overflow:auto;background:#0f172a;color:#e5e7eb;border-radius:.75rem;padding:1rem}code{font-family:Consolas,monospace;background:#f3f4f6;border-radius:.25rem;padding:.1rem .25rem}pre code{background:transparent;padding:0}.code-lang{float:right;color:#94a3b8;font:700 .72rem system-ui}.tok-comment{color:#94a3b8}.tok-string{color:#a7f3d0}.tok-number{color:#fde68a}.tok-keyword{color:#93c5fd}.tok-function{color:#f9a8d4}.tok-property{color:#c4b5fd}.tok-tag{color:#fca5a5}.tok-operator{color:#cbd5e1}blockquote{border-left:.25rem solid #2563eb;margin:1rem 0;padding:.25rem 1rem;background:#eff6ff}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d1d5db;padding:.5rem}.align-left{text-align:left}.align-center{text-align:center}.align-right{text-align:right}img{max-width:100%}.meta{color:#6b7280;font-size:.9rem}.blocked-image,.blocked-link{color:#b42318;border:1px solid #f3b8b1;border-radius:.3rem;padding:.1rem .3rem}.toc{border:1px solid #e5e7eb;border-radius:.75rem;padding:1rem}.toc a{display:block;color:#2563eb;text-decoration:none}.mermaid-diagram{margin:1.25rem 0}.mermaid-diagram figcaption{font-weight:700;color:#475569;margin-bottom:.4rem}.mermaid-svg{width:100%;height:auto;min-height:10rem;max-height:70vh;border:1px solid #d1d5db;border-radius:.75rem;background:#f8fafc}.mermaid-fallback pre{margin:0}.mermaid-node rect,.mermaid-node ellipse,.mermaid-node polygon,.mermaid-seq-participant rect{fill:#fff;stroke:#2563eb;stroke-width:1.5}.mermaid-edge path,.mermaid-message path{stroke:#334155;stroke-width:1.6;fill:none}.mermaid-edge-label,.mermaid-message text{font:12px system-ui;fill:#475569;text-anchor:middle}.mermaid-node-label{font:12px system-ui;fill:#0f172a}.mermaid-lifeline{stroke:#94a3b8;stroke-dasharray:5 5}.mermaid-note rect{fill:#fef3c7;stroke:#f59e0b}
+body{margin:0;padding:clamp(1rem,4vw,4rem);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.75;color:#111827;background:#fff}main{max-width:920px;margin:auto}h1,h2{border-bottom:1px solid #e5e7eb;padding-bottom:.25rem}pre{overflow:auto;background:#0f172a;color:#e5e7eb;border-radius:.75rem;padding:1rem}code{font-family:Consolas,monospace;background:#f3f4f6;border-radius:.25rem;padding:.1rem .25rem}pre code{background:transparent;padding:0}.code-lang{float:right;color:#94a3b8;font:700 .72rem system-ui}.tok-comment{color:#94a3b8}.tok-string{color:#a7f3d0}.tok-number{color:#fde68a}.tok-keyword{color:#93c5fd}.tok-function{color:#f9a8d4}.tok-property{color:#c4b5fd}.tok-tag{color:#fca5a5}.tok-operator{color:#cbd5e1}blockquote{border-left:.25rem solid #2563eb;margin:1rem 0;padding:.25rem 1rem;background:#eff6ff}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d1d5db;padding:.5rem}.align-left{text-align:left}.align-center{text-align:center}.align-right{text-align:right}img{max-width:100%}.meta{color:#6b7280;font-size:.9rem}.blocked-image,.blocked-link{color:#b42318;border:1px solid #f3b8b1;border-radius:.3rem;padding:.1rem .3rem}.toc{border:1px solid #e5e7eb;border-radius:.75rem;padding:1rem}.toc a{display:block;color:#2563eb;text-decoration:none}.mermaid-diagram{margin:1.25rem 0}.mermaid-diagram figcaption{font-weight:700;color:#475569;margin-bottom:.4rem}.mermaid-svg{width:100%;height:auto;min-height:10rem;max-height:none;border:1px solid #d1d5db;border-radius:.75rem;background:#f8fafc}.mermaid-sequence .mermaid-svg,.mermaid-svg.mindmapDiagram{max-width:min(100%,820px);margin-inline:auto}.mermaid-svg.flowchart{display:block;width:min(100%,560px);margin-inline:auto}.mermaid-svg.flowchart text{font-size:12px!important}.mermaid-fallback pre{margin:0}.mermaid-svg .edgeLabel text,.mermaid-svg .edgeLabel tspan{paint-order:stroke;stroke:#f8fafc;stroke-width:7px;stroke-linejoin:round}.mermaid-node rect,.mermaid-node ellipse,.mermaid-node polygon,.mermaid-seq-participant rect{fill:#fff;stroke:#2563eb;stroke-width:1.5}.mermaid-svg.mindmapDiagram .section-root circle,.mermaid-svg.mindmapDiagram .node-bkg{fill:#fff!important;stroke:#2563eb!important}.mermaid-svg.mindmapDiagram .label .background{fill:#fff!important;opacity:.92!important}.mermaid-svg.mindmapDiagram .edge{stroke:#2563eb!important;stroke-width:2px!important;stroke-opacity:.22}.mermaid-edge path,.mermaid-message path{stroke:#334155;stroke-width:1.6;fill:none}.mermaid-edge-label,.mermaid-message text{font:650 18px system-ui;fill:#475569;text-anchor:middle;paint-order:stroke;stroke:#f8fafc;stroke-width:7px;stroke-linejoin:round}.mermaid-node-label{font:650 16px system-ui;fill:#0f172a}.mermaid-flow-node-label{font:650 24px system-ui;fill:#0f172a}.mermaid-lifeline{stroke:#94a3b8;stroke-dasharray:5 5}.mermaid-note rect{fill:#fef3c7;stroke:#f59e0b}
 </style>
 </head>
 <body>
@@ -3676,29 +4032,106 @@ ${body}
 
   function renderMermaidIn(root) {
     if (!window.mermaid?.render) return;
-    root.querySelectorAll('.mermaid-render-target[data-mermaid-source]').forEach((target) => {
+    cleanupMermaidRenderScratchNodes();
+    const targets = Array.from(root.querySelectorAll('.mermaid-render-target[data-mermaid-source]'));
+    mermaidRenderQueue = mermaidRenderQueue
+      .then(() => renderMermaidTargets(targets))
+      .catch(() => {});
+  }
+
+  async function renderMermaidTargets(targets) {
+    for (const target of targets) {
+      if (!target.isConnected) continue;
       const source = target.getAttribute('data-mermaid-source') || '';
+      if (target.querySelector('svg.mermaid-svg')) continue;
       const id = target.getAttribute('data-mermaid-render-id') || nextMermaidId('diagram', source);
-      Promise.resolve(window.mermaid.render(id, source))
-        .then((result) => {
-          const svg = typeof result === 'string' ? result : result?.svg;
-          if (svg) target.innerHTML = sanitizeSvgMarkup(svg);
-        })
-        .catch(() => {
+      cleanupMermaidRenderScratch(id);
+      try {
+        const result = await window.mermaid.render(id, source);
+        if (!target.isConnected) continue;
+        const svg = typeof result === 'string' ? result : result?.svg;
+        const safeSvg = sanitizeSvgMarkup(svg);
+        if (safeSvg) {
+          target.classList.remove('mermaid-fallback');
+          target.removeAttribute('data-mermaid-error');
+          target.innerHTML = safeSvg;
+          applyMermaidZoom(target);
+        } else {
           target.classList.add('mermaid-fallback');
-        });
-    });
+          target.setAttribute('data-mermaid-error', 'SVG安全化に失敗しました');
+          target.innerHTML = renderMermaidFallbackPre(source);
+        }
+      } catch (error) {
+        if (!target.isConnected) continue;
+        target.classList.add('mermaid-fallback');
+        target.setAttribute('data-mermaid-error', String(error?.message || 'Mermaid描画に失敗しました').slice(0, 300));
+        target.innerHTML = renderMermaidFallbackPre(source);
+      } finally {
+        cleanupMermaidRenderScratch(id);
+      }
+    }
+    cleanupMermaidRenderScratchNodes();
+  }
+
+  function applyMermaidZoom(target) {
+    if (!target) return;
+    const figure = target.closest('.mermaid-diagram');
+    const svg = target.querySelector('svg.mermaid-svg');
+    if (!figure || !svg) return;
+    const zoom = mermaidZoomValue(figure);
+    const baseWidth = mermaidBaseWidth(svg);
+    const width = baseWidth * zoom;
+    if (!Number.isFinite(width) || width <= 0) return;
+    svg.style.width = `${width}px`;
+    svg.style.maxWidth = 'none';
+    svg.style.marginInline = 'auto';
+    target.classList.add('is-zoomable');
+  }
+
+  function mermaidBaseWidth(svg) {
+    const viewBoxWidth = mermaidViewBoxWidth(svg);
+    if (viewBoxWidth) return Math.max(360, viewBoxWidth);
+    if (svg.classList.contains('flowchart')) return 560;
+    if (svg.classList.contains('mindmapDiagram')) return 820;
+    if (svg.closest('.mermaid-sequence')) return 820;
+    return 720;
+  }
+
+  function mermaidViewBoxWidth(svg) {
+    const baseVal = svg?.viewBox?.baseVal;
+    if (baseVal && Number.isFinite(baseVal.width) && baseVal.width > 0) return baseVal.width;
+    const viewBox = svg?.getAttribute?.('viewBox') || '';
+    const parts = viewBox.trim().split(/[\s,]+/).map(Number);
+    return Number.isFinite(parts[2]) && parts[2] > 0 ? parts[2] : 0;
+  }
+
+  function cleanupMermaidRenderScratch(id) {
+    if (!id || !document?.getElementById) return;
+    document.getElementById(`d${id}`)?.remove();
+  }
+
+  function cleanupMermaidRenderScratchNodes() {
+    if (!document?.querySelectorAll) return;
+    document.querySelectorAll('body > div[id^="dpme-"]').forEach((node) => node.remove());
   }
 
   function sanitizeSvgMarkup(svg) {
     if (!window.DOMParser) return '';
-    const doc = new DOMParser().parseFromString(String(svg || ''), 'image/svg+xml');
-    doc.querySelectorAll('script, iframe, object, embed, form, input, button, select, textarea, link, meta').forEach((node) => node.remove());
+    const doc = new DOMParser().parseFromString(normalizeSvgMarkupForParsing(svg), 'image/svg+xml');
+    if (doc.querySelector('parsererror')) return '';
+    doc.querySelectorAll('script, iframe, object, embed, foreignObject, form, input, button, select, textarea, link, meta').forEach((node) => node.remove());
+    doc.querySelectorAll('style').forEach((node) => {
+      if (!isSafeSvgStyle(node.textContent || '')) node.remove();
+    });
     doc.querySelectorAll('*').forEach((node) => {
       for (const attr of Array.from(node.attributes)) {
         const name = attr.name.toLowerCase();
         const value = attr.value.trim().toLowerCase();
         if (name.startsWith('on') || value.startsWith('javascript:') || name === 'srcdoc') {
+          node.removeAttribute(attr.name);
+          continue;
+        }
+        if (name === 'style' && !isSafeSvgStyle(attr.value)) {
           node.removeAttribute(attr.name);
           continue;
         }
@@ -3711,8 +4144,234 @@ ${body}
     if (svgElement?.tagName?.toLowerCase() === 'svg') {
       svgElement.classList.add('mermaid-svg');
       svgElement.removeAttribute('style');
+      polishMermaidSvg(svgElement);
     }
     return svgElement?.outerHTML || '';
+  }
+
+  function normalizeSvgMarkupForParsing(svg) {
+    const markup = String(svg || '');
+    const withNamespace = /<svg\b[^>]*\sxmlns:xlink=/i.test(markup)
+      ? markup
+      : markup.replace(/<svg\b/i, '<svg xmlns:xlink="http://www.w3.org/1999/xlink"');
+    return withNamespace.replace(/\s+xlink:href=/gi, ' href=');
+  }
+
+  function polishMermaidSvg(svgElement) {
+    const role = (svgElement.getAttribute('aria-roledescription') || '').toLowerCase();
+    if (role === 'timeline') polishMermaidTimeline(svgElement);
+    if (role === 'sankey') polishMermaidSankey(svgElement);
+    if (role === 'packet') polishMermaidPacket(svgElement);
+    if (role === 'c4') polishMermaidC4(svgElement);
+  }
+
+  function setSafeSvgStyle(node, styles) {
+    if (!node?.style) return;
+    Object.entries(styles).forEach(([name, value]) => {
+      node.style.setProperty(name, value, 'important');
+    });
+  }
+
+  function polishMermaidTimeline(svgElement) {
+    svgElement.querySelectorAll('.timeline-node').forEach((node) => {
+      const card = node.classList.contains('section-0') || node.classList.contains('section-2')
+        ? 'var(--mermaid-timeline-card-alt)'
+        : 'var(--mermaid-timeline-card)';
+      node.querySelectorAll('.node-bkg').forEach((shape) => setSafeSvgStyle(shape, {
+        fill: card,
+        stroke: 'var(--mermaid-timeline-line)',
+        'stroke-width': '1.25px',
+      }));
+    });
+    svgElement.querySelectorAll('text, tspan').forEach((text) => setSafeSvgStyle(text, {
+      fill: 'var(--mermaid-timeline-text)',
+      color: 'var(--mermaid-timeline-text)',
+      'font-weight': '700',
+    }));
+    svgElement.querySelectorAll('line, path').forEach((line) => {
+      if (line.classList.contains('node-bkg')) return;
+      setSafeSvgStyle(line, { stroke: 'var(--mermaid-timeline-line)' });
+    });
+  }
+
+  function polishMermaidSankey(svgElement) {
+    const colors = [
+      'var(--mermaid-sankey-1)',
+      'var(--mermaid-sankey-2)',
+      'var(--mermaid-sankey-3)',
+      'var(--mermaid-sankey-4)',
+      'var(--mermaid-sankey-5)',
+      'var(--mermaid-sankey-6)',
+      'var(--mermaid-sankey-7)',
+    ];
+    svgElement.querySelectorAll('.nodes .node rect').forEach((rect, index) => setSafeSvgStyle(rect, {
+      fill: colors[index % colors.length],
+      stroke: 'color-mix(in srgb, var(--panel) 72%, var(--text))',
+      'stroke-width': '1px',
+    }));
+    svgElement.querySelectorAll('.links .link').forEach((link) => setSafeSvgStyle(link, {
+      'mix-blend-mode': 'normal',
+      opacity: '1',
+    }));
+    svgElement.querySelectorAll('.links path').forEach((path) => setSafeSvgStyle(path, {
+      opacity: '0.9',
+      'stroke-opacity': '0.9',
+      'mix-blend-mode': 'normal',
+    }));
+    svgElement.querySelectorAll('text').forEach((text) => setSafeSvgStyle(text, {
+      fill: 'var(--text)',
+      color: 'var(--text)',
+      'font-weight': '650',
+      'paint-order': 'stroke',
+      stroke: 'var(--panel)',
+      'stroke-width': '4px',
+      'stroke-linejoin': 'round',
+    }));
+  }
+
+  function polishMermaidPacket(svgElement) {
+    svgElement.querySelectorAll('.packetBlock').forEach((block, index) => setSafeSvgStyle(block, {
+      fill: index % 2 ? 'var(--mermaid-packet-block-alt)' : 'var(--mermaid-packet-block)',
+      stroke: 'var(--accent)',
+      'stroke-width': '1.2px',
+    }));
+    svgElement.querySelectorAll('.packetLabel, .packetByte, .packetTitle').forEach((text) => setSafeSvgStyle(text, {
+      fill: 'var(--mermaid-packet-text)',
+      color: 'var(--mermaid-packet-text)',
+      'font-weight': '700',
+    }));
+  }
+
+  function polishMermaidC4(svgElement) {
+    svgElement.querySelectorAll('path[fill="none"], line').forEach((line) => setSafeSvgStyle(line, {
+      stroke: 'var(--accent)',
+    }));
+    svgElement.querySelectorAll('.person-man path').forEach((shape) => setSafeSvgStyle(shape, {
+      fill: 'var(--text)',
+      stroke: 'none',
+    }));
+    replaceUnsafeC4Images(svgElement);
+    polishMermaidC4Text(svgElement);
+    repositionMermaidC4RelationshipLabels(svgElement);
+  }
+
+  function replaceUnsafeC4Images(svgElement) {
+    svgElement.querySelectorAll('image').forEach((image) => {
+      if (image.getAttribute('href') || image.getAttribute('xlink:href')) return;
+      const x = Number(image.getAttribute('x'));
+      const y = Number(image.getAttribute('y'));
+      const width = Number(image.getAttribute('width'));
+      const height = Number(image.getAttribute('height'));
+      if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+        image.remove();
+        return;
+      }
+      image.replaceWith(createSafeC4PersonIcon(svgElement.ownerDocument, x, y, width, height));
+    });
+  }
+
+  function createSafeC4PersonIcon(documentRef, x, y, width, height) {
+    const namespace = 'http://www.w3.org/2000/svg';
+    const group = documentRef.createElementNS(namespace, 'g');
+    group.setAttribute('class', 'c4-safe-person-icon');
+    const cx = x + width / 2;
+    const head = documentRef.createElementNS(namespace, 'circle');
+    head.setAttribute('cx', String(cx));
+    head.setAttribute('cy', String(y + height * 0.28));
+    head.setAttribute('r', String(Math.max(5, Math.min(width, height) * 0.16)));
+    const body = documentRef.createElementNS(namespace, 'rect');
+    const bodyWidth = width * 0.54;
+    const bodyHeight = height * 0.32;
+    body.setAttribute('x', String(cx - bodyWidth / 2));
+    body.setAttribute('y', String(y + height * 0.52));
+    body.setAttribute('width', String(bodyWidth));
+    body.setAttribute('height', String(bodyHeight));
+    body.setAttribute('rx', String(Math.max(4, bodyHeight * 0.32)));
+    [head, body].forEach((shape) => {
+      setSafeSvgStyle(shape, {
+        fill: '#ffffff',
+        stroke: 'none',
+      });
+      group.appendChild(shape);
+    });
+    return group;
+  }
+
+  function polishMermaidC4Text(svgElement) {
+    svgElement.querySelectorAll('text').forEach((text) => {
+      const fill = (text.getAttribute('fill') || '').trim().toLowerCase();
+      if (fill === '#ffffff' || fill === 'white') {
+        setSafeSvgStyle(text, {
+          fill: '#ffffff',
+          color: '#ffffff',
+          stroke: 'none',
+        });
+        return;
+      }
+      setSafeSvgStyle(text, {
+        fill: 'var(--text)',
+        color: 'var(--text)',
+        'paint-order': 'stroke',
+        stroke: 'var(--panel)',
+        'stroke-width': '4px',
+        'stroke-linejoin': 'round',
+      });
+    });
+  }
+
+  function repositionMermaidC4RelationshipLabels(svgElement) {
+    const rects = Array.from(svgElement.querySelectorAll('rect'))
+      .map((rect) => ({
+        x: Number(rect.getAttribute('x')),
+        y: Number(rect.getAttribute('y')),
+        width: Number(rect.getAttribute('width')),
+        height: Number(rect.getAttribute('height')),
+      }))
+      .filter((rect) => [rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) && rect.width > 40 && rect.height > 40)
+      .sort((a, b) => a.x - b.x);
+    const relationshipLabels = Array.from(svgElement.querySelectorAll('text')).filter((text) => {
+      const fill = (text.getAttribute('fill') || '').trim().toLowerCase();
+      return fill === '#444444' || fill === '#333333';
+    });
+    relationshipLabels.forEach((text) => {
+      const x = Number(text.getAttribute('x'));
+      const y = Number(text.getAttribute('y'));
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      const candidate = bestC4LabelGap(rects, x, y);
+      if (!candidate) return;
+      text.setAttribute('x', String(candidate.x));
+      text.setAttribute('y', String(y - 6));
+    });
+  }
+
+  function bestC4LabelGap(rects, labelX, labelY) {
+    let best = null;
+    for (let index = 0; index < rects.length - 1; index += 1) {
+      const left = rects[index];
+      const right = rects[index + 1];
+      const leftRight = left.x + left.width;
+      const rightLeft = right.x;
+      const gap = rightLeft - leftRight;
+      if (gap < 24) continue;
+      const top = Math.min(left.y, right.y) - 64;
+      const bottom = Math.max(left.y + left.height, right.y + right.height) + 64;
+      if (labelY < top || labelY > bottom) continue;
+      const midpoint = leftRight + gap / 2;
+      const distance = Math.min(Math.abs(labelX - leftRight), Math.abs(labelX - rightLeft), Math.abs(labelX - midpoint));
+      if (!best || distance < best.distance) best = { x: midpoint, distance };
+    }
+    return best;
+  }
+
+  function isSafeSvgStyle(value) {
+    const style = String(value || '').toLowerCase();
+    if (!style) return true;
+    if (style.includes('@import') || style.includes('expression(') || style.includes('javascript:') || style.includes('data:')) return false;
+    const urls = style.match(/url\(([^)]+)\)/g) || [];
+    return urls.every((token) => {
+      const inner = token.slice(4, -1).trim().replace(/^['"]|['"]$/g, '');
+      return inner.startsWith('#');
+    });
   }
 
   function isSafeSvgLink(value) {
@@ -3908,22 +4567,30 @@ ${body}
     return /\.(?:md|markdown|txt)$/.test(name) || ['text/markdown', 'text/plain'].includes(file?.type || '');
   }
 
-  function chooseMarkdownFile(files) {
-    if (files.length === 1) return files[0];
-    const names = files.map((file) => normalizeAssetPath(file.webkitRelativePath || file.name || ''));
+  function fileEntry(file, relativePath = '') {
+    return {
+      file,
+      relativePath: normalizeAssetPath(relativePath || file.webkitRelativePath || file.name || ''),
+    };
+  }
+
+  function chooseMarkdownEntry(entries) {
+    if (entries.length === 1) return entries[0];
+    const names = entries.map((entry) => entry.relativePath || entry.file.name || '');
     const answer = prompt(`開くMarkdownファイル名を入力してください。\n\n${names.join('\n')}`, names[0] || '');
     if (!answer) return null;
     const normalized = normalizeAssetPath(answer);
-    return files.find((file) => normalizeAssetPath(file.webkitRelativePath || file.name || '') === normalized)
-      || files.find((file) => file.name === answer)
+    return entries.find((entry) => entry.relativePath === normalized)
+      || entries.find((entry) => entry.file.name === answer)
       || null;
   }
 
-  function buildFolderAssetUrls(files, baseDir) {
+  function buildFolderAssetUrls(entries, baseDir) {
     const base = normalizeAssetPath(baseDir);
-    for (const file of files) {
+    for (const entry of entries) {
+      const file = entry.file || entry;
       if (!isAllowedImageFile(file)) continue;
-      const fullPath = normalizeAssetPath(file.webkitRelativePath || file.name || '');
+      const fullPath = normalizeAssetPath(entry.relativePath || file.webkitRelativePath || file.name || '');
       const relative = makeRelativePath(base, fullPath);
       if (!relative || isUnsafeRelativePath(relative)) continue;
       const url = URL.createObjectURL(file);
@@ -4002,8 +4669,15 @@ ${body}
 
   function isDisplayMathClosedLine(line, delimiter) {
     const trimmed = String(line || '').trim();
-    if (delimiter === '$$') return trimmed.length >= 4 && trimmed.endsWith('$$');
+    if (delimiter === '$$') return trimmed === '$$' || (trimmed.length > 4 && trimmed.endsWith('$$'));
     if (delimiter === '\\[') return trimmed.endsWith('\\]');
+    return false;
+  }
+
+  function isDisplayMathSelfContainedLine(line, delimiter) {
+    const trimmed = String(line || '').trim();
+    if (delimiter === '$$') return trimmed.length > 4 && trimmed.endsWith('$$');
+    if (delimiter === '\\[') return trimmed !== '\\[' && trimmed.endsWith('\\]');
     return false;
   }
 

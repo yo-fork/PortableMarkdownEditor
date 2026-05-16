@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mermaid Advanced Visual Check</title>
+  <link rel="stylesheet" href="../styles.css?v=mermaid-visual-fix-3">
+  <script src="../vendor/mermaid/mermaid.min.js"></script>
+  <style>
+    body { margin: 0; padding: 18px; background: var(--bg); color: var(--text); font-family: var(--sans); }
+    .grid { display: grid; gap: 24px; grid-template-columns: minmax(0, 1fr); max-width: 1040px; margin: 0 auto; }
+    .sample { border: 1px solid var(--border); border-radius: 12px; padding: 14px; background: var(--panel); }
+    .sample h2 { margin-top: 0; }
+    .mermaid-render-target { overflow: auto; }
+  </style>
+</head>
+<body>
+  <main class="grid" id="root">
+    <h1>Mermaid Advanced Visual Check</h1>
+  </main>
+  <script>
+    document.documentElement.dataset.theme = new URLSearchParams(location.search).get('theme') === 'light' ? 'light' : 'dark';
+
+    const samples = [
+      ['Sequence Advanced', `sequenceDiagram
+  autonumber
+  participant U as User
+  participant App as Editor
+  participant Parser as Markdown Parser
+  participant Sec as Security
+  participant View as Preview
+  U->>App: Open local Markdown
+  loop Edit cycle
+    U->>App: Type rich text
+    App->>Parser: Parse Markdown
+    Parser->>Sec: Sanitize HTML and SVG
+    Sec-->>View: Safe render model
+  end
+  alt Save requested
+    App-->>U: Write Markdown file
+  else Preview only
+    View-->>U: Show local preview
+  end
+  par Local checks
+    App->>Sec: Link allowlist
+  and Rendering
+    App->>View: Mermaid and KaTeX
+  end
+  Note over U,View: No CDN / no network`],
+      ['State Nested', `stateDiagram-v2
+  [*] --> Editing
+  state Editing {
+    [*] --> Rich
+    Rich --> InlineSource: cursor enters formatted text
+    InlineSource --> Rich: cursor leaves source span
+    Rich --> BlockSource: click Mermaid or code
+    BlockSource --> Rich: apply or cancel
+  }
+  Editing --> Preview: switch mode
+  Preview --> Split: compare source and result
+  Split --> Editing: return to rich mode
+  Editing --> Saved: save
+  Saved --> [*]`],
+      ['Class Relationships', `classDiagram
+  class DocumentState {
+    +string markdown
+    +string fileName
+    +string theme
+    +persistDraft()
+  }
+  class MarkdownRenderer {
+    +renderMarkdownHtml()
+    +renderKaTeXIn(root)
+    +renderMermaidIn(root)
+  }
+  class SvgSanitizer {
+    +sanitizeSvgMarkup(svg)
+    +normalizeSvgMarkupForParsing(svg)
+    +polishMermaidSvg(svg)
+  }
+  class AssetRegistry {
+    +Map assetUrls
+    +resolveRelativeImage(path)
+  }
+  DocumentState *-- AssetRegistry
+  MarkdownRenderer --> SvgSanitizer
+  MarkdownRenderer ..> DocumentState`],
+      ['ER Document Model', `erDiagram
+  DOCUMENT ||--o{ HEADING : contains
+  DOCUMENT ||--o{ ASSET : references
+  DOCUMENT ||--o{ TASK : tracks
+  HEADING ||--o{ HEADING : nests
+  DOCUMENT {
+    string id
+    string fileName
+    string markdownRelativePath
+    datetime savedAt
+  }
+  HEADING {
+    int level
+    string title
+    string slug
+  }
+  ASSET {
+    string relativePath
+    string objectUrl
+    bool permissionGranted
+  }
+  TASK {
+    string label
+    bool checked
+  }`],
+      ['User Journey', `journey
+  title Portable Markdown Editor review
+  section Open
+    Choose Markdown file: 5: User
+    Allow image folder: 4: User
+  section Edit
+    Type rich Markdown: 4: User
+    Adjust Mermaid zoom: 3: User
+    Edit diagram source: 4: User
+  section Verify
+    Check dark mode: 4: User
+    Check light mode: 4: User
+  section Export
+    Save Markdown: 5: User
+    Export HTML: 4: User`],
+      ['Gantt With Milestones', `gantt
+  title Local rendering hardening
+  dateFormat  YYYY-MM-DD
+  axisFormat  %m/%d
+  excludes weekends
+  section Rendering
+  Markdown parser       :done,    r1, 2026-05-01, 2d
+  Mermaid polish        :active,  r2, after r1, 4d
+  KaTeX verification    :         r3, after r2, 2d
+  section Security
+  CSP review            :done,    s1, 2026-05-02, 1d
+  SVG sanitizer check   :active,  s2, 2026-05-05, 3d
+  Vendor audit          :milestone, s3, 2026-05-12, 0d`],
+      ['Pie Distribution', `pie showData
+  title Local rendering coverage
+  "Markdown editing" : 28
+  "Mermaid diagrams" : 32
+  "KaTeX math" : 18
+  "Security checks" : 14
+  "Export" : 8`],
+      ['Mindmap Deep', `mindmap
+  root((Portable Markdown Editor))
+    Local first
+      No CDN
+      No network calls
+      File System Access
+    Rich editing
+      Inline source
+      Block source
+      Task list
+    Rendering
+      Mermaid
+        Flowchart
+        C4
+        Gantt
+      KaTeX
+        Inline math
+        Display math
+    Security
+      CSP
+      Raw HTML off
+      Link allowlist`],
+      ['Git Graph Branches', `gitGraph
+  commit id: "base"
+  branch rendering
+  checkout rendering
+  commit id: "mermaid"
+  commit id: "katex"
+  branch security
+  checkout security
+  commit id: "csp"
+  commit id: "sanitize"
+  checkout rendering
+  merge security id: "safe-render"
+  checkout main
+  merge rendering id: "release"`],
+      ['Mixed Flow', `flowchart LR
+  subgraph Input[Local input]
+    A[Markdown file]
+    B[Image folder]
+  end
+  subgraph Render[Render pipeline]
+    C[markdown-it]
+    D[KaTeX]
+    E[Mermaid.js]
+    F[SVG sanitizer]
+  end
+  subgraph Output[Local output]
+    G[Rich editor]
+    H[Preview]
+    I[HTML export]
+  end
+  A --> C
+  B --> G
+  C --> D
+  C --> E
+  E --> F
+  D --> H
+  F --> H
+  H --> I`],
+    ];
+
+    function themeVariables() {
+      const dark = document.documentElement.dataset.theme === 'dark';
+      return {
+        background: 'transparent',
+        primaryColor: dark ? '#1f2937' : '#ffffff',
+        primaryTextColor: dark ? '#f8fafc' : '#111827',
+        primaryBorderColor: dark ? '#7aa2f7' : '#2563eb',
+        lineColor: dark ? '#9ca3af' : '#334155',
+        defaultLinkColor: dark ? '#7aa2f7' : '#2563eb',
+        secondaryColor: dark ? '#0f172a' : '#eff6ff',
+        secondaryTextColor: dark ? '#f8fafc' : '#111827',
+        tertiaryColor: dark ? '#111827' : '#f8fafc',
+        tertiaryTextColor: dark ? '#f8fafc' : '#111827',
+        mainBkg: dark ? '#1f2937' : '#ffffff',
+        secondBkg: dark ? '#0f172a' : '#eff6ff',
+        nodeTextColor: dark ? '#f8fafc' : '#111827',
+        textColor: dark ? '#f8fafc' : '#111827',
+        labelTextColor: dark ? '#f8fafc' : '#111827',
+        labelBackground: dark ? '#111827' : '#ffffff',
+        edgeLabelBackground: dark ? '#111827' : '#ffffff',
+        clusterBkg: dark ? '#111827' : '#f8fafc',
+        clusterBorder: dark ? '#475569' : '#cbd5e1',
+        noteBkgColor: dark ? '#3b2f0b' : '#fef3c7',
+        noteTextColor: dark ? '#fef3c7' : '#713f12',
+        sectionBkgColor: dark ? '#172554' : '#eef4ff',
+        altSectionBkgColor: dark ? '#064e3b' : '#f0fdf4',
+        gridColor: dark ? '#64748b' : '#9ca3af',
+        taskBkgColor: dark ? '#60a5fa' : '#bfdbfe',
+        taskBorderColor: dark ? '#93c5fd' : '#2563eb',
+        taskTextColor: dark ? '#0f172a' : '#111827',
+        activeTaskBkgColor: dark ? '#fbbf24' : '#fde68a',
+        doneTaskBkgColor: dark ? '#64748b' : '#d1d5db',
+        pie1: dark ? '#60a5fa' : '#2563eb',
+        pie2: dark ? '#34d399' : '#16a34a',
+        pie3: dark ? '#fbbf24' : '#f59e0b',
+        pie4: dark ? '#fb7185' : '#dc2626',
+        pie5: dark ? '#a78bfa' : '#7c3aed',
+        pie6: dark ? '#2dd4bf' : '#0d9488',
+        pie7: dark ? '#f472b6' : '#db2777',
+        pie8: dark ? '#c084fc' : '#9333ea',
+        git0: dark ? '#60a5fa' : '#2563eb',
+        git1: dark ? '#34d399' : '#16a34a',
+        git2: dark ? '#fbbf24' : '#f59e0b',
+        git3: dark ? '#fb7185' : '#dc2626',
+        git4: dark ? '#a78bfa' : '#7c3aed',
+        git5: dark ? '#2dd4bf' : '#0d9488',
+        git6: dark ? '#f472b6' : '#db2777',
+        git7: dark ? '#c084fc' : '#9333ea',
+        fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+      };
+    }
+
+    async function render() {
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: 'strict',
+        theme: 'base',
+        htmlLabels: false,
+        flowchart: { htmlLabels: false, useMaxWidth: true },
+        sequence: { useMaxWidth: true },
+        themeVariables: themeVariables(),
+      });
+      const root = document.getElementById('root');
+      for (const [title, source] of samples) {
+        const section = document.createElement('section');
+        section.className = 'sample markdown-body';
+        section.innerHTML = `<h2>${title}</h2><div class="mermaid-render-target"></div>`;
+        root.appendChild(section);
+        try {
+          const result = await mermaid.render(`advanced-${title.replace(/\W+/g, '-')}-${Date.now()}`, source);
+          section.querySelector('.mermaid-render-target').innerHTML = result.svg || result;
+          const svg = section.querySelector('svg');
+          svg?.classList.add('mermaid-svg');
+          applyAppLikeZoom(svg);
+        } catch (error) {
+          section.querySelector('.mermaid-render-target').textContent = String(error && error.message || error);
+          section.dataset.error = 'true';
+        }
+      }
+    }
+
+    function applyAppLikeZoom(svg) {
+      if (!svg) return;
+      const viewBox = (svg.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+      const baseWidth = Number.isFinite(viewBox[2]) && viewBox[2] > 0 ? Math.max(360, viewBox[2]) : 720;
+      svg.style.width = `${baseWidth * 0.7}px`;
+      svg.style.maxWidth = 'none';
+      svg.style.marginInline = 'auto';
+    }
+    render();
+  </script>
+</body>
+</html>

@@ -11,6 +11,46 @@
   --danger: #b42318;
   --shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
   --radius: 16px;
+  --mermaid-gantt-section-a: #eef4ff;
+  --mermaid-gantt-section-b: #f0fdf4;
+  --mermaid-gantt-task: #bfdbfe;
+  --mermaid-gantt-task-alt: #bbf7d0;
+  --mermaid-gantt-done: #d1d5db;
+  --mermaid-gantt-active: #fde68a;
+  --mermaid-gantt-grid: #9ca3af;
+  --mermaid-pie-1: #2563eb;
+  --mermaid-pie-2: #16a34a;
+  --mermaid-pie-3: #f59e0b;
+  --mermaid-pie-4: #dc2626;
+  --mermaid-pie-5: #7c3aed;
+  --mermaid-pie-6: #0d9488;
+  --mermaid-pie-7: #db2777;
+  --mermaid-pie-8: #9333ea;
+  --mermaid-sequence-number-bg: #0f172a;
+  --mermaid-sequence-number-text: #ffffff;
+  --mermaid-git-0: #2563eb;
+  --mermaid-git-1: #16a34a;
+  --mermaid-git-2: #f59e0b;
+  --mermaid-git-3: #dc2626;
+  --mermaid-git-4: #7c3aed;
+  --mermaid-git-5: #0d9488;
+  --mermaid-git-6: #db2777;
+  --mermaid-git-7: #9333ea;
+  --mermaid-timeline-card: #ffffff;
+  --mermaid-timeline-card-alt: #eff6ff;
+  --mermaid-timeline-text: #111827;
+  --mermaid-timeline-line: #2563eb;
+  --mermaid-packet-block: #f8fafc;
+  --mermaid-packet-block-alt: #eff6ff;
+  --mermaid-packet-text: #111827;
+  --mermaid-sankey-1: #2563eb;
+  --mermaid-sankey-2: #f97316;
+  --mermaid-sankey-3: #dc2626;
+  --mermaid-sankey-4: #0d9488;
+  --mermaid-sankey-5: #16a34a;
+  --mermaid-sankey-6: #ca8a04;
+  --mermaid-sankey-7: #9333ea;
+  --mermaid-c4-dot: rgba(37, 99, 235, 0.14);
   --mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
   --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --serif: "Yu Mincho", "Hiragino Mincho ProN", Georgia, serif;
@@ -28,6 +68,46 @@
   --accent-soft: #1d2d50;
   --danger: #ffb4a8;
   --shadow: 0 18px 46px rgba(0, 0, 0, 0.36);
+  --mermaid-gantt-section-a: #172554;
+  --mermaid-gantt-section-b: #064e3b;
+  --mermaid-gantt-task: #60a5fa;
+  --mermaid-gantt-task-alt: #34d399;
+  --mermaid-gantt-done: #64748b;
+  --mermaid-gantt-active: #fbbf24;
+  --mermaid-gantt-grid: #64748b;
+  --mermaid-pie-1: #60a5fa;
+  --mermaid-pie-2: #34d399;
+  --mermaid-pie-3: #fbbf24;
+  --mermaid-pie-4: #fb7185;
+  --mermaid-pie-5: #a78bfa;
+  --mermaid-pie-6: #2dd4bf;
+  --mermaid-pie-7: #f472b6;
+  --mermaid-pie-8: #c084fc;
+  --mermaid-sequence-number-bg: #f8fafc;
+  --mermaid-sequence-number-text: #0f172a;
+  --mermaid-git-0: #60a5fa;
+  --mermaid-git-1: #34d399;
+  --mermaid-git-2: #fbbf24;
+  --mermaid-git-3: #fb7185;
+  --mermaid-git-4: #a78bfa;
+  --mermaid-git-5: #2dd4bf;
+  --mermaid-git-6: #f472b6;
+  --mermaid-git-7: #c084fc;
+  --mermaid-timeline-card: #24324a;
+  --mermaid-timeline-card-alt: #1d3a5f;
+  --mermaid-timeline-text: #f8fafc;
+  --mermaid-timeline-line: #93c5fd;
+  --mermaid-packet-block: #24324a;
+  --mermaid-packet-block-alt: #172554;
+  --mermaid-packet-text: #f8fafc;
+  --mermaid-sankey-1: #60a5fa;
+  --mermaid-sankey-2: #fb923c;
+  --mermaid-sankey-3: #fb7185;
+  --mermaid-sankey-4: #2dd4bf;
+  --mermaid-sankey-5: #34d399;
+  --mermaid-sankey-6: #fbbf24;
+  --mermaid-sankey-7: #c084fc;
+  --mermaid-c4-dot: rgba(147, 197, 253, 0.12);
 }
 
 * { box-sizing: border-box; }
@@ -95,7 +175,9 @@ button[aria-pressed="true"], .view-controls button.is-active {
   display: grid;
   grid-template-rows: auto 1fr auto;
   height: 100vh;
+  height: 100dvh;
   min-height: 0;
+  overflow: hidden;
 }
 
 .topbar {
@@ -103,12 +185,14 @@ button[aria-pressed="true"], .view-controls button.is-active {
   grid-template-columns: minmax(15rem, 1.2fr) auto auto auto auto auto;
   gap: 0.75rem;
   align-items: center;
+  position: sticky;
+  top: 0;
   padding: 0.8rem 1rem;
   background: color-mix(in srgb, var(--panel) 92%, transparent);
   border-bottom: 1px solid var(--border);
   box-shadow: var(--shadow);
   backdrop-filter: blur(12px);
-  z-index: 5;
+  z-index: 10;
 }
 
 .brand { display: flex; align-items: center; gap: 0.8rem; min-width: 0; }
@@ -134,6 +218,17 @@ button[aria-pressed="true"], .view-controls button.is-active {
   align-items: center;
   gap: 0.35rem;
   flex-wrap: wrap;
+}
+
+.toolbar, .view-controls {
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
+
+.toolbar button, .view-controls button, .top-actions button {
+  flex: 0 0 auto;
 }
 
 .toolbar.compact button { min-width: 2.25rem; padding-inline: 0.6rem; }
@@ -495,6 +590,7 @@ body.outline-collapsed .sidebar { display: none; }
 .rich-source-caption {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   gap: 1rem;
   margin-bottom: 0.45rem;
   color: var(--muted);
@@ -504,6 +600,69 @@ body.outline-collapsed .sidebar { display: none; }
 
 .mermaid-diagram figcaption span,
 .rich-source-caption span { font-weight: 500; }
+
+.mermaid-caption-tools,
+.mermaid-zoom-controls {
+  display: inline-flex;
+  align-items: center;
+}
+
+.mermaid-caption-tools {
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.mermaid-zoom-controls {
+  height: 1.9rem;
+  gap: 0.1rem;
+  padding: 0.15rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel) 86%, transparent);
+}
+
+.mermaid-zoom-button,
+.mermaid-zoom-reset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.6rem;
+  height: 1.6rem;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 0.45rem;
+  background: transparent;
+  color: var(--text);
+  font: 700 0.8rem var(--sans);
+  line-height: 1;
+  appearance: none;
+  cursor: pointer;
+}
+
+.mermaid-zoom-reset { min-width: 3.1rem; }
+
+.mermaid-zoom-button:hover,
+.mermaid-zoom-reset:hover,
+.mermaid-zoom-button:focus-visible,
+.mermaid-zoom-reset:focus-visible {
+  background: var(--accent-soft);
+  outline: none;
+}
+
+.mermaid-zoom-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 3rem;
+  height: 1.6rem;
+  text-align: center;
+  color: var(--text);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.mermaid-edit-hint { white-space: nowrap; }
 
 .rich-source-editor {
   width: 100%;
@@ -532,11 +691,181 @@ body.outline-collapsed .sidebar { display: none; }
   width: 100%;
   height: auto;
   min-height: 10rem;
-  max-height: 70vh;
+  max-height: none;
   max-width: 100%;
   border: 1px solid var(--border);
   border-radius: 0.8rem;
   background: color-mix(in srgb, var(--panel) 92%, var(--panel-soft));
+}
+
+.mermaid-render-target.is-zoomable {
+  overflow: auto;
+  overscroll-behavior: contain;
+  touch-action: none;
+  scrollbar-gutter: stable;
+}
+
+.preview-pane .mermaid-render-target.is-zoomable {
+  max-height: min(72vh, 48rem);
+  cursor: grab;
+}
+
+.preview-pane .mermaid-render-target.is-zoomable.is-panning {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.mermaid-sequence .mermaid-svg,
+.mermaid-svg.mindmapDiagram {
+  max-width: min(100%, 820px);
+  margin-inline: auto;
+}
+
+.mermaid-svg.flowchart {
+  display: block;
+  width: min(100%, 560px);
+  margin-inline: auto;
+}
+
+.mermaid-svg.flowchart text {
+  font-size: 12px !important;
+}
+
+.mermaid-svg .section {
+  opacity: 1 !important;
+  stroke: none !important;
+}
+
+.mermaid-svg .section0,
+.mermaid-svg .section2 {
+  fill: var(--mermaid-gantt-section-a) !important;
+}
+
+.mermaid-svg .section1,
+.mermaid-svg .section3 {
+  fill: var(--mermaid-gantt-section-b) !important;
+  opacity: 1 !important;
+}
+
+.mermaid-svg .grid .tick line {
+  stroke: var(--mermaid-gantt-grid) !important;
+  opacity: 0.65 !important;
+}
+
+.mermaid-svg .task {
+  stroke-width: 1.5 !important;
+}
+
+.mermaid-svg .task0,
+.mermaid-svg .task2 {
+  fill: var(--mermaid-gantt-task) !important;
+  stroke: var(--accent) !important;
+}
+
+.mermaid-svg .task1,
+.mermaid-svg .task3 {
+  fill: var(--mermaid-gantt-task-alt) !important;
+  stroke: color-mix(in srgb, var(--mermaid-gantt-task-alt) 58%, var(--text)) !important;
+}
+
+.mermaid-svg .active0,
+.mermaid-svg .active1,
+.mermaid-svg .active2,
+.mermaid-svg .active3 {
+  fill: var(--mermaid-gantt-active) !important;
+  stroke: color-mix(in srgb, var(--mermaid-gantt-active) 58%, var(--text)) !important;
+}
+
+.mermaid-svg .done0,
+.mermaid-svg .done1,
+.mermaid-svg .done2,
+.mermaid-svg .done3 {
+  fill: var(--mermaid-gantt-done) !important;
+  stroke: color-mix(in srgb, var(--mermaid-gantt-done) 58%, var(--text)) !important;
+}
+
+.mermaid-svg .taskText,
+.mermaid-svg .taskTextOutsideRight,
+.mermaid-svg .taskTextOutsideLeft,
+.mermaid-svg .sectionTitle {
+  fill: var(--text) !important;
+  font-weight: 650 !important;
+}
+
+.mermaid-svg .today {
+  stroke: var(--danger) !important;
+  stroke-width: 2 !important;
+}
+
+.mermaid-svg .pieCircle {
+  stroke: var(--panel) !important;
+  stroke-width: 2 !important;
+}
+
+.mermaid-svg .slice {
+  fill: #ffffff !important;
+  font-weight: 700 !important;
+  paint-order: stroke;
+  stroke: rgba(15, 23, 42, 0.6);
+  stroke-width: 2px;
+  stroke-linejoin: round;
+}
+
+.mermaid-svg .legend text,
+.mermaid-svg .pieTitleText {
+  fill: var(--text) !important;
+  color: var(--text) !important;
+}
+
+.mermaid-svg .branch.branch0,
+.mermaid-svg .arrow.arrow0 {
+  stroke: var(--mermaid-git-0) !important;
+}
+
+.mermaid-svg .branch.branch1,
+.mermaid-svg .arrow.arrow1 {
+  stroke: var(--mermaid-git-1) !important;
+}
+
+.mermaid-svg .commit0 {
+  fill: var(--mermaid-git-0) !important;
+  stroke: var(--panel) !important;
+}
+
+.mermaid-svg .commit1 {
+  fill: var(--mermaid-git-1) !important;
+  stroke: var(--panel) !important;
+}
+
+.mermaid-svg .commit-merge {
+  fill: var(--panel) !important;
+  stroke: var(--mermaid-git-0) !important;
+}
+
+.mermaid-svg .branchLabelBkg.label0 {
+  fill: var(--mermaid-git-0) !important;
+}
+
+.mermaid-svg .branchLabelBkg.label1 {
+  fill: var(--mermaid-git-1) !important;
+}
+
+.mermaid-svg .branch-label0,
+.mermaid-svg .branch-label1 {
+  fill: #ffffff !important;
+  color: #ffffff !important;
+}
+
+.mermaid-svg .commit-label-bkg {
+  fill: color-mix(in srgb, var(--panel) 86%, transparent) !important;
+  stroke: var(--border) !important;
+}
+
+.mermaid-svg .commit-id,
+.mermaid-svg .commit-msg,
+.mermaid-svg .commit-label {
+  fill: var(--text) !important;
+  color: var(--text) !important;
 }
 
 .mermaid-fallback pre { margin: 0; }
@@ -581,18 +910,159 @@ body.outline-collapsed .sidebar { display: none; }
   color: var(--text) !important;
 }
 
+.mermaid-svg .edgeLabel text,
+.mermaid-svg .edgeLabel tspan {
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 7px;
+  stroke-linejoin: round;
+}
+
 .mermaid-svg .edgePath path,
 .mermaid-svg .flowchart-link,
+.mermaid-svg.mindmapDiagram .edge,
 .mermaid-svg .messageLine0,
 .mermaid-svg .messageLine1 {
   fill: none !important;
   stroke: var(--accent) !important;
 }
 
+.mermaid-svg .sequenceNumber {
+  fill: var(--mermaid-sequence-number-text) !important;
+  color: var(--mermaid-sequence-number-text) !important;
+  stroke: none !important;
+  font-weight: 800 !important;
+}
+
+.mermaid-svg [id$="-sequencenumber"] {
+  fill: var(--mermaid-sequence-number-bg) !important;
+  stroke: var(--mermaid-sequence-number-bg) !important;
+}
+
+.mermaid-svg [id$="-sequencenumber"] circle,
+.mermaid-svg [id$="-sequencenumber"] path {
+  fill: var(--mermaid-sequence-number-bg) !important;
+  stroke: var(--mermaid-sequence-number-bg) !important;
+}
+
+.mermaid-svg.mindmapDiagram .edge {
+  stroke-width: 2px !important;
+  stroke-opacity: 0.22;
+}
+
 .mermaid-svg marker path,
 .mermaid-svg .arrowheadPath {
   fill: var(--accent) !important;
   stroke: var(--accent) !important;
+}
+
+.mermaid-svg[aria-roledescription="timeline"] .node-bkg {
+  fill: var(--mermaid-timeline-card) !important;
+  stroke: var(--mermaid-timeline-line) !important;
+  stroke-width: 1.25px !important;
+}
+
+.mermaid-svg[aria-roledescription="timeline"] .section-0 .node-bkg,
+.mermaid-svg[aria-roledescription="timeline"] .section-2 .node-bkg {
+  fill: var(--mermaid-timeline-card-alt) !important;
+}
+
+.mermaid-svg[aria-roledescription="timeline"] text,
+.mermaid-svg[aria-roledescription="timeline"] tspan {
+  fill: var(--mermaid-timeline-text) !important;
+  color: var(--mermaid-timeline-text) !important;
+  font-weight: 700 !important;
+}
+
+.mermaid-svg[aria-roledescription="timeline"] .node-line--1,
+.mermaid-svg[aria-roledescription="timeline"] .node-line-0,
+.mermaid-svg[aria-roledescription="timeline"] .node-line-1,
+.mermaid-svg[aria-roledescription="timeline"] line {
+  stroke: var(--mermaid-timeline-line) !important;
+}
+
+.mermaid-svg[aria-roledescription="sankey"] .nodes .node:nth-child(7n + 1) rect { fill: var(--mermaid-sankey-1) !important; }
+.mermaid-svg[aria-roledescription="sankey"] .nodes .node:nth-child(7n + 2) rect { fill: var(--mermaid-sankey-2) !important; }
+.mermaid-svg[aria-roledescription="sankey"] .nodes .node:nth-child(7n + 3) rect { fill: var(--mermaid-sankey-3) !important; }
+.mermaid-svg[aria-roledescription="sankey"] .nodes .node:nth-child(7n + 4) rect { fill: var(--mermaid-sankey-4) !important; }
+.mermaid-svg[aria-roledescription="sankey"] .nodes .node:nth-child(7n + 5) rect { fill: var(--mermaid-sankey-5) !important; }
+.mermaid-svg[aria-roledescription="sankey"] .nodes .node:nth-child(7n + 6) rect { fill: var(--mermaid-sankey-6) !important; }
+.mermaid-svg[aria-roledescription="sankey"] .nodes .node:nth-child(7n) rect { fill: var(--mermaid-sankey-7) !important; }
+
+.mermaid-svg[aria-roledescription="sankey"] .nodes .node rect {
+  stroke: color-mix(in srgb, var(--panel) 72%, var(--text)) !important;
+  stroke-width: 1px !important;
+}
+
+.mermaid-svg[aria-roledescription="sankey"] .links .link {
+  opacity: 1 !important;
+  mix-blend-mode: normal !important;
+}
+
+.mermaid-svg[aria-roledescription="sankey"] .links path {
+  opacity: 0.9 !important;
+  stroke-opacity: 0.9 !important;
+  mix-blend-mode: normal !important;
+}
+
+.mermaid-svg[aria-roledescription="sankey"] text {
+  fill: var(--text) !important;
+  color: var(--text) !important;
+  font-weight: 650 !important;
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+
+.mermaid-svg[aria-roledescription="packet"] .packetBlock {
+  fill: var(--mermaid-packet-block) !important;
+  stroke: var(--accent) !important;
+  stroke-width: 1.2px !important;
+}
+
+.mermaid-svg[aria-roledescription="packet"] .packetBlock:nth-of-type(even) {
+  fill: var(--mermaid-packet-block-alt) !important;
+}
+
+.mermaid-svg[aria-roledescription="packet"] .packetLabel,
+.mermaid-svg[aria-roledescription="packet"] .packetByte,
+.mermaid-svg[aria-roledescription="packet"] .packetTitle {
+  fill: var(--mermaid-packet-text) !important;
+  color: var(--mermaid-packet-text) !important;
+  font-weight: 700 !important;
+}
+
+.mermaid-svg[aria-roledescription="c4"] path,
+.mermaid-svg[aria-roledescription="c4"] line {
+  stroke: var(--accent) !important;
+}
+
+.mermaid-svg[aria-roledescription="c4"] {
+  background-color: var(--panel);
+  background-image: radial-gradient(circle, var(--mermaid-c4-dot) 1.2px, transparent 1.4px);
+  background-size: 22px 22px;
+}
+
+.mermaid-svg[aria-roledescription="c4"] .person-man path {
+  fill: var(--text) !important;
+  stroke: none !important;
+}
+
+.mermaid-svg[aria-roledescription="c4"] text[fill="#FFFFFF"] {
+  fill: #ffffff !important;
+  color: #ffffff !important;
+  stroke: none !important;
+}
+
+.mermaid-svg[aria-roledescription="c4"] text[fill="#444444"],
+.mermaid-svg[aria-roledescription="c4"] text:not([fill]) {
+  fill: var(--text) !important;
+  color: var(--text) !important;
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 4px;
+  stroke-linejoin: round;
 }
 
 .mermaid-node rect,
@@ -605,11 +1075,26 @@ body.outline-collapsed .sidebar { display: none; }
 }
 
 .mermaid-node-diamond polygon { fill: color-mix(in srgb, var(--accent-soft) 54%, var(--panel)); }
-.mermaid-node-label {
+.mermaid-svg.mindmapDiagram .section-root circle,
+.mermaid-svg.mindmapDiagram .node-bkg {
+  fill: var(--panel) !important;
+  stroke: var(--accent) !important;
+}
+
+.mermaid-svg.mindmapDiagram .label .background {
+  fill: var(--panel) !important;
+  opacity: 0.92 !important;
+}
+
+.mermaid-node-label,
+.mermaid-flow-node-label {
   fill: var(--text);
   font-family: var(--sans);
-  font-size: 12px;
+  font-weight: 650;
 }
+
+.mermaid-node-label { font-size: 16px; }
+.mermaid-flow-node-label { font-size: 24px; }
 
 .mermaid-edge path,
 .mermaid-message path {
@@ -622,8 +1107,13 @@ body.outline-collapsed .sidebar { display: none; }
 .mermaid-message text {
   fill: var(--muted);
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: 18px;
+  font-weight: 650;
   text-anchor: middle;
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 7px;
+  stroke-linejoin: round;
 }
 
 .mermaid-lifeline {
@@ -844,18 +1334,81 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.58); backdrop-filter: blur(4px
 .dialog-field input:focus { border-color: var(--accent); }
 
 @media (max-width: 1280px) {
-  .topbar { grid-template-columns: 1fr; }
-  body { overflow: auto; }
-  .app-shell { min-height: 100vh; height: auto; }
-  .workspace { min-height: 70vh; }
+  .topbar {
+    grid-template-columns: minmax(13rem, 1fr) auto auto;
+    grid-template-areas:
+      "brand view actions"
+      "file file badges"
+      "insert insert insert";
+    align-items: start;
+    gap: 0.55rem 0.75rem;
+    padding: 0.65rem 0.8rem;
+  }
+
+  .brand { grid-area: brand; }
+  .toolbar[aria-label="ファイル操作"] { grid-area: file; }
+  .toolbar.compact { grid-area: insert; }
+  .view-controls { grid-area: view; justify-content: flex-end; flex-wrap: nowrap; }
+  .security-badges { grid-area: badges; justify-content: flex-end; flex-wrap: nowrap; overflow: hidden; }
+  .top-actions { grid-area: actions; justify-content: flex-end; flex-wrap: nowrap; }
+
+  .toolbar {
+    flex-wrap: nowrap;
+    padding-bottom: 0.12rem;
+  }
+
+  .topbar button {
+    padding: 0.4rem 0.64rem;
+  }
+
+  .topbar .toolbar.compact button {
+    min-width: 2.05rem;
+    padding-inline: 0.5rem;
+  }
+
+  .topbar .icon-button {
+    width: 2.15rem;
+    height: 2.15rem;
+    padding: 0;
+  }
+
+  .workspace { min-height: 0; }
 }
 
 @media (max-width: 900px) {
-  .workspace { grid-template-columns: 1fr; }
+  .topbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "brand actions"
+      "view view"
+      "file file"
+      "insert insert"
+      "badges badges";
+  }
+
+  .brand p { display: none; }
+  .brand-mark { width: 2.35rem; height: 2.35rem; border-radius: 0.75rem; }
+  .brand h1 { font-size: 0.95rem; }
+  .view-controls, .security-badges { justify-content: flex-start; }
+  .security-badges { overflow-x: auto; scrollbar-width: thin; }
+
+  .workspace { grid-template-columns: 1fr; overflow: auto; }
   .sidebar { display: none; }
   .editor-grid { grid-template-columns: minmax(0, 1fr); grid-template-areas: "source" "preview"; min-height: auto; }
   .source-pane, .preview-pane, .rich-pane { min-height: 32rem; }
   .statusbar { flex-direction: column; align-items: flex-start; }
+}
+
+@media (max-height: 720px) {
+  .topbar {
+    gap: 0.42rem 0.6rem;
+    padding-block: 0.5rem;
+  }
+
+  button { padding-block: 0.38rem; }
+  .icon-button { width: 2.1rem; height: 2.1rem; }
+  .brand-mark { width: 2.25rem; height: 2.25rem; }
+  .brand p { display: none; }
 }
 
 @media print {

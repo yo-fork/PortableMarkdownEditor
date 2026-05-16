@@ -1,22 +1,22 @@
-# Portable Markdown Editer
+# Portable Markdown Editor
 
 Windowsでインストールせずに使える、完全ローカル実行のMarkdownエディタです。
 
 * `index.html` をブラウザで開くだけで起動します。
-* CDN、npm実行、外部配信JavaScript、外部配信CSS、外部API通信は使いません。必要なブラウザ用ライブラリは `vendor/` に同梱します。
+* CDN、npm実行、外部配信JavaScript、外部配信CSS、外部API通信は使いません。必要なブラウザ用ライブラリは `vendor/` に固定して同梱します。
 * シームレスなリッチ編集、ソース編集、分割プレビュー、プレビュー専用、集中モードを切り替えられます。
 * 初期表示はリッチ編集モードです。
 * Markdownの読み込み、保存、HTML出力、HTMLコピー、PDF/印刷に対応します。
-* Markdownと画像を含むフォルダを開くと、相対画像パスをMarkdownファイルの場所基準で表示します。
+* Markdownと画像を含むフォルダを開くと、相対画像パスをMarkdownファイルの場所基準で表示します。対応ブラウザでは File System Access API のフォルダ選択を使い、未対応環境では従来のフォルダ入力にフォールバックします。
 * Markdown内のHTMLは実行せず文字として扱います。
 * 完全ローカル性を優先し、外部リンクは許可ドメイン制、`javascript:` など危険なリンク、遠隔画像、SVG data画像はブロックします。
 
 ## 使い方
 
 1. ZIPを展開します。
-2. `OpenMarkdownEditer.cmd` または `index.html` をダブルクリックします。
+2. `OpenMarkdownEditor.cmd` または `index.html` をダブルクリックします。
 3. 「開く」でMarkdownファイルを読み込み、「保存」でMarkdownとして保存します。
-4. 相対画像をMarkdownファイル基準で表示したい場合は、「フォルダ」からMarkdownと画像を含むフォルダを選びます。
+4. 相対画像をMarkdownファイル基準で表示したい場合は、「フォルダ」からMarkdownと画像を含むフォルダを選びます。ブラウザの仕様上、アプリは絶対フォルダパスではなく、選択フォルダ内の相対パスだけを保持します。
 5. 外部リンクを有効にしたい場合は、「リンク許可」からドメインを1行ずつ登録します。
 6. PDF化は「PDF/印刷」から Windows の「Microsoft Print to PDF」を選びます。
 
@@ -48,6 +48,7 @@ Markdown解析、コードハイライト、Mermaid図、KaTeX数式は、`vendo
 * リンクURLは許可制。相対リンク、アンカー、ユーザーが許可したドメインの `http`/`https` のみリンク化し、危険なスキームはリンク化しない。
 * 画像は PNG/JPEG/GIF/WebP のみ許可。Data URL、フォルダ選択時のMarkdownファイル基準の相対パス、`file:` URL、Windowsドライブパス、UNCパスを参照でき、遠隔画像は読み込まない。
 * `eval`、`new Function`、Web Worker、fetch/XHRは不使用。同梱ライブラリも `script-src 'self'` の範囲でだけ読み込みます。
+* vendorファイルは手動で確認・更新し、アプリ実行時にnpmやネットワーク取得は行いません。
 
 ## ライセンス
 
