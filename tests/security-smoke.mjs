@@ -40,13 +40,27 @@ assert.match(app, /async function\s+renderMermaidTargets/, 'Mermaid render queue
 assert.doesNotMatch(app, /isSimpleLocalFlowchart\(source\)\)\s*return/, 'runtime flowcharts should not skip Mermaid.js rendering');
 assert.match(index, /id="codeLanguageOptions"/, 'code language suggestion list should exist');
 assert.match(app, /code-language-input/, 'rendered code blocks should expose a language input');
+assert.match(app, /showDirectoryPicker\(\{\s*mode:\s*'readwrite'\s*\}\)/, 'folder picker should request write access for assets image insertion');
+assert.match(app, /async function\s+insertImageFilesAsAssets/, 'pasted and dropped images should be routed through assets insertion');
+assert.match(app, /createWritable\(\)/, 'assets image insertion should write through File System Access API');
+assert.match(app, /addEventListener\('drop', onEditorDrop\)/, 'editors should accept dropped image files');
+assert.match(app, /addEventListener\('paste', onMarkdownPaste\)/, 'source editor should handle pasted image files');
+assert.match(app, /dataset\.folderAccess = state\.directoryHandle \? 'fsa'/, 'UI should expose when the current folder came from File System Access API');
+assert.match(app, /function\s+restorePersistedDirectoryHandle/, 'File System Access directory handles should be restorable after reopening');
+assert.match(app, /window\.indexedDB\.open\(FSA_DB_NAME,\s*1\)/, 'persisted File System Access handles should use local IndexedDB only');
+assert.match(app, /persistDirectoryHandle\(directoryHandle\)/, 'opened File System Access directory handle should be persisted for reopen');
 
-const instrumented = app.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml, sanitizeImageUrl, sanitizeLinkUrl, state };\n})();');
+class TestURL extends URL {}
+let objectUrlIndex = 0;
+TestURL.createObjectURL = () => `blob:test-${objectUrlIndex += 1}`;
+TestURL.revokeObjectURL = () => {};
+
+const instrumented = app.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml, sanitizeImageUrl, sanitizeLinkUrl, saveImageFileToAssets, ensureImageAssetWriteAccess, buildFolderAssetUrls, state };\n})();');
 const renderer = vm.runInNewContext(instrumented, {
   document: { addEventListener() {} },
-  window: {},
+  window: { isSecureContext: true },
   localStorage: {},
-  URL,
+  URL: TestURL,
   Blob,
   navigator: {},
   confirm() { return true; },
@@ -139,6 +153,73 @@ assert.equal(renderer.sanitizeLinkUrl('https://evil.example.net/a'), '');
 
 renderer.state.assetUrls.set('images/a.png', 'blob:local-image');
 assert.match(renderer.renderMarkdownHtml('![a](images/a.png)'), /src="blob:local-image"/);
+
+function memoryDirectoryHandle(name = 'root') {
+  const directories = new Map();
+  const files = new Map();
+  return {
+    kind: 'directory',
+    name,
+    directories,
+    files,
+    async queryPermission({ mode }) {
+      return mode === 'readwrite' ? 'granted' : 'prompt';
+    },
+    async requestPermission() {
+      return 'granted';
+    },
+    async getDirectoryHandle(childName, options = {}) {
+      if (!directories.has(childName)) {
+        if (!options.create) throw Object.assign(new Error('not found'), { name: 'NotFoundError' });
+        directories.set(childName, memoryDirectoryHandle(childName));
+      }
+      return directories.get(childName);
+    },
+    async getFileHandle(childName, options = {}) {
+      if (!files.has(childName)) {
+        if (!options.create) throw Object.assign(new Error('not found'), { name: 'NotFoundError' });
+        files.set(childName, memoryFileHandle(childName));
+      }
+      return files.get(childName);
+    },
+  };
+}
+
+function memoryFileHandle(name) {
+  return {
+    kind: 'file',
+    name,
+    written: null,
+    async createWritable() {
+      const handle = this;
+      return {
+        async write(file) {
+          handle.written = file;
+        },
+        async close() {},
+      };
+    },
+  };
+}
+
+const rootHandle = memoryDirectoryHandle();
+const docsHandle = await rootHandle.getDirectoryHandle('docs', { create: true });
+renderer.state.directoryHandle = rootHandle;
+renderer.state.markdownRelativePath = 'docs/sample.md';
+renderer.state.fileName = 'sample.md';
+assert.equal(await renderer.ensureImageAssetWriteAccess(), true, 'opened folder handle should grant read/write image insertion');
+const pastedImage = new Blob(['image-bytes'], { type: 'image/png' });
+Object.defineProperty(pastedImage, 'name', { value: 'clipboard image.png' });
+const savedImage = await renderer.saveImageFileToAssets(pastedImage);
+assert.equal(savedImage.markdownPath, 'sample.assets/clipboard image.png', 'images should be saved beside the Markdown file in a file-name assets directory');
+assert.ok(docsHandle.directories.get('sample.assets').files.has('clipboard image.png'), 'asset image should be written through the selected directory handle');
+assert.equal(docsHandle.directories.get('sample.assets').files.get('clipboard image.png').written, pastedImage, 'image bytes should be written to the allocated asset file');
+assert.match(renderer.renderMarkdownHtml(`![clipboard](<${savedImage.markdownPath}>)`), /src="blob:test-/, 'saved asset should render through the refreshed folder asset map');
+renderer.state.assetUrls.clear();
+renderer.buildFolderAssetUrls([
+  { file: pastedImage, relativePath: 'docs/sample.assets/clipboard image.png' },
+], 'docs');
+assert.match(renderer.renderMarkdownHtml(`![clipboard](<${savedImage.markdownPath}>)`), /src="blob:test-/, 'reopened folder entries should map assets relative to the Markdown file');
 
 const toc = renderer.renderMarkdownHtml([
   '[toc]',

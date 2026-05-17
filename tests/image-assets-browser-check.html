@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>Portable Markdown Editor image assets browser check</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="../styles.css">
+  <style>
+    body { margin: 0; }
+    #testResult {
+      position: fixed;
+      inset: auto 1rem 1rem 1rem;
+      z-index: 20;
+      border: 1px solid #94a3b8;
+      border-radius: .5rem;
+      background: #fff;
+      color: #111827;
+      padding: .75rem 1rem;
+      font: 14px/1.5 system-ui, sans-serif;
+      white-space: pre-wrap;
+    }
+    #testResult.pass { border-color: #15803d; color: #14532d; }
+    #testResult.fail { border-color: #b91c1c; color: #7f1d1d; }
+  </style>
+  <script>
+    (() => {
+      const STORAGE_KEY = 'portable-markdown-editer:draft:v1';
+      const SETTINGS_KEY = 'portable-markdown-editer:settings:v1';
+      const DB_NAME = 'portable-markdown-editor:fsa:v1';
+      const PHASE_KEY = 'pme-image-assets-browser-check:phase';
+      const PHASE = sessionStorage.getItem(PHASE_KEY) || 'start';
+      const PNG_BYTES = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII='), (c) => c.charCodeAt(0));
+
+      function deleteDatabase(name) {
+        return new Promise((resolve, reject) => {
+          const request = indexedDB.deleteDatabase(name);
+          request.onsuccess = request.onblocked = () => resolve();
+          request.onerror = () => reject(request.error || new Error('deleteDatabase failed'));
+        });
+      }
+
+      async function removeIfExists(directory, name, options = {}) {
+        try {
+          await directory.removeEntry(name, options);
+        } catch (error) {
+          if (error && error.name !== 'NotFoundError') throw error;
+        }
+      }
+
+      async function writeTextFile(directory, name, text) {
+        const handle = await directory.getFileHandle(name, { create: true });
+        const writable = await handle.createWritable();
+        await writable.write(new Blob([text], { type: 'text/markdown' }));
+        await writable.close();
+      }
+
+      async function writeImageFile(directory, name) {
+        const handle = await directory.getFileHandle(name, { create: true });
+        const writable = await handle.createWritable();
+        await writable.write(new Blob([PNG_BYTES], { type: 'image/png' }));
+        await writable.close();
+      }
+
+      async function prepareDirectory() {
+        if (PHASE === 'start') {
+          localStorage.removeItem(STORAGE_KEY);
+          localStorage.removeItem(SETTINGS_KEY);
+        }
+        if (!navigator.storage || typeof navigator.storage.getDirectory !== 'function') {
+          throw new Error('navigator.storage.getDirectory is unavailable');
+        }
+        const root = await navigator.storage.getDirectory();
+        if (PHASE === 'start') {
+          await deleteDatabase(DB_NAME);
+          await removeIfExists(root, 'sample.assets', { recursive: true });
+          await removeIfExists(root, 'sample.md');
+          await removeIfExists(root, 'existing.png');
+          await writeTextFile(root, 'sample.md', '# Image asset browser check\n\n既存画像: ![existing](existing.png)\n');
+          await writeImageFile(root, 'existing.png');
+        }
+        window.__PME_IMAGE_TEST_ROOT = root;
+        window.showDirectoryPicker = async () => root;
+      }
+
+      window.__PME_IMAGE_TEST_PHASE = PHASE;
+      window.__PME_IMAGE_TEST_READY = prepareDirectory();
+    })();
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#mainWorkspace">本文へ移動</a>
+  <div class="app-shell">
+    <header class="topbar" aria-label="アプリ操作">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">M</div>
+        <div>
+          <h1>Portable Markdown Editor</h1>
+          <p>Image assets browser check</p>
+        </div>
+      </div>
+      <nav class="toolbar" aria-label="ファイル操作">
+        <button type="button" data-action="new">新規</button>
+        <button type="button" data-action="open">開く</button>
+        <button type="button" data-action="open-folder">フォルダ</button>
+        <button type="button" data-action="save-md">保存</button>
+        <button type="button" data-action="export-html">HTML</button>
+        <button type="button" data-action="print">PDF/印刷</button>
+        <button type="button" data-action="copy-html">HTMLコピー</button>
+        <button type="button" data-action="link-settings">リンク許可</button>
+      </nav>
+      <nav class="toolbar" aria-label="Markdown挿入">
+        <button type="button" data-action="format" data-format="h1">H1</button>
+        <button type="button" data-action="format" data-format="h2">H2</button>
+        <button type="button" data-action="format" data-format="bold">B</button>
+        <button type="button" data-action="format" data-format="italic">I</button>
+        <button type="button" data-action="format" data-format="code">{ }</button>
+        <button type="button" data-action="insert-code-block">```</button>
+        <button type="button" data-action="format" data-format="quote">&gt;</button>
+        <button type="button" data-action="format" data-format="list">•</button>
+        <button type="button" data-action="format" data-format="table">表</button>
+        <button type="button" data-action="format" data-format="toc">TOC</button>
+        <button type="button" data-action="insert-link">リンク</button>
+        <button type="button" data-action="insert-mermaid">Mermaid</button>
+        <button type="button" data-action="insert-image">画像埋込</button>
+        <button type="button" data-action="insert-image-ref">画像参照</button>
+      </nav>
+      <div class="mode-switch" role="group" aria-label="表示モード">
+        <button type="button" data-action="mode" data-mode="rich">リッチ</button>
+        <button type="button" data-action="mode" data-mode="split">分割</button>
+        <button type="button" data-action="mode" data-mode="source">ソース</button>
+        <button type="button" data-action="mode" data-mode="preview">プレビュー</button>
+        <button type="button" data-action="mode" data-mode="focus">集中</button>
+      </div>
+      <div class="security-badges" aria-label="セキュリティ状態">
+        <span>LOCAL</span>
+        <span>NO CDN</span>
+        <span>HTML OFF</span>
+        <button type="button" class="icon-button" data-action="toggle-theme">◐</button>
+        <button type="button" class="icon-button" data-action="security">🔒</button>
+      </div>
+    </header>
+
+    <main id="mainWorkspace" class="workspace">
+      <aside class="sidebar" aria-label="アウトライン">
+        <div class="sidebar-header">
+          <strong>アウトライン</strong>
+          <button type="button" class="icon-button" data-action="collapse-outline">×</button>
+        </div>
+        <nav id="outline" class="outline"></nav>
+      </aside>
+
+      <section class="editor-grid">
+        <section class="source-pane" aria-label="Markdownソース">
+          <div class="pane-title">Markdown <span id="fileNameLabel">untitled.md</span></div>
+          <textarea id="sourceEditor" spellcheck="false"></textarea>
+        </section>
+        <section class="rich-pane" aria-label="リッチ編集">
+          <div class="pane-title">リッチ編集 <span>本文をそのまま編集</span></div>
+          <article id="richEditor" class="markdown-body rich-editor"></article>
+        </section>
+        <section class="preview-pane" aria-label="プレビュー">
+          <div class="pane-title">Preview <span>安全化済みHTML</span></div>
+          <article id="preview" class="markdown-body" tabindex="0"></article>
+        </section>
+      </section>
+    </main>
+
+    <footer class="statusbar" aria-live="polite">
+      <span id="statusMessage">準備完了</span>
+      <span id="documentStats">0文字 / 0語</span>
+      <span id="saveState">自動保存: 未保存</span>
+    </footer>
+  </div>
+
+  <pre id="testResult">RUNNING</pre>
+  <input id="fileInput" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden>
+  <input id="folderInput" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain,image/png,image/jpeg,image/gif,image/webp" webkitdirectory multiple hidden>
+  <input id="imageInput" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+  <datalist id="codeLanguageOptions"><option value="text"></option></datalist>
+  <dialog id="securityDialog"><button type="button">閉じる</button></dialog>
+  <dialog id="linkDomainDialog"><textarea id="allowedDomainsInput"></textarea></dialog>
+
+  <script src="../app.js"></script>
+  <script>
+    (() => {
+      const PHASE_KEY = 'pme-image-assets-browser-check:phase';
+      const result = document.getElementById('testResult');
+      const PNG_BYTES = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII='), (c) => c.charCodeAt(0));
+
+      function pass(message) {
+        result.className = 'pass';
+        result.textContent = `PASS\n${message}`;
+        sessionStorage.removeItem(PHASE_KEY);
+      }
+
+      function fail(error) {
+        result.className = 'fail';
+        result.textContent = `FAIL\n${error && error.stack ? error.stack : error}`;
+        sessionStorage.removeItem(PHASE_KEY);
+      }
+
+      function assert(condition, message) {
+        if (!condition) throw new Error(message);
+      }
+
+      function waitFor(predicate, message, timeout = 6000) {
+        const start = performance.now();
+        return new Promise((resolve, reject) => {
+          const tick = () => {
+            try {
+              if (predicate()) {
+                resolve();
+                return;
+              }
+            } catch (error) {
+              reject(error);
+              return;
+            }
+            if (performance.now() - start > timeout) {
+              reject(new Error(message));
+              return;
+            }
+            setTimeout(tick, 50);
+          };
+          tick();
+        });
+      }
+
+      function focusRichEnd() {
+        const rich = document.getElementById('richEditor');
+        rich.focus();
+        const range = document.createRange();
+        range.selectNodeContents(rich);
+        range.collapse(false);
+        const selection = getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return rich;
+      }
+
+      function imageFile(name) {
+        return new File([PNG_BYTES], name, { type: 'image/png' });
+      }
+
+      function pasteImage(target, file) {
+        const event = new Event('paste', { bubbles: true, cancelable: true });
+        Object.defineProperty(event, 'clipboardData', {
+          value: {
+            items: [{ kind: 'file', type: file.type, getAsFile: () => file }],
+            files: [file],
+            getData: () => '',
+          },
+        });
+        target.dispatchEvent(event);
+      }
+
+      function dropImage(target, file) {
+        const event = new Event('drop', { bubbles: true, cancelable: true });
+        Object.defineProperty(event, 'dataTransfer', {
+          value: {
+            items: [{ kind: 'file', type: file.type, getAsFile: () => file }],
+            files: [file],
+            dropEffect: '',
+          },
+        });
+        target.dispatchEvent(event);
+      }
+
+      async function hasAsset(name) {
+        const assets = await window.__PME_IMAGE_TEST_ROOT.getDirectoryHandle('sample.assets', { create: false });
+        await assets.getFileHandle(name, { create: false });
+        return true;
+      }
+
+      async function runStartPhase() {
+        await window.__PME_IMAGE_TEST_READY;
+        await waitFor(() => document.body.dataset.mode === 'rich', 'app did not initialize');
+        document.querySelector('[data-action="open-folder"]').click();
+        await waitFor(() => document.body.dataset.folderAccess === 'fsa', 'folder was not opened through File System Access API');
+        assert(document.getElementById('sourceEditor').value.includes('existing.png'), 'sample Markdown was not opened');
+
+        const rich = focusRichEnd();
+        pasteImage(rich, imageFile('pasted.png'));
+        await waitFor(() => document.getElementById('sourceEditor').value.includes('sample.assets/pasted.png'), 'pasted image was not inserted');
+        dropImage(rich, imageFile('dropped.png'));
+        await waitFor(() => document.getElementById('sourceEditor').value.includes('sample.assets/dropped.png'), 'dropped image was not inserted');
+        await hasAsset('pasted.png');
+        await hasAsset('dropped.png');
+        await waitFor(() => {
+          const draft = JSON.parse(localStorage.getItem('portable-markdown-editer:draft:v1') || '{}');
+          return typeof draft.markdown === 'string' && draft.markdown.includes('sample.assets/dropped.png');
+        }, 'draft did not persist inserted image references', 2000);
+
+        sessionStorage.setItem(PHASE_KEY, 'reload');
+        location.reload();
+      }
+
+      async function runReloadPhase() {
+        await window.__PME_IMAGE_TEST_READY;
+        await waitFor(() => document.body.dataset.folderAccess === 'fsa', 'persisted File System Access directory was not restored');
+        const source = document.getElementById('sourceEditor').value;
+        assert(source.includes('sample.assets/pasted.png'), 'pasted asset reference did not survive reload');
+        assert(source.includes('sample.assets/dropped.png'), 'dropped asset reference did not survive reload');
+        assert(document.querySelectorAll('#preview img[src^="blob:"]').length >= 2, 'asset images did not render from restored directory map');
+        await hasAsset('pasted.png');
+        await hasAsset('dropped.png');
+        pass('paste/drop images saved to sample.assets, Markdown uses relative references, and FSA directory handle restored after reload.');
+      }
+
+      window.addEventListener('DOMContentLoaded', () => {
+        const phase = window.__PME_IMAGE_TEST_PHASE;
+        (phase === 'reload' ? runReloadPhase() : runStartPhase()).catch(fail);
+      });
+    })();
+  </script>
+</body>
+</html>

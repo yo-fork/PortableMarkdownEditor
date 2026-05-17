@@ -38,8 +38,10 @@ Run these checks without npm, package managers, CDN, or network access.
 8. Confirm Mermaid mindmap rendering when the local Mermaid bundle is loaded. It should not leave `Syntax error in text` below the document. If the bundle is unavailable, the source should fall back as escaped code.
 9. Confirm inline math `$x+1$` and display math `$$x+1$$` render and round-trip in rich editing. Math must not overflow the editor column.
 10. Confirm there are no `body > div[id^="dpme-"]` Mermaid scratch nodes left after Mermaid rendering.
-11. Open a folder containing Markdown plus PNG/JPEG/GIF/WebP images from the `フォルダ` button and confirm relative images render relative to the opened Markdown file. In supported browsers this should use the File System Access API folder picker; otherwise it should fall back to folder file input.
-12. Restart the browser and confirm relative images are not restored until the folder is selected again.
-13. Confirm `http`/`https` images remain blocked.
-14. Confirm normal external links open only after adding the domain in `リンク許可`; unlisted domains remain blocked.
-15. Open `tests/browser-selftest.html` directly and confirm every row reports `PASS`.
+11. Open a folder containing Markdown plus PNG/JPEG/GIF/WebP images from the `フォルダ` button and confirm relative images render relative to the opened Markdown file. In supported browsers this should use the File System Access API folder picker and the status bar should show `FSAフォルダ`; otherwise it should fall back to folder file input.
+12. In a supported browser opened from `http://localhost` or `http://127.0.0.1`, paste an image with `Ctrl+V` and drop a PNG/JPEG/GIF/WebP file into the editor. Confirm the files are created in `MarkdownFileName.assets/` next to the Markdown file and the Markdown contains relative image references.
+13. Reopen the same folder from `フォルダ` and confirm the assets-folder images render again through the File System Access API directory mapping.
+14. Restart the browser and confirm relative images are not restored until the folder is selected again.
+15. Confirm `http`/`https` images remain blocked.
+16. Confirm normal external links open only after adding the domain in `リンク許可`; unlisted domains remain blocked.
+17. Open `tests/browser-selftest.html` directly and confirm every row reports `PASS`.

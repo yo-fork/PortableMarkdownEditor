@@ -3,13 +3,19 @@
 
   const STORAGE_KEY = 'portable-markdown-editer:draft:v1';
   const SETTINGS_KEY = 'portable-markdown-editer:settings:v1';
+  const FSA_DB_NAME = 'portable-markdown-editor:fsa:v1';
+  const FSA_STORE_NAME = 'handles';
+  const FSA_DIRECTORY_HANDLE_KEY = 'last-directory';
   const MAX_EMBEDDED_IMAGE_BYTES = 2 * 1024 * 1024;
+  const MAX_ASSET_IMAGE_BYTES = 25 * 1024 * 1024;
   const MAX_HIGHLIGHT_CHARS = 120000;
   const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
   const IMAGE_EXTENSION_PATTERN = /\.(?:png|jpe?g|gif|webp)(?:[?#].*)?$/i;
   const VENDOR_TOC_MARKER = 'PME_TOC_MARKER_7B4E2D8C';
   const RICH_INLINE_SOURCE_SELECTOR = 'strong, b, em, i, del, s, code, a, img, .math-inline';
   const RICH_INLINE_EDIT_BLOCK_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, li, td, th';
+  const RICH_TRAILING_BLOCK_SELECTOR = '.toc, .mermaid-diagram, pre.code-block, .math-display, table, hr, ul, ol, blockquote';
+  const MAX_RICH_UNDO_STEPS = 50;
   const DEFAULT_MERMAID_ZOOM = 0.7;
   const MERMAID_ZOOM_FACTOR = 1.1;
   const MERMAID_WHEEL_ZOOM_SENSITIVITY = 0.0012;
@@ -96,10 +102,15 @@ flowchart TD
     richComposing: false,
     richInlineSource: null,
     richInlineActivationSuppressed: false,
+    richInlineParseBlock: null,
+    richUndoStack: [],
+    richUndoRestoring: false,
     richSelectionLock: false,
     mermaidPan: null,
     allowedLinkDomains: [],
     assetUrls: new Map(),
+    directoryHandle: null,
+    directoryName: '',
     markdownRelativePath: '',
   };
 
@@ -118,6 +129,7 @@ flowchart TD
     els.source.value = state.markdown;
     renderAll('init');
     setStatus('準備完了');
+    restorePersistedDirectoryHandle();
   }
 
   function cacheElements() {
@@ -174,10 +186,92 @@ flowchart TD
     }
   }
 
+  async function restorePersistedDirectoryHandle() {
+    if (!state.markdownRelativePath || state.directoryHandle) return false;
+    if (!canPersistDirectoryHandle()) return false;
+    try {
+      const directoryHandle = await readPersistedDirectoryHandle();
+      if (!directoryHandle) return false;
+      const permission = await queryDirectoryPermission(directoryHandle, 'read');
+      if (permission !== 'granted') {
+        setStatus('前回のフォルダ権限が必要です。「フォルダ」から開き直してください');
+        return false;
+      }
+      const entries = await collectDirectoryEntries(directoryHandle);
+      state.directoryHandle = directoryHandle;
+      state.directoryName = directoryHandle.name || '';
+      clearAssetUrls();
+      buildFolderAssetUrls(entries, dirnamePath(state.markdownRelativePath));
+      renderAll('restore-folder');
+      setStatus(`${state.fileName} のフォルダ参照をFile System Access APIから復元しました。画像候補: ${state.assetUrls.size}`);
+      return true;
+    } catch (_) {
+      setStatus('前回のフォルダ参照を復元できませんでした。「フォルダ」から開き直してください');
+      return false;
+    }
+  }
+
+  function canPersistDirectoryHandle() {
+    return Boolean(window.isSecureContext && window.indexedDB);
+  }
+
+  async function persistDirectoryHandle(directoryHandle) {
+    if (!directoryHandle || !canPersistDirectoryHandle()) return false;
+    try {
+      const db = await openFsaDatabase();
+      await idbRequest(db.transaction(FSA_STORE_NAME, 'readwrite').objectStore(FSA_STORE_NAME).put(directoryHandle, FSA_DIRECTORY_HANDLE_KEY));
+      db.close();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function readPersistedDirectoryHandle() {
+    const db = await openFsaDatabase();
+    try {
+      return await idbRequest(db.transaction(FSA_STORE_NAME, 'readonly').objectStore(FSA_STORE_NAME).get(FSA_DIRECTORY_HANDLE_KEY));
+    } finally {
+      db.close();
+    }
+  }
+
+  async function clearPersistedDirectoryHandle() {
+    if (!canPersistDirectoryHandle()) return false;
+    try {
+      const db = await openFsaDatabase();
+      await idbRequest(db.transaction(FSA_STORE_NAME, 'readwrite').objectStore(FSA_STORE_NAME).delete(FSA_DIRECTORY_HANDLE_KEY));
+      db.close();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function openFsaDatabase() {
+    return new Promise((resolve, reject) => {
+      const request = window.indexedDB.open(FSA_DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(FSA_STORE_NAME)) db.createObjectStore(FSA_STORE_NAME);
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error('IndexedDBを開けませんでした'));
+    });
+  }
+
+  function idbRequest(request) {
+    return new Promise((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error('IndexedDB操作に失敗しました'));
+    });
+  }
+
   function bindEvents() {
     document.addEventListener('click', onDocumentClick);
     document.addEventListener('change', onDocumentChange);
     document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('beforeinput', onDocumentBeforeInput, true);
     document.addEventListener('selectionchange', onSelectionChange);
     document.addEventListener('focusin', onDocumentFocusIn);
     document.addEventListener('wheel', onDocumentWheel, { passive: false });
@@ -194,6 +288,10 @@ flowchart TD
     });
 
     els.source.addEventListener('scroll', syncPreviewScroll);
+    els.source.addEventListener('paste', onMarkdownPaste);
+    els.source.addEventListener('dragover', onEditorDragOver);
+    els.source.addEventListener('dragleave', onEditorDragLeave);
+    els.source.addEventListener('drop', onEditorDrop);
     els.fileInput.addEventListener('change', onFileChosen);
     els.folderInput.addEventListener('change', onFolderChosen);
     els.imageInput.addEventListener('change', onImageChosen);
@@ -203,6 +301,9 @@ flowchart TD
     els.rich.setAttribute('aria-label', 'リッチMarkdown編集');
     els.rich.addEventListener('input', onRichInput);
     els.rich.addEventListener('paste', onRichPaste);
+    els.rich.addEventListener('dragover', onEditorDragOver);
+    els.rich.addEventListener('dragleave', onEditorDragLeave);
+    els.rich.addEventListener('drop', onEditorDrop);
     els.rich.addEventListener('compositionstart', () => { state.richComposing = true; });
     els.rich.addEventListener('compositionend', () => {
       state.richComposing = false;
@@ -308,6 +409,7 @@ flowchart TD
   function onDocumentPointerDown(event) {
     if (event.button !== 0) return;
     const target = eventTargetElement(event);
+    parsePendingRichInlineMarkdownBeforePointer(target);
     const renderTarget = target?.closest?.('.mermaid-render-target.is-zoomable');
     if (!renderTarget || !els.preview.contains(renderTarget)) return;
     if (target.closest('button, input, textarea, select, a, .rich-source-editor, .rich-source-actions')) return;
@@ -430,6 +532,14 @@ flowchart TD
     return target.parentElement || null;
   }
 
+  function richInlineSourceFromEventContext(event) {
+    const targetSource = eventTargetElement(event)?.closest?.('.rich-inline-source');
+    if (targetSource && els.rich.contains(targetSource)) return targetSource;
+    const selection = window.getSelection?.();
+    const selectionSource = nodeClosest(selection?.anchorNode, '.rich-inline-source');
+    return selectionSource && els.rich.contains(selectionSource) ? selectionSource : null;
+  }
+
   function findRichSourceBackedElement(target) {
     const mermaid = target.closest('.mermaid-diagram');
     if (mermaid && els.rich.contains(mermaid)) {
@@ -539,6 +649,16 @@ flowchart TD
   }
 
   function placeCaretAtPointer(event) {
+    const trailing = richTrailingEditableParagraph();
+    const target = eventTargetElement(event);
+    if (trailing && (target === els.rich || target === trailing || trailing.contains(target))) {
+      const rect = trailing.getBoundingClientRect();
+      if (event.clientY >= rect.top - 12) {
+        placeCaretAtStart(trailing);
+        return;
+      }
+    }
+
     const range = caretRangeFromPoint(event.clientX, event.clientY);
     if (!range || !els.rich.contains(range.startContainer)) return;
     const selection = window.getSelection?.();
@@ -573,7 +693,7 @@ flowchart TD
 
   function updateRichInlineSourceFromSelection() {
     if (state.mode !== 'rich' || state.richComposing) return;
-    if (state.richInlineActivationSuppressed) return;
+    cleanupRichCaretBoundaryMarkers({ preserveSelection: true });
     const selection = window.getSelection?.();
     const active = state.richInlineSource?.element;
 
@@ -582,6 +702,9 @@ flowchart TD
       return;
     }
 
+    parsePendingRichInlineMarkdownAfterSelectionMove(selection);
+    if (state.richInlineActivationSuppressed) return;
+
     if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return;
     if (nodeClosest(selection.anchorNode, '.rich-source-editor, .code-language-input, .rich-inline-source')) return;
     if (nodeClosest(selection.anchorNode, '.mermaid-diagram, pre.code-block, .math-display')) return;
@@ -589,6 +712,26 @@ flowchart TD
     const candidate = findRichInlineSourceCandidate(selection);
     if (!candidate) return;
     activateRichInlineSource(candidate.element, candidate.position);
+  }
+
+  function parsePendingRichInlineMarkdownAfterSelectionMove(selection) {
+    const current = richInlineEditBlockFromSelection(selection);
+    const previous = state.richInlineParseBlock;
+    state.richInlineParseBlock = current;
+    if (!previous || previous === current || !previous.isConnected || !els.rich.contains(previous)) return false;
+    if (previous.closest('.rich-source-editor, .mermaid-diagram, pre.code-block, .math-display')) return false;
+    if (!parsePendingRichInlineMarkdownInBlock(previous)) return false;
+    configureRichEditableSurface();
+    suppressRichInlineActivation();
+    syncRichMarkdownFromDom('rich-input');
+    return true;
+  }
+
+  function richInlineEditBlockFromSelection(selection) {
+    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return null;
+    if (nodeClosest(selection.anchorNode, '.rich-source-editor, .code-language-input, .rich-inline-source')) return null;
+    if (nodeClosest(selection.anchorNode, '.mermaid-diagram, pre.code-block, .math-display')) return null;
+    return richInlineEditBlockForRange(selection.getRangeAt(0));
   }
 
   function nodeElement(node) {
@@ -602,6 +745,7 @@ flowchart TD
 
   function findRichInlineSourceCandidate(selection) {
     const range = selection.getRangeAt(0);
+    if (isRichCaretBoundaryMarker(range.startContainer)) return null;
     const editBlock = richInlineEditBlockForRange(range);
     if (!editBlock) return null;
 
@@ -617,6 +761,57 @@ flowchart TD
     if (afterElement && isSameRichInlineEditBlock(afterElement, editBlock)) return { element: afterElement, position: 'start' };
 
     return null;
+  }
+
+  function isRichCaretBoundaryMarker(node) {
+    return node?.nodeType === Node.TEXT_NODE && (node.nodeValue || '') === '\u200b';
+  }
+
+  function cleanupRichCaretBoundaryMarkers(options = {}) {
+    if (!els.rich) return;
+    const preserveSelection = options.preserveSelection !== false;
+    const selection = window.getSelection?.();
+    const activeNode = preserveSelection && selection?.rangeCount ? selection.anchorNode : null;
+    const activeOffset = preserveSelection && selection?.rangeCount ? selection.anchorOffset : 0;
+    let nextSelection = null;
+
+    const walker = document.createTreeWalker(els.rich, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!String(node.nodeValue || '').includes('\u200b')) return NodeFilter.FILTER_REJECT;
+        if (nodeClosest(node, 'td, th')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+
+    for (const node of nodes) {
+      if (!node.isConnected) continue;
+      const value = node.nodeValue || '';
+      if (!value.includes('\u200b')) continue;
+
+      const isActive = node === activeNode;
+      if (isActive && value === '\u200b') continue;
+
+      const cleaned = value.replace(/\u200b/g, '');
+      if (isActive) {
+        const before = value.slice(0, activeOffset);
+        nextSelection = {
+          node,
+          offset: Math.max(0, Math.min(cleaned.length, before.replace(/\u200b/g, '').length)),
+        };
+      }
+
+      if (cleaned) {
+        node.nodeValue = cleaned;
+      } else {
+        node.remove();
+      }
+    }
+
+    if (nextSelection?.node?.isConnected) {
+      placeCaretInTextNode(nextSelection.node, nextSelection.offset);
+    }
   }
 
   function richInlineEditBlockForRange(range) {
@@ -674,10 +869,44 @@ flowchart TD
 
   function onRichInput(event) {
     if (event.target?.closest?.('.task-checkbox, .code-language-input, .rich-source-editor')) return;
-    if (!event.target?.closest?.('.rich-inline-source')) {
+    if (!state.richUndoRestoring && event?.isTrusted) clearRichUndoStack();
+    if (!richInlineSourceFromEventContext(event)) {
       maybeApplyRichMarkdownTrigger(event);
     }
     syncRichMarkdownFromDom('rich-input');
+    cleanupRichCaretBoundaryMarkers({ preserveSelection: true });
+  }
+
+  function onRichBeforeInput(event) {
+    if (event.defaultPrevented || !isRichBeforeInputContext(event)) return;
+    if (event.inputType === 'insertParagraph') {
+      handleRichEnter(event);
+      return;
+    }
+    if (event.inputType === 'insertLineBreak') {
+      event.preventDefault();
+      insertRichLineBreak();
+      syncRichMarkdownFromDom('rich-input');
+    }
+  }
+
+  function onDocumentBeforeInput(event) {
+    onRichBeforeInput(event);
+  }
+
+  function isRichBeforeInputContext(event) {
+    if (state.mode !== 'rich' || state.richComposing) return false;
+    const target = eventTargetElement(event);
+    const selection = window.getSelection?.();
+    if (selection?.anchorNode && nodeClosest(selection.anchorNode, '.rich-inline-source')) return false;
+    if (target?.closest?.('.task-checkbox, .code-language-input, .rich-source-editor, .rich-inline-source')) return false;
+    if (target && els.rich.contains(target)) return true;
+    return Boolean(
+      selection
+      && selection.rangeCount
+      && selection.isCollapsed
+      && els.rich.contains(selection.anchorNode)
+    );
   }
 
   function maybeApplyRichMarkdownTrigger(_event) {
@@ -723,7 +952,13 @@ flowchart TD
       return true;
     }
 
-    if (/^[*+-] $/.test(text)) {
+    const dashList = text.match(/^- (.+)$/);
+    if (dashList && !isPendingTaskListPrefix(text)) {
+      replaceParagraphWithTriggeredList(block, { ordered: false, task: false, checked: false, content: dashList[1] });
+      return true;
+    }
+
+    if (/^[*+] $/.test(text) || text === '-  ') {
       replaceParagraphWithTriggeredList(block, { ordered: false, task: false, checked: false });
       return true;
     }
@@ -734,6 +969,10 @@ flowchart TD
     }
 
     return false;
+  }
+
+  function isPendingTaskListPrefix(text) {
+    return /^- \[(?: |x|X)?\]? ?$/.test(text);
   }
 
   function activatePendingMathShortcutFromSelection() {
@@ -766,13 +1005,22 @@ flowchart TD
       checkbox.checked = Boolean(config.checked);
       item.appendChild(checkbox);
     }
-    item.appendChild(document.createTextNode(''));
-    item.appendChild(document.createElement('br'));
+    const content = String(config.content || '');
+    if (content) {
+      item.appendChild(document.createTextNode(content));
+    } else {
+      item.appendChild(document.createTextNode(''));
+      item.appendChild(document.createElement('br'));
+    }
     list.appendChild(item);
 
     state.richSelectionLock = true;
     block.replaceWith(list);
-    placeCaretAtListItemStart(item);
+    if (content) {
+      placeCaretAtListItemEnd(item);
+    } else {
+      placeCaretAtListItemStart(item);
+    }
     state.richSelectionLock = false;
   }
 
@@ -878,6 +1126,119 @@ flowchart TD
     return italic ? { source: italic[2] } : null;
   }
 
+  function parsePendingRichInlineMarkdownBeforePointer(target) {
+    if (state.mode !== 'rich' || state.richComposing || state.richInlineSource?.element) return false;
+    if (target?.closest?.('.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return false;
+    const block = richInlineEditBlockForRange(selection.getRangeAt(0));
+    if (!block || block.closest('.mermaid-diagram, pre.code-block, .math-display')) return false;
+    const targetBlock = target && els.rich.contains(target) ? nodeClosest(target, RICH_INLINE_EDIT_BLOCK_SELECTOR) : null;
+    if (targetBlock === block) return false;
+
+    if (!parsePendingRichInlineMarkdownInBlock(block)) return false;
+    configureRichEditableSurface();
+    suppressRichInlineActivation();
+    syncRichMarkdownFromDom('rich-input');
+    return true;
+  }
+
+  function parsePendingRichInlineMarkdownInBlock(block) {
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (nodeClosest(node, '.rich-inline-source, .rich-source-editor, pre.code-block, .math-display, .mermaid-diagram')) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        if (nodeClosest(node, RICH_INLINE_SOURCE_SELECTOR)) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    let changed = false;
+    for (const node of nodes) {
+      if (replacePendingRichInlineMarkdownTextNode(node)) changed = true;
+    }
+    return changed;
+  }
+
+  function replacePendingRichInlineMarkdownTextNode(textNode) {
+    if (!textNode.isConnected) return false;
+    const parts = splitPendingRichInlineMarkdown(textNode.nodeValue || '');
+    if (!parts.some((part) => part.type === 'markdown' || part.type === 'source')) return false;
+
+    const fragment = document.createDocumentFragment();
+    for (const part of parts) {
+      if (part.type === 'text') {
+        if (part.value) fragment.appendChild(document.createTextNode(part.value));
+        continue;
+      }
+      if (part.type === 'source') {
+        fragment.appendChild(createRichInlineSourceElement(part.value));
+        continue;
+      }
+      fragment.appendChild(renderRichInlineSourceFragment(part.value));
+    }
+    textNode.replaceWith(fragment);
+    return true;
+  }
+
+  function splitPendingRichInlineMarkdown(text) {
+    const parts = [];
+    let index = 0;
+    let textStart = 0;
+    while (index < text.length) {
+      const token = pendingRichInlineMarkdownTokenAt(text, index);
+      if (!token) {
+        index += 1;
+        continue;
+      }
+      if (index > textStart) parts.push({ type: 'text', value: text.slice(textStart, index) });
+      parts.push(token);
+      index += token.value.length;
+      textStart = index;
+    }
+    if (textStart < text.length) parts.push({ type: 'text', value: text.slice(textStart) });
+    return parts.length ? parts : [{ type: 'text', value: text }];
+  }
+
+  function pendingRichInlineMarkdownTokenAt(text, index) {
+    const rest = text.slice(index);
+    if (rest.startsWith('****')) return { type: 'source', value: '****' };
+
+    const anchoredPatterns = [
+      /^!\[[^\]\n]*\]\((?:<[^>\n]+>|[^)\n]+)\)/,
+      /^\[[^\]\n]+\]\((?:<[^>\n]+>|[^)\n]+)\)/,
+      /^`[^`\n]+`/,
+      /^~~[^~\n]+~~/,
+      /^\*\*[^*\n]+?\*\*/,
+      /^__[^_\n]+?__/,
+      /^\$\$[^\n$]+?\$\$/,
+      /^\$[^\s$][^\n$]*?\$/,
+      /^\\\([^)]+\\\)/,
+    ];
+    for (const pattern of anchoredPatterns) {
+      const match = rest.match(pattern);
+      if (match) return { type: 'markdown', value: match[0] };
+    }
+
+    if (rest[0] === '*' && rest[1] !== '*' && text[index - 1] !== '*') {
+      const close = rest.indexOf('*', 1);
+      if (close > 1 && !rest.slice(1, close).includes('\n')) {
+        return { type: 'markdown', value: rest.slice(0, close + 1) };
+      }
+    }
+
+    if (rest[0] === '_' && rest[1] !== '_' && text[index - 1] !== '_') {
+      const close = rest.indexOf('_', 1);
+      if (close > 1 && !rest.slice(1, close).includes('\n')) {
+        return { type: 'markdown', value: rest.slice(0, close + 1) };
+      }
+    }
+
+    return null;
+  }
+
   function replaceTextRangeWithRichInlineSource(textNode, start, end, source, caretOffset) {
     const sourceElement = createRichInlineSourceElement(source);
     replaceTextNodeRange(textNode, start, end, [sourceElement]);
@@ -903,8 +1264,19 @@ flowchart TD
     if (!insertedNodes.length) return;
     replaceTextNodeRange(textNode, start, end, insertedNodes);
     configureRichEditableSurface();
+    placeCaretAtInlineBoundary(insertedNodes[insertedNodes.length - 1], 'after');
     suppressRichInlineActivation();
-    placeCaretAfterNode(insertedNodes[insertedNodes.length - 1]);
+  }
+
+  function placeCaretAtInlineBoundary(node, boundary) {
+    const marker = document.createTextNode('\u200b');
+    if (boundary === 'before') {
+      node.before(marker);
+      placeCaretInTextNode(marker, 0);
+    } else {
+      node.after(marker);
+      placeCaretInTextNode(marker, marker.nodeValue.length);
+    }
   }
 
   function replaceTextNodeRange(textNode, start, end, replacementNodes) {
@@ -947,11 +1319,45 @@ flowchart TD
     }, 120);
   }
 
-  function onRichPaste(event) {
+  async function onRichPaste(event) {
+    const imageFiles = imageFilesFromClipboard(event.clipboardData);
+    if (imageFiles.length) {
+      event.preventDefault();
+      await insertImageFilesAsAssets(imageFiles, createImageInsertionContext(event), '貼り付け');
+      return;
+    }
+
     event.preventDefault();
     const text = normalizeNewlines(event.clipboardData?.getData('text/plain') || '');
     insertPlainTextAtSelection(text);
     syncRichMarkdownFromDom('rich-paste');
+  }
+
+  async function onMarkdownPaste(event) {
+    const imageFiles = imageFilesFromClipboard(event.clipboardData);
+    if (!imageFiles.length) return;
+    event.preventDefault();
+    await insertImageFilesAsAssets(imageFiles, createImageInsertionContext(event), '貼り付け');
+  }
+
+  function onEditorDragOver(event) {
+    if (!hasImageFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    event.currentTarget?.classList?.add('is-drag-over');
+  }
+
+  function onEditorDragLeave(event) {
+    if (event.currentTarget?.contains(event.relatedTarget)) return;
+    event.currentTarget?.classList?.remove('is-drag-over');
+  }
+
+  async function onEditorDrop(event) {
+    const imageFiles = imageFilesFromDataTransfer(event.dataTransfer);
+    if (!imageFiles.length) return;
+    event.preventDefault();
+    event.currentTarget?.classList?.remove('is-drag-over');
+    await insertImageFilesAsAssets(imageFiles, createImageInsertionContext(event), 'ドロップ');
   }
 
   function insertPlainTextAtSelection(text) {
@@ -971,13 +1377,284 @@ flowchart TD
     selection.addRange(range);
   }
 
+  function imageFilesFromClipboard(clipboardData) {
+    if (!clipboardData) return [];
+    const files = [];
+    for (const item of Array.from(clipboardData.items || [])) {
+      if (item.kind !== 'file' || !String(item.type || '').startsWith('image/')) continue;
+      const file = item.getAsFile?.();
+      if (file) files.push(file);
+    }
+    if (!files.length) files.push(...Array.from(clipboardData.files || []).filter(isAllowedImageFile));
+    return files.filter(isAllowedImageFile);
+  }
+
+  function imageFilesFromDataTransfer(dataTransfer) {
+    if (!dataTransfer) return [];
+    return Array.from(dataTransfer.files || []).filter(isAllowedImageFile);
+  }
+
+  function hasImageFiles(dataTransfer) {
+    if (!dataTransfer) return false;
+    if (Array.from(dataTransfer.files || []).some(isAllowedImageFile)) return true;
+    return Array.from(dataTransfer.items || []).some((item) => {
+      if (item.kind !== 'file') return false;
+      const type = String(item.type || '');
+      return !type || type.startsWith('image/');
+    });
+  }
+
+  function createImageInsertionContext(event) {
+    const target = eventTargetElement(event);
+    if (target === els.source) {
+      return {
+        mode: 'source',
+        start: els.source.selectionStart,
+        end: els.source.selectionEnd,
+      };
+    }
+
+    if (state.mode === 'rich') {
+      if (target && els.rich.contains(target) && Number.isFinite(event?.clientX) && Number.isFinite(event?.clientY)) {
+        placeCaretAtPointer(event);
+      }
+      const selection = window.getSelection?.();
+      if (selection?.rangeCount && els.rich.contains(selection.anchorNode)) {
+        return { mode: 'rich', range: selection.getRangeAt(0).cloneRange() };
+      }
+    }
+
+    return {
+      mode: 'source',
+      start: els.source.selectionStart,
+      end: els.source.selectionEnd,
+    };
+  }
+
+  async function insertImageFilesAsAssets(files, insertionContext, actionLabel) {
+    const imageFiles = Array.from(files || []).filter(isAllowedImageFile);
+    if (!imageFiles.length) {
+      setStatus('PNG/JPEG/GIF/WebPのみ挿入できます');
+      return false;
+    }
+
+    const ready = await ensureImageAssetWriteAccess();
+    if (!ready) return false;
+
+    let inserted = 0;
+    for (const file of imageFiles) {
+      if (file.size > MAX_ASSET_IMAGE_BYTES) {
+        setStatus(`画像は${Math.round(MAX_ASSET_IMAGE_BYTES / 1024 / 1024)}MB以下にしてください`);
+        continue;
+      }
+      try {
+        const saved = await saveImageFileToAssets(file);
+        const alt = sanitizeMarkdownLabel(stripExtension(saved.fileName));
+        insertMarkdownAtImageContext(`![${alt}](${formatMarkdownTarget(saved.markdownPath)})`, insertionContext);
+        inserted += 1;
+      } catch (error) {
+        setStatus(error?.message || '画像の保存に失敗しました');
+      }
+    }
+
+    if (inserted > 0) {
+      setStatus(`${actionLabel || '画像挿入'}: ${inserted}件を assets フォルダに保存しました`);
+      return true;
+    }
+    return false;
+  }
+
+  async function ensureImageAssetWriteAccess() {
+    if (!window.isSecureContext) {
+      setStatus('画像をassetsフォルダに保存するには、localhostなどの安全なHTTP環境で開いてください');
+      return false;
+    }
+    if (!state.directoryHandle || !state.markdownRelativePath) {
+      setStatus('画像をassetsフォルダに保存するには、「フォルダ」からMarkdownのあるフォルダを開いてください');
+      return false;
+    }
+    if (!await ensureDirectoryPermission(state.directoryHandle, 'readwrite')) {
+      setStatus('画像保存に必要なフォルダ書き込み権限がありません');
+      return false;
+    }
+    return true;
+  }
+
+  async function ensureDirectoryPermission(directoryHandle, mode) {
+    const options = { mode };
+    try {
+      const current = await queryDirectoryPermission(directoryHandle, mode);
+      if (current === 'granted') return true;
+      if (typeof directoryHandle.requestPermission === 'function') {
+        return await directoryHandle.requestPermission(options) === 'granted';
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function queryDirectoryPermission(directoryHandle, mode) {
+    if (typeof directoryHandle?.queryPermission !== 'function') return 'granted';
+    return directoryHandle.queryPermission({ mode });
+  }
+
+  async function saveImageFileToAssets(file) {
+    const markdownDirHandle = await markdownDirectoryHandle();
+    const assetsDirName = markdownAssetsDirName();
+    const assetsDirHandle = await markdownDirHandle.getDirectoryHandle(assetsDirName, { create: true });
+    const allocated = await allocateAssetFileHandle(assetsDirHandle, assetFileName(file));
+    const writable = await allocated.handle.createWritable();
+    try {
+      await writable.write(file);
+    } finally {
+      await writable.close();
+    }
+
+    const markdownPath = normalizeAssetPath(`${assetsDirName}/${allocated.fileName}`);
+    setAssetUrl(markdownPath, file);
+    return { fileName: allocated.fileName, markdownPath };
+  }
+
+  async function markdownDirectoryHandle() {
+    if (!state.directoryHandle) throw new Error('フォルダが開かれていません');
+    let handle = state.directoryHandle;
+    const parts = dirnamePath(state.markdownRelativePath).split('/').filter(Boolean);
+    for (const part of parts) {
+      handle = await handle.getDirectoryHandle(part, { create: false });
+    }
+    return handle;
+  }
+
+  function markdownAssetsDirName() {
+    return `${stripExtension(safeFileName(state.fileName || 'untitled.md'))}.assets`;
+  }
+
+  function assetFileName(file) {
+    const extension = imageExtensionForFile(file);
+    const raw = stripExtension(file?.name || '').trim() || `image-${compactTimestamp()}`;
+    const base = safeAssetName(raw);
+    return `${base}${extension}`;
+  }
+
+  function imageExtensionForFile(file) {
+    const name = String(file?.name || '');
+    const match = name.match(/\.(png|jpe?g|gif|webp)$/i);
+    if (match) return `.${match[1].toLowerCase().replace('jpeg', 'jpg')}`;
+    switch (file?.type) {
+      case 'image/png': return '.png';
+      case 'image/jpeg': return '.jpg';
+      case 'image/gif': return '.gif';
+      case 'image/webp': return '.webp';
+      default: return '.png';
+    }
+  }
+
+  function safeAssetName(value) {
+    const cleaned = String(value || 'image')
+      .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_')
+      .replace(/\s+/g, ' ')
+      .replace(/^\.+$/, 'image')
+      .trim();
+    return cleaned || 'image';
+  }
+
+  function compactTimestamp() {
+    const date = new Date();
+    const pad = (value, size = 2) => String(value).padStart(size, '0');
+    return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}${pad(date.getMilliseconds(), 3)}`;
+  }
+
+  async function allocateAssetFileHandle(directoryHandle, requestedName) {
+    const clean = safeFileName(requestedName);
+    const extension = imageExtensionForFile({ name: clean });
+    const base = stripExtension(clean);
+    for (let index = 0; index < 100; index += 1) {
+      const fileName = index === 0 ? clean : `${base}-${index + 1}${extension}`;
+      try {
+        await directoryHandle.getFileHandle(fileName, { create: false });
+      } catch (error) {
+        if (error?.name !== 'NotFoundError') throw error;
+        return {
+          fileName,
+          handle: await directoryHandle.getFileHandle(fileName, { create: true }),
+        };
+      }
+    }
+    const fileName = `${base}-${compactTimestamp()}${extension}`;
+    return {
+      fileName,
+      handle: await directoryHandle.getFileHandle(fileName, { create: true }),
+    };
+  }
+
+  function setAssetUrl(relativePath, file) {
+    const relative = normalizeAssetPath(relativePath);
+    const previous = state.assetUrls.get(relative);
+    if (previous?.startsWith?.('blob:')) URL.revokeObjectURL(previous);
+    const url = URL.createObjectURL(file);
+    state.assetUrls.set(relative, url);
+    state.assetUrls.set(`./${relative}`, url);
+  }
+
+  function insertMarkdownAtImageContext(markdown, context) {
+    if (context?.mode === 'rich') {
+      restoreImageInsertionRange(context);
+      insertRichMarkdownAtSelection(markdown);
+      const selection = window.getSelection?.();
+      if (selection?.rangeCount && els.rich.contains(selection.anchorNode)) {
+        context.range = selection.getRangeAt(0).cloneRange();
+      }
+      return;
+    }
+
+    const start = Number.isInteger(context?.start) ? context.start : els.source.selectionStart;
+    const end = Number.isInteger(context?.end) ? context.end : els.source.selectionEnd;
+    const value = els.source.value;
+    els.source.value = value.slice(0, start) + markdown + value.slice(end);
+    const next = start + markdown.length;
+    els.source.setSelectionRange(next, next);
+    els.source.focus();
+    context.mode = 'source';
+    context.start = next;
+    context.end = next;
+    state.markdown = normalizeNewlines(els.source.value);
+    markDirty();
+    renderAll('edit');
+    scheduleAutosave();
+  }
+
+  function restoreImageInsertionRange(context) {
+    if (!context?.range || !els.rich.contains(context.range.commonAncestorContainer)) {
+      getRichSelectionRange();
+      return;
+    }
+    const selection = window.getSelection?.();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(context.range);
+    els.rich.focus();
+  }
+
   function onKeyDown(event) {
-    const inlineSource = event.target.closest?.('.rich-inline-source');
+    const inlineSource = richInlineSourceFromEventContext(event);
     if (inlineSource) {
-      if (event.key === 'Enter') {
+      if (isRichUndoShortcut(event) && restoreRichUndoSnapshot()) {
         event.preventDefault();
-        insertPlainTextAtSelection('\n');
-        syncRichMarkdownFromDom('rich-input');
+        return;
+      }
+      if (isEnterKey(event)) {
+        event.preventDefault();
+        pushRichUndoSnapshot('line-break');
+        if (!event.shiftKey && handleRichInlineSourceEnter(inlineSource)) {
+          return;
+        }
+        if (event.shiftKey && handleRichInlineSourceLineBreak(inlineSource)) {
+          return;
+        }
+        return;
+      }
+      if ((event.key === 'ArrowRight' || event.key === 'ArrowLeft') && handleRichInlineSourceArrow(event, inlineSource)) {
         return;
       }
       if (event.key === 'Escape') {
@@ -987,21 +1664,40 @@ flowchart TD
       }
     }
 
-    if (els.rich.contains(event.target) && !event.target.closest?.('.rich-source-editor, .code-language-input')) {
+    if (isRichKeyEventContext(event)) {
+      if (isRichUndoShortcut(event) && restoreRichUndoSnapshot()) {
+        event.preventDefault();
+        return;
+      }
+      if ((event.key === 'ArrowRight' || event.key === 'ArrowLeft') && handleRichInlineBoundaryArrow(event)) {
+        return;
+      }
+      if ((event.key === 'ArrowRight' || event.key === 'ArrowLeft') && handleRichLineBoundaryArrow(event)) {
+        return;
+      }
       if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && handleRichListArrowNavigation(event)) {
+        return;
+      }
+      if ((event.key === 'Backspace' || event.key === 'Delete') && handleRichTableLineBreakDelete(event)) {
+        return;
+      }
+      if (event.key === 'Backspace' && handleRichEmptyListBackspace(event)) {
+        return;
+      }
+      if ((event.key === 'Backspace' || event.key === 'Delete') && handleRichTaskCheckboxDelete(event)) {
         return;
       }
       if ((event.key === 'Backspace' || event.key === 'Delete') && handleRichDeleteToEmptyBlock(event)) {
         return;
       }
-      if (event.key === 'Enter') {
+      if (isEnterKey(event)) {
         handleRichEnter(event);
         return;
       }
     }
 
     if (event.target instanceof HTMLInputElement && event.target.classList.contains('code-language-input')) {
-      if (event.key === 'Enter') {
+      if (isEnterKey(event)) {
         event.preventDefault();
         updateCodeBlockLanguage(event.target);
         event.target.blur();
@@ -1038,6 +1734,487 @@ flowchart TD
     }
   }
 
+  function isEnterKey(event) {
+    return event.key === 'Enter' || event.key === 'NumpadEnter' || event.key === 'ENTER';
+  }
+
+  function isRichUndoShortcut(event) {
+    return (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'z';
+  }
+
+  function pushRichUndoSnapshot(label) {
+    if (state.mode !== 'rich' || !els.rich) return;
+    const markdown = normalizeNewlines(serializeRichMarkdown(els.rich));
+    const bookmark = getRichCaretBookmark();
+    const last = state.richUndoStack[state.richUndoStack.length - 1];
+    if (last?.markdown === markdown && last?.bookmark?.start === bookmark?.start && last?.bookmark?.length === bookmark?.length) return;
+    state.richUndoStack.push({ label, markdown, bookmark });
+    if (state.richUndoStack.length > MAX_RICH_UNDO_STEPS) {
+      state.richUndoStack.splice(0, state.richUndoStack.length - MAX_RICH_UNDO_STEPS);
+    }
+  }
+
+  function clearRichUndoStack() {
+    state.richUndoStack = [];
+  }
+
+  function restoreRichUndoSnapshot() {
+    const snapshot = state.richUndoStack.pop();
+    if (!snapshot) return false;
+    state.richUndoRestoring = true;
+    state.richSelectionLock = true;
+    state.markdown = normalizeNewlines(snapshot.markdown || '');
+    els.source.value = state.markdown;
+    state.richInlineSource = null;
+    renderAll('rich-undo');
+    restoreRichCaret(snapshot.bookmark);
+    state.richSelectionLock = false;
+    state.richUndoRestoring = false;
+    suppressRichInlineActivation();
+    markDirty();
+    scheduleAutosave();
+    setStatus(snapshot.label === 'line-break' ? '改行を元に戻しました' : '編集を元に戻しました');
+    return true;
+  }
+
+  function isRichKeyEventContext(event) {
+    const target = eventTargetElement(event);
+    if (target?.closest?.('.rich-source-editor, .code-language-input')) return false;
+    if (target && els.rich.contains(target)) return true;
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== els.rich && !els.rich.contains(active)) return false;
+    const selection = window.getSelection?.();
+    return Boolean(
+      state.mode === 'rich'
+      && selection
+      && selection.rangeCount
+      && selection.isCollapsed
+      && els.rich.contains(selection.anchorNode)
+    );
+  }
+
+  function handleRichInlineSourceEnter(inlineSource) {
+    const item = inlineSource.closest?.('li');
+    const list = item?.closest?.('ul, ol');
+    if (item && list && els.rich.contains(item)) {
+      return handleRichInlineSourceListEnter(inlineSource, item, list);
+    }
+
+    const cell = inlineSource.closest?.('td, th');
+    if (cell && els.rich.contains(cell)) {
+      return handleRichInlineSourceLineBreak(inlineSource);
+    }
+
+    return handleRichInlineSourceBlockEnter(inlineSource);
+  }
+
+  function handleRichInlineSourceListEnter(inlineSource, item, list) {
+    const split = splitRichInlineSourceAtSelection(inlineSource);
+    if (!split) return false;
+    const marker = document.createTextNode('');
+    inlineSource.after(marker);
+
+    state.richSelectionLock = true;
+    replaceInlineSourceWithFragment(inlineSource, split.before);
+    const nextItem = createEmptyListItemLike(item, list);
+    const tail = extractListItemTailAfterMarker(item, marker);
+    marker.remove();
+    appendRichInlineSourceAndTail(nextItem, split.after, tail, 'list-item');
+    ensureListItemEditablePlaceholder(item);
+    item.after(nextItem);
+    placeCaretAtListItemStart(nextItem);
+    state.richSelectionLock = false;
+    suppressRichInlineActivation();
+    syncRichMarkdownFromDom('rich-input');
+    return true;
+  }
+
+  function handleRichInlineSourceBlockEnter(inlineSource) {
+    const block = nodeClosest(inlineSource, 'p, h1, h2, h3, h4, h5, h6, div');
+    if (!block || !els.rich.contains(block) || block.closest('li, .rich-source-editor, .mermaid-diagram, pre.code-block, .math-display, .toc')) {
+      return false;
+    }
+
+    const split = splitRichInlineSourceAtSelection(inlineSource);
+    if (!split) return false;
+    const marker = document.createTextNode('');
+    inlineSource.after(marker);
+
+    state.richSelectionLock = true;
+    replaceInlineSourceWithFragment(inlineSource, split.before);
+    const next = document.createElement('p');
+    const tail = extractRichBlockTailAfterMarker(block, marker);
+    marker.remove();
+    appendRichInlineSourceAndTail(next, split.after, tail, 'block');
+    ensureRichTextBlockPlaceholder(block);
+    block.after(next);
+    placeCaretAtStart(next);
+    state.richSelectionLock = false;
+    suppressRichInlineActivation();
+    syncRichMarkdownFromDom('rich-input');
+    return true;
+  }
+
+  function handleRichInlineSourceLineBreak(inlineSource) {
+    const split = splitRichInlineSourceAtSelection(inlineSource);
+    if (!split) return false;
+    const marker = document.createTextNode('');
+    inlineSource.after(marker);
+
+    state.richSelectionLock = true;
+    replaceInlineSourceWithFragment(inlineSource, split.before);
+    const br = document.createElement('br');
+    const caret = document.createTextNode('\u200b');
+    const afterFragment = renderRichInlineSourceFragment(split.after);
+    marker.replaceWith(br, caret, afterFragment);
+    placeCaretInTextNode(caret, 1);
+    state.richSelectionLock = false;
+    suppressRichInlineActivation();
+    syncRichMarkdownFromDom('rich-input');
+    return true;
+  }
+
+  function splitRichInlineSourceAtSelection(inlineSource) {
+    const offset = richInlineSourceCaretOffset(inlineSource);
+    if (!Number.isInteger(offset)) return null;
+    return splitRichInlineSourceAtOffset(normalizeNewlines(inlineSource.textContent || ''), offset);
+  }
+
+  function richInlineSourceCaretOffset(inlineSource) {
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount || !selection.isCollapsed || !inlineSource.contains(selection.anchorNode)) return null;
+    const range = selection.getRangeAt(0);
+    const before = range.cloneRange();
+    before.selectNodeContents(inlineSource);
+    try {
+      before.setEnd(range.startContainer, range.startOffset);
+    } catch (_) {
+      return null;
+    }
+    return normalizeNewlines(before.toString()).length;
+  }
+
+  function splitRichInlineSourceAtOffset(source, offset) {
+    const index = Math.max(0, Math.min(source.length, offset));
+    return { before: source.slice(0, index), after: source.slice(index) };
+  }
+
+  function replaceInlineSourceWithFragment(inlineSource, source) {
+    const fragment = source ? renderRichInlineSourceFragment(source) : document.createDocumentFragment();
+    if (state.richInlineSource?.element === inlineSource) state.richInlineSource = null;
+    inlineSource.replaceWith(fragment);
+    configureRichEditableSurface();
+  }
+
+  function extractListItemTailAfterMarker(item, marker) {
+    const tailRange = document.createRange();
+    tailRange.setStartAfter(marker);
+    tailRange.setEnd(item, listItemContentEndOffset(item));
+    const fragment = tailRange.extractContents();
+    fragment.querySelectorAll?.('.task-checkbox').forEach((checkbox) => checkbox.remove());
+    return fragment;
+  }
+
+  function extractRichBlockTailAfterMarker(block, marker) {
+    const tailRange = document.createRange();
+    tailRange.setStartAfter(marker);
+    tailRange.setEnd(block, block.childNodes.length);
+    return tailRange.extractContents();
+  }
+
+  function appendRichInlineSourceAndTail(target, source, tail, kind) {
+    if (source) {
+      const sourceFragment = renderRichInlineSourceFragment(source);
+      if (!isFragmentVisiblyEmpty(sourceFragment)) target.appendChild(sourceFragment);
+    }
+    if (tail && !isFragmentVisiblyEmpty(tail)) target.appendChild(tail);
+    if (kind === 'list-item') {
+      ensureListItemEditablePlaceholder(target);
+    } else {
+      ensureRichTextBlockPlaceholder(target);
+    }
+  }
+
+  function handleRichInlineSourceArrow(event, inlineSource) {
+    if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return false;
+    const offset = richInlineSourceCaretOffset(inlineSource);
+    if (!Number.isInteger(offset)) return false;
+    const length = normalizeNewlines(inlineSource.textContent || '').length;
+
+    if (event.key === 'ArrowRight' && offset >= length) {
+      event.preventDefault();
+      commitRichInlineSourceAtBoundary(inlineSource, 'after');
+      return true;
+    }
+    if (event.key === 'ArrowLeft' && offset <= 0) {
+      event.preventDefault();
+      commitRichInlineSourceAtBoundary(inlineSource, 'before');
+      return true;
+    }
+    return false;
+  }
+
+  function commitRichInlineSourceAtBoundary(inlineSource, boundary) {
+    const marker = document.createTextNode('\u200b');
+    if (boundary === 'before') {
+      inlineSource.before(marker);
+    } else {
+      inlineSource.after(marker);
+    }
+    const committed = commitRichInlineSource(inlineSource);
+    if (committed && marker.isConnected) {
+      placeCaretInTextNode(marker, boundary === 'before' ? 0 : marker.nodeValue.length);
+      suppressRichInlineActivation();
+    }
+    return committed;
+  }
+
+  function handleRichInlineBoundaryArrow(event) {
+    if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return false;
+    if (event.target.closest?.('.rich-source-editor, .code-language-input')) return false;
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return false;
+    if (nodeClosest(selection.anchorNode, '.rich-inline-source')) return false;
+
+    const range = selection.getRangeAt(0);
+    const candidate = richInlineBoundaryCandidate(range, event.key);
+    if (!candidate) return false;
+
+    event.preventDefault();
+    cleanupRichCaretBoundaryMarkers({ preserveSelection: false });
+    activateRichInlineSource(candidate.element, candidate.position);
+    return true;
+  }
+
+  function richInlineBoundaryCandidate(range, key) {
+    const editBlock = richInlineEditBlockForRange(range);
+    if (!editBlock) return null;
+    const direction = key === 'ArrowLeft' ? 'before' : key === 'ArrowRight' ? 'after' : '';
+    if (!direction) return null;
+
+    const direct = validRichInlineSourceElement(nodeElement(range.startContainer)?.closest?.(RICH_INLINE_SOURCE_SELECTOR));
+    if (direct && isSameRichInlineEditBlock(direct, editBlock)) {
+      const offset = richInlineElementTextOffsetForRange(direct, range);
+      const length = normalizeRichText(direct.textContent || '').length;
+      if (direction === 'before' && offset >= length) return { element: direct, position: 'end' };
+      if (direction === 'after' && offset <= 0) return { element: direct, position: 'start' };
+    }
+
+    const adjacent = adjacentNodeForInlineBoundary(range.startContainer, range.startOffset, direction);
+    const element = validRichInlineSourceElement(nodeElement(adjacent)?.closest?.(RICH_INLINE_SOURCE_SELECTOR));
+    if (!element || !isSameRichInlineEditBlock(element, editBlock)) return null;
+    return { element, position: direction === 'before' ? 'end' : 'start' };
+  }
+
+  function richInlineElementTextOffsetForRange(element, range) {
+    const before = range.cloneRange();
+    before.selectNodeContents(element);
+    try {
+      before.setEnd(range.startContainer, range.startOffset);
+    } catch (_) {
+      return 0;
+    }
+    return normalizeRichText(before.toString()).length;
+  }
+
+  function adjacentNodeForInlineBoundary(container, offset, direction) {
+    if (isRichCaretBoundaryMarker(container)) {
+      if (direction === 'before' && offset > 0) return adjacentDomNode(container, 'before');
+      if (direction === 'after' && offset <= 0) return adjacentDomNode(container, 'after');
+      return null;
+    }
+    return adjacentCaretNode(container, offset, direction);
+  }
+
+  function handleRichTableLineBreakDelete(event) {
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return false;
+    const range = selection.getRangeAt(0);
+    const cell = nodeClosest(range.startContainer, 'td, th');
+    if (!cell || !els.rich.contains(cell)) return false;
+
+    const target = event.key === 'Backspace'
+      ? tableBackspaceBreakTarget(range)
+      : tableDeleteBreakTarget(range);
+    if (!target) return false;
+
+    event.preventDefault();
+    target.br.remove();
+    if (target.textNode?.isConnected && target.textNode.nodeValue?.startsWith('\u200b')) {
+      target.textNode.nodeValue = target.textNode.nodeValue.slice(1);
+      placeCaretInTextNode(target.textNode, 0);
+    } else if (target.textNode?.isConnected) {
+      placeCaretInTextNode(target.textNode, target.offset || 0);
+    } else if (target.caretNode?.isConnected) {
+      placeCaretAfterNode(target.caretNode);
+    } else {
+      placeCaretAtStart(cell);
+    }
+    syncRichMarkdownFromDom('rich-input');
+    return true;
+  }
+
+  function tableBackspaceBreakTarget(range) {
+    const container = range.startContainer;
+    const offset = range.startOffset;
+    if (container.nodeType === Node.TEXT_NODE) {
+      const text = container.nodeValue || '';
+      const atMarkerBoundary = text.startsWith('\u200b') && offset <= 1;
+      if (offset === 0 || atMarkerBoundary) {
+        const br = previousSiblingElement(container, 'br');
+        if (br) return { br, textNode: container, offset: 0 };
+      }
+      return null;
+    }
+    if (container.nodeType === Node.ELEMENT_NODE) {
+      const br = elementChildAt(container, offset - 1, 'br');
+      if (br) return { br, caretNode: br.previousSibling };
+    }
+    return null;
+  }
+
+  function tableDeleteBreakTarget(range) {
+    const container = range.startContainer;
+    const offset = range.startOffset;
+    if (container.nodeType === Node.TEXT_NODE) {
+      const text = container.nodeValue || '';
+      if (offset !== text.length) return null;
+      const br = nextSiblingElement(container, 'br');
+      const after = br?.nextSibling;
+      return br ? { br, textNode: after?.nodeType === Node.TEXT_NODE ? after : container, offset } : null;
+    }
+    if (container.nodeType === Node.ELEMENT_NODE) {
+      const br = elementChildAt(container, offset, 'br');
+      if (br) return { br, caretNode: br.previousSibling };
+    }
+    return null;
+  }
+
+  function previousSiblingElement(node, tagName) {
+    let sibling = node.previousSibling;
+    while (sibling && sibling.nodeType === Node.TEXT_NODE && sibling.nodeValue === '') sibling = sibling.previousSibling;
+    return sibling?.nodeType === Node.ELEMENT_NODE && sibling.tagName.toLowerCase() === tagName ? sibling : null;
+  }
+
+  function nextSiblingElement(node, tagName) {
+    let sibling = node.nextSibling;
+    while (sibling && sibling.nodeType === Node.TEXT_NODE && sibling.nodeValue === '') sibling = sibling.nextSibling;
+    return sibling?.nodeType === Node.ELEMENT_NODE && sibling.tagName.toLowerCase() === tagName ? sibling : null;
+  }
+
+  function elementChildAt(element, index, tagName) {
+    const child = element.childNodes[index];
+    return child?.nodeType === Node.ELEMENT_NODE && child.tagName.toLowerCase() === tagName ? child : null;
+  }
+
+  function placeCaretInTextNode(textNode, offset) {
+    const range = document.createRange();
+    range.setStart(textNode, Math.max(0, Math.min(offset, textNode.nodeValue.length)));
+    range.collapse(true);
+    const selection = window.getSelection?.();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    els.rich.focus();
+  }
+
+  function handleRichEmptyListBackspace(event) {
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return false;
+    const range = selection.getRangeAt(0);
+    const item = richListItemFromRange(range);
+    if (!item || !isRichListItemEmpty(item)) return false;
+    if (richListCaretTextOffset(item, range) !== 0) return false;
+    const list = item.closest('ul, ol');
+    if (!list) return false;
+
+    event.preventDefault();
+    const previousTarget = previousCaretTargetForListItem(item, list);
+    item.remove();
+    cleanupListAfterItemRemoval(list);
+    restoreCaretAfterEmptyListRemoval(previousTarget, list);
+    syncRichMarkdownFromDom('rich-input');
+    return true;
+  }
+
+  function previousCaretTargetForListItem(item, list) {
+    let sibling = item.previousElementSibling;
+    while (sibling) {
+      if (sibling.tagName?.toLowerCase() === 'li') return { type: 'li', node: sibling };
+      sibling = sibling.previousElementSibling;
+    }
+
+    let previous = list.previousElementSibling;
+    while (previous) {
+      if (['ul', 'ol'].includes(previous.tagName?.toLowerCase())) {
+        const lastItem = lastDirectListItem(previous);
+        if (lastItem) return { type: 'li', node: lastItem };
+      }
+      if (els.rich.contains(previous)) return { type: 'block', node: previous };
+      previous = previous.previousElementSibling;
+    }
+    return null;
+  }
+
+  function lastDirectListItem(list) {
+    const items = Array.from(list.children).filter((child) => child.tagName?.toLowerCase() === 'li');
+    return items[items.length - 1] || null;
+  }
+
+  function cleanupListAfterItemRemoval(list) {
+    if (!Array.from(list.children).some((child) => child.tagName?.toLowerCase() === 'li')) {
+      list.remove();
+      return;
+    }
+    if (!list.querySelector(':scope > li > .task-checkbox')) list.classList.remove('task-list');
+  }
+
+  function restoreCaretAfterEmptyListRemoval(target, list) {
+    if (target?.node?.isConnected && target.type === 'li') {
+      placeCaretAtListItemEnd(target.node);
+      return;
+    }
+    if (target?.node?.isConnected) {
+      placeCaretAtEnd(target.node);
+      return;
+    }
+    if (list.isConnected) {
+      placeCaretAtStart(list);
+    } else {
+      const paragraph = document.createElement('p');
+      paragraph.appendChild(document.createElement('br'));
+      els.rich.appendChild(paragraph);
+      placeCaretAtStart(paragraph);
+    }
+  }
+
+  function handleRichTaskCheckboxDelete(event) {
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return false;
+    const range = selection.getRangeAt(0);
+    const item = richListItemFromRange(range);
+    if (!item) return false;
+    const checkbox = directTaskCheckboxForItem(item);
+    if (!checkbox) return false;
+    if (richListCaretTextOffset(item, range) !== 0) return false;
+
+    event.preventDefault();
+    checkbox.remove();
+    item.classList.remove('task-list-item');
+    const list = item.closest('ul, ol');
+    if (list && !list.querySelector(':scope > li > .task-checkbox')) list.classList.remove('task-list');
+    placeCaretAtListItemStart(item);
+    syncRichMarkdownFromDom('rich-input');
+    return true;
+  }
+
+  function directTaskCheckboxForItem(item) {
+    return Array.from(item.children).find((child) => child.classList?.contains('task-checkbox')) || null;
+  }
+
   function handleRichDeleteToEmptyBlock(event) {
     if (event.ctrlKey || event.metaKey || event.altKey) return false;
     const selection = window.getSelection?.();
@@ -1064,20 +2241,35 @@ flowchart TD
     event.preventDefault();
     window.clearTimeout(state.richReparseTimer);
 
+    const selection = window.getSelection?.();
+    const range = richInputRangeFromEvent(event) || richSelectionRange(selection);
+    if (!range || !els.rich.contains(range.startContainer)) return;
+    pushRichUndoSnapshot('line-break');
+
     if (event.shiftKey) {
-      insertRichLineBreak();
+      insertRichLineBreakAtRange(range);
       syncRichMarkdownFromDom('rich-input');
       return;
     }
 
-    const selection = window.getSelection?.();
-    if (!selection || !selection.rangeCount || !els.rich.contains(selection.anchorNode)) return;
-    const range = selection.getRangeAt(0);
     if (!range.collapsed) range.deleteContents();
+
+    const tableCell = nodeClosest(range.startContainer, 'td, th');
+    if (tableCell && els.rich.contains(tableCell)) {
+      insertRichLineBreakAtRange(range);
+      syncRichMarkdownFromDom('rich-input');
+      return;
+    }
 
     const listItem = richListItemFromRange(range);
     if (listItem && els.rich.contains(listItem)) {
       handleRichListEnter(listItem, range);
+      return;
+    }
+
+    const textBlock = richTextBlockFromRange(range);
+    if (textBlock) {
+      splitRichTextBlockAtRange(textBlock, range);
       return;
     }
 
@@ -1096,6 +2288,81 @@ flowchart TD
     }
     placeCaretAtStart(paragraph);
     syncRichMarkdownFromDom('rich-input');
+  }
+
+  function richInputRangeFromEvent(event) {
+    const ranges = event.getTargetRanges?.();
+    const inputRange = ranges && ranges[0];
+    if (!inputRange || !els.rich.contains(inputRange.startContainer)) return null;
+    const range = document.createRange();
+    range.setStart(inputRange.startContainer, inputRange.startOffset);
+    range.setEnd(inputRange.endContainer, inputRange.endOffset);
+    return range;
+  }
+
+  function richSelectionRange(selection) {
+    if (!selection || !selection.rangeCount || !els.rich.contains(selection.anchorNode)) return null;
+    return selection.getRangeAt(0);
+  }
+
+  function richTextBlockFromRange(range) {
+    const block = nodeClosest(range.startContainer, 'p, h1, h2, h3, h4, h5, h6, div') || (
+      range.startContainer.nodeType === Node.TEXT_NODE && range.startContainer.parentNode === els.rich ? els.rich : null
+    );
+    if (!block || !els.rich.contains(block)) return null;
+    if (block !== els.rich && block.closest('li, .rich-source-editor, .mermaid-diagram, pre.code-block, .math-display, .toc')) return null;
+    return block;
+  }
+
+  function splitRichTextBlockAtRange(block, range) {
+    if (block === els.rich) {
+      splitRootTextAtRange(range);
+      return;
+    }
+
+    const next = document.createElement('p');
+    const tail = extractRichBlockTail(block, range);
+    appendRichBlockTail(next, tail);
+    ensureRichTextBlockPlaceholder(block);
+    block.after(next);
+    placeCaretAtStart(next);
+    syncRichMarkdownFromDom('rich-input');
+  }
+
+  function splitRootTextAtRange(range) {
+    if (range.startContainer.nodeType !== Node.TEXT_NODE || range.startContainer.parentNode !== els.rich) return;
+    const textNode = range.startContainer;
+    const value = textNode.nodeValue || '';
+    const previous = document.createElement('p');
+    previous.textContent = value.slice(0, range.startOffset);
+    const next = document.createElement('p');
+    next.textContent = value.slice(range.startOffset);
+    ensureRichTextBlockPlaceholder(previous);
+    ensureRichTextBlockPlaceholder(next);
+    textNode.replaceWith(previous, next);
+    placeCaretAtStart(next);
+    syncRichMarkdownFromDom('rich-input');
+  }
+
+  function extractRichBlockTail(block, range) {
+    const tailRange = document.createRange();
+    tailRange.setStart(range.startContainer, range.startOffset);
+    tailRange.setEnd(block, block.childNodes.length);
+    return tailRange.extractContents();
+  }
+
+  function appendRichBlockTail(block, fragment) {
+    if (isFragmentVisiblyEmpty(fragment)) {
+      block.appendChild(document.createTextNode(''));
+      block.appendChild(document.createElement('br'));
+      return;
+    }
+    block.appendChild(fragment);
+  }
+
+  function ensureRichTextBlockPlaceholder(block) {
+    if (!areInlineNodesVisiblyEmpty(Array.from(block.childNodes))) return;
+    block.replaceChildren(document.createTextNode(''), document.createElement('br'));
   }
 
   function richParagraphInsertionBase(element) {
@@ -1120,11 +2387,230 @@ flowchart TD
     const range = selection.getRangeAt(0);
     const item = richListItemFromRange(range);
     if (!item) return false;
-    const nextItem = adjacentRichListItem(item, event.key === 'ArrowDown' ? 'next' : 'previous');
+    const lineInfo = richListSoftLineInfo(item, range);
+    if (shouldUseNativeListSoftLineArrow(item, range, event.key)) return false;
+    const direction = event.key === 'ArrowDown' ? 'next' : 'previous';
+    const nextItem = adjacentRichListItem(item, direction);
     if (!nextItem) return false;
     event.preventDefault();
-    placeCaretInListItemAtTextOffset(nextItem, richListCaretTextOffset(item, range));
+    const caretColumn = lineInfo?.column ?? richListCaretTextOffset(item, range);
+    if (!placeCaretInListItemSoftLine(nextItem, direction === 'previous' ? 'last' : 'first', caretColumn)) {
+      placeCaretInListItemAtTextOffset(nextItem, richListCaretTextOffset(item, range));
+    }
     return true;
+  }
+
+  function shouldUseNativeListSoftLineArrow(item, range, key) {
+    const lineInfo = richListSoftLineInfo(item, range);
+    if (!lineInfo || lineInfo.lineCount <= 1) return false;
+    if (key === 'ArrowUp') return lineInfo.lineIndex > 0;
+    if (key === 'ArrowDown') return lineInfo.lineIndex < lineInfo.lineCount - 1;
+    return false;
+  }
+
+  function richListSoftLineInfo(item, range) {
+    const lineCount = listItemSoftLineBreakCount(item) + 1;
+    if (lineCount <= 1) return null;
+    const before = document.createRange();
+    before.selectNodeContents(item);
+    try {
+      before.setEnd(range.startContainer, range.startOffset);
+    } catch (_) {
+      return null;
+    }
+    const caretLine = softLinePositionFromFragment(before.cloneContents());
+    return {
+      lineCount,
+      lineIndex: Math.max(0, Math.min(lineCount - 1, caretLine.lineIndex)),
+      column: caretLine.column,
+    };
+  }
+
+  function listItemSoftLineBreakCount(item) {
+    const range = document.createRange();
+    range.selectNodeContents(item);
+    range.setEnd(item, listItemContentEndOffset(item));
+    return range.cloneContents().querySelectorAll('br').length;
+  }
+
+  function softLinePositionFromFragment(fragment) {
+    let lineIndex = 0;
+    let column = 0;
+    const visit = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        column += normalizeRichText(node.nodeValue || '').length;
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      if (node.tagName?.toLowerCase() === 'br') {
+        lineIndex += 1;
+        column = 0;
+        return;
+      }
+      Array.from(node.childNodes).forEach(visit);
+    };
+    Array.from(fragment.childNodes).forEach(visit);
+    return { lineIndex, column };
+  }
+
+  function placeCaretInListItemSoftLine(item, targetLine, column = 0) {
+    const lineCount = listItemSoftLineBreakCount(item) + 1;
+    const lineIndex = targetLine === 'last' ? lineCount - 1 : 0;
+    const position = findListItemSoftLinePosition(item, lineIndex, Math.max(0, column || 0));
+    if (!position) return false;
+    const range = document.createRange();
+    if (position.beforeNode) {
+      range.setStartBefore(position.beforeNode);
+    } else if (position.afterNode) {
+      range.setStartAfter(position.afterNode);
+    } else {
+      range.setStart(position.node, position.offset);
+    }
+    range.collapse(true);
+    const selection = window.getSelection?.();
+    if (!selection) return false;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    els.rich.focus();
+    return true;
+  }
+
+  function findListItemSoftLinePosition(item, targetLine, targetColumn) {
+    const childNodes = Array.from(item.childNodes).slice(0, listItemContentEndOffset(item)).filter((child) => !(
+      child.nodeType === Node.ELEMENT_NODE && child.classList.contains('task-checkbox')
+    ));
+    let lineIndex = 0;
+    let column = 0;
+    let lastPosition = null;
+    let found = null;
+
+    const visit = (node) => {
+      if (found) return;
+      if (node.nodeType === Node.TEXT_NODE) {
+        if (lineIndex === targetLine) {
+          const text = node.nodeValue || '';
+          const length = normalizeRichText(text).length;
+          if (column + length >= targetColumn) {
+            found = { node, offset: Math.max(0, Math.min(text.length, targetColumn - column)) };
+            return;
+          }
+          lastPosition = { node, offset: text.length };
+        }
+        column += normalizeRichText(node.nodeValue || '').length;
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      if (node.tagName?.toLowerCase() === 'br') {
+        if (lineIndex === targetLine && !found) {
+          found = lastPosition || { beforeNode: node };
+          return;
+        }
+        lineIndex += 1;
+        column = 0;
+        lastPosition = null;
+        return;
+      }
+      Array.from(node.childNodes).forEach(visit);
+    };
+
+    childNodes.forEach(visit);
+    if (found) return found;
+    return lineIndex === targetLine ? lastPosition || { node: item, offset: item.childNodes.length } : null;
+  }
+
+  function handleRichLineBoundaryArrow(event) {
+    if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return false;
+    if (event.target.closest?.('.rich-source-editor, .code-language-input')) return false;
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return false;
+    if (nodeClosest(selection.anchorNode, '.rich-inline-source')) return false;
+
+    const range = selection.getRangeAt(0);
+    const block = richCaretBlockFromRange(range);
+    if (!block) return false;
+
+    const offset = richCaretBlockTextOffset(block, range);
+    const length = richCaretBlockTextLength(block);
+    const target = event.key === 'ArrowRight' && offset >= length
+      ? adjacentRichCaretBlock(block, 'next')
+      : event.key === 'ArrowLeft' && offset <= 0
+        ? adjacentRichCaretBlock(block, 'previous')
+        : null;
+    if (!target) return false;
+
+    event.preventDefault();
+    cleanupRichCaretBoundaryMarkers({ preserveSelection: false });
+    if (target.tagName?.toLowerCase() === 'li') {
+      if (event.key === 'ArrowRight') {
+        placeCaretAtListItemStart(target);
+      } else {
+        placeCaretAtListItemEnd(target);
+      }
+    } else if (event.key === 'ArrowRight') {
+      placeCaretAtStart(target);
+    } else {
+      placeCaretAtEnd(target);
+    }
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richCaretBlockFromRange(range) {
+    const block = nodeClosest(range.startContainer, RICH_INLINE_EDIT_BLOCK_SELECTOR);
+    if (!block || !els.rich.contains(block)) return null;
+    if (block.closest('.rich-source-editor, .mermaid-diagram, pre.code-block, .math-display, .toc')) return null;
+    return block;
+  }
+
+  function richCaretBlockTextOffset(block, range) {
+    const before = document.createRange();
+    before.selectNodeContents(block);
+    try {
+      before.setEnd(range.startContainer, range.startOffset);
+      if (block.tagName?.toLowerCase() === 'li') {
+        const end = listItemContentEndOffset(block);
+        const full = document.createRange();
+        full.selectNodeContents(block);
+        full.setEnd(block, end);
+        if (before.compareBoundaryPoints(Range.END_TO_END, full) > 0) {
+          return richCaretBlockTextLength(block);
+        }
+      }
+    } catch (_) {
+      return 0;
+    }
+    return normalizeRichText(before.toString()).length;
+  }
+
+  function richCaretBlockTextLength(block) {
+    const range = document.createRange();
+    range.selectNodeContents(block);
+    if (block.tagName?.toLowerCase() === 'li') {
+      range.setEnd(block, listItemContentEndOffset(block));
+    }
+    return normalizeRichText(range.toString()).length;
+  }
+
+  function adjacentRichCaretBlock(block, direction) {
+    const blocks = richCaretBlocksInDocumentOrder();
+    const index = blocks.indexOf(block);
+    if (index === -1) return null;
+    return direction === 'next' ? blocks[index + 1] || null : blocks[index - 1] || null;
+  }
+
+  function richCaretBlocksInDocumentOrder() {
+    const blocks = [];
+    const walker = document.createTreeWalker(els.rich, NodeFilter.SHOW_ELEMENT, {
+      acceptNode(node) {
+        if (!node.matches?.(RICH_INLINE_EDIT_BLOCK_SELECTOR)) return NodeFilter.FILTER_SKIP;
+        if (node.closest('.rich-source-editor, .mermaid-diagram, pre.code-block, .math-display, .toc')) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    while (walker.nextNode()) blocks.push(walker.currentNode);
+    return blocks;
   }
 
   function adjacentRichListItem(item, direction) {
@@ -1242,7 +2728,7 @@ flowchart TD
 
   function ensureListItemEditablePlaceholder(item) {
     const contentNodes = listItemEditableContentNodes(item);
-    if (contentNodes.length === 0 || serializeInlineNodes(contentNodes).trim() === '') {
+    if (contentNodes.length === 0 || areInlineNodesVisiblyEmpty(contentNodes)) {
       contentNodes.forEach((node) => node.remove());
       item.appendChild(document.createTextNode(''));
       item.appendChild(document.createElement('br'));
@@ -1258,7 +2744,7 @@ flowchart TD
   }
 
   function isFragmentVisiblyEmpty(fragment) {
-    return serializeInlineNodes(Array.from(fragment.childNodes)).replace(/\s+/g, '').trim() === '';
+    return areInlineNodesVisiblyEmpty(Array.from(fragment.childNodes));
   }
 
   function exitRichListItem(item, list) {
@@ -1284,7 +2770,26 @@ flowchart TD
 
   function isRichListItemEmpty(item) {
     const contentNodes = listItemEditableContentNodes(item);
-    return serializeInlineNodes(contentNodes).replace(/\s+/g, '').trim() === '';
+    return areInlineNodesVisiblyEmpty(contentNodes);
+  }
+
+  function areInlineNodesVisiblyEmpty(nodes) {
+    return !Array.from(nodes || []).some((node) => inlineNodeHasVisibleContent(node));
+  }
+
+  function inlineNodeHasVisibleContent(node) {
+    if (!node) return false;
+    if (node.nodeType === Node.TEXT_NODE) return normalizeRichText(node.nodeValue || '').replace(/\s+/g, '') !== '';
+    if (node.nodeType !== Node.ELEMENT_NODE) return false;
+    const element = node;
+    if (element.classList.contains('task-checkbox') || element.classList.contains('code-language-input')) return false;
+    const tag = element.tagName.toLowerCase();
+    if (tag === 'br') return false;
+    if (tag === 'img') return true;
+    if (element.classList.contains('math-inline') || element.classList.contains('math-display')) {
+      return Boolean(richSourceFromElement('math', element).trim());
+    }
+    return Array.from(element.childNodes).some((child) => inlineNodeHasVisibleContent(child));
   }
 
   function createTaskCheckbox() {
@@ -1315,14 +2820,39 @@ flowchart TD
     els.rich.focus();
   }
 
+  function placeCaretAtListItemEnd(item) {
+    const position = findListItemTextPosition(item, Number.MAX_SAFE_INTEGER);
+    const range = document.createRange();
+    if (position) {
+      range.setStart(position.node, position.offset);
+    } else {
+      range.selectNodeContents(item);
+      range.collapse(false);
+    }
+    range.collapse(true);
+    const selection = window.getSelection?.();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    els.rich.focus();
+  }
+
   function insertRichLineBreak() {
     const selection = window.getSelection?.();
     if (!selection || !selection.rangeCount || !els.rich.contains(selection.anchorNode)) return;
     const range = selection.getRangeAt(0);
+    insertRichLineBreakAtRange(range);
+  }
+
+  function insertRichLineBreakAtRange(range) {
+    const selection = window.getSelection?.();
+    if (!selection || !range || !els.rich.contains(range.startContainer)) return;
     range.deleteContents();
     const br = document.createElement('br');
     range.insertNode(br);
-    range.setStartAfter(br);
+    const marker = document.createTextNode('\u200b');
+    br.after(marker);
+    range.setStart(marker, marker.nodeValue.length);
     range.collapse(true);
     selection.removeAllRanges();
     selection.addRange(range);
@@ -1339,12 +2869,26 @@ flowchart TD
     els.rich.focus();
   }
 
+  function placeCaretAtEnd(element) {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(false);
+    const selection = window.getSelection?.();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    els.rich.focus();
+  }
+
   function newDocument() {
     if (state.dirty && !confirm('未保存の変更があります。新規作成しますか？')) return;
     clearAssetUrls();
     state.markdown = '# 無題\n\nここにMarkdownを書いてください。\n';
     state.fileName = 'untitled.md';
+    state.directoryHandle = null;
+    state.directoryName = '';
     state.markdownRelativePath = '';
+    clearPersistedDirectoryHandle();
     state.dirty = false;
     els.source.value = state.markdown;
     renderAll('new');
@@ -1366,7 +2910,10 @@ flowchart TD
       clearAssetUrls();
       state.markdown = normalizeNewlines(String(reader.result || ''));
       state.fileName = safeFileName(file.name || 'untitled.md');
+      state.directoryHandle = null;
+      state.directoryName = '';
       state.markdownRelativePath = '';
+      clearPersistedDirectoryHandle();
       state.dirty = false;
       els.source.value = state.markdown;
       renderAll('open');
@@ -1380,9 +2927,9 @@ flowchart TD
   async function openFolder() {
     if (window.showDirectoryPicker) {
       try {
-        const directoryHandle = await window.showDirectoryPicker({ mode: 'read' });
+        const directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
         const entries = await collectDirectoryEntries(directoryHandle);
-        await openFolderEntries(entries, directoryHandle.name || 'selected folder');
+        await openFolderEntries(entries, directoryHandle.name || 'selected folder', directoryHandle);
         return;
       } catch (error) {
         if (error?.name !== 'AbortError') setStatus('フォルダの読み込みに失敗しました');
@@ -1397,7 +2944,7 @@ flowchart TD
     event.target.value = '';
     if (!files.length) return;
 
-    openFolderEntries(files.map((file) => fileEntry(file)), '');
+    openFolderEntries(files.map((file) => fileEntry(file)), '', null);
   }
 
   async function collectDirectoryEntries(directoryHandle, prefix = '') {
@@ -1417,7 +2964,7 @@ flowchart TD
     return entries;
   }
 
-  async function openFolderEntries(entries, folderName) {
+  async function openFolderEntries(entries, folderName, directoryHandle = null) {
     if (!entries.length) return;
 
     const markdownEntries = entries.filter((entry) => isMarkdownFile(entry.file));
@@ -1434,19 +2981,28 @@ flowchart TD
     }
 
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       clearAssetUrls();
       state.markdown = normalizeNewlines(String(reader.result || ''));
       state.fileName = safeFileName(chosen.file.name || 'untitled.md');
       state.markdownRelativePath = normalizeAssetPath(chosen.relativePath || chosen.file.name || '');
+      state.directoryHandle = directoryHandle;
+      state.directoryName = directoryHandle?.name || folderName || '';
       buildFolderAssetUrls(entries, dirnamePath(state.markdownRelativePath));
+      if (directoryHandle) {
+        await persistDirectoryHandle(directoryHandle);
+      } else {
+        await clearPersistedDirectoryHandle();
+      }
       state.dirty = false;
       els.source.value = state.markdown;
       renderAll('open-folder');
       persistDraft();
       const count = state.assetUrls.size;
       const suffix = folderName ? ` (${folderName})` : '';
-      setStatus(`${state.fileName} をフォルダ基準で開きました${suffix}。画像候補: ${count}`);
+      const access = directoryHandle ? 'File System Access API' : 'フォルダ入力';
+      const assetsHint = directoryHandle ? '。貼り付け/ドロップ画像はassetsフォルダに保存できます' : '';
+      setStatus(`${state.fileName} をフォルダ基準で開きました${suffix} (${access})。画像候補: ${count}${assetsHint}`);
     };
     reader.onerror = () => setStatus('ファイルの読み込みに失敗しました');
     reader.readAsText(chosen.file, 'utf-8');
@@ -2225,7 +3781,39 @@ flowchart TD
     state.richInlineSource = null;
     const html = renderMarkdownHtml(state.markdown);
     safeSetHtml(els.rich, html || '<p><br></p>');
+    ensureRichTrailingEditableParagraph();
     configureRichEditableSurface();
+  }
+
+  function ensureRichTrailingEditableParagraph() {
+    const last = lastRichEditorElement();
+    if (!last || isEmptyRichParagraph(last)) return;
+    if (!last.matches?.(RICH_TRAILING_BLOCK_SELECTOR)) return;
+
+    const paragraph = document.createElement('p');
+    paragraph.dataset.richTrailing = 'true';
+    paragraph.appendChild(document.createElement('br'));
+    els.rich.appendChild(paragraph);
+  }
+
+  function richTrailingEditableParagraph() {
+    const last = els.rich?.lastElementChild;
+    if (last?.matches?.('p[data-rich-trailing="true"]') && isEmptyRichParagraph(last)) return last;
+    return null;
+  }
+
+  function lastRichEditorElement() {
+    const children = Array.from(els.rich?.children || []);
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      const child = children[index];
+      if (child.matches?.('p[data-rich-trailing="true"]') && isEmptyRichParagraph(child)) continue;
+      return child;
+    }
+    return null;
+  }
+
+  function isEmptyRichParagraph(element) {
+    return element?.tagName?.toLowerCase() === 'p' && areInlineNodesVisiblyEmpty(Array.from(element.childNodes));
   }
 
   function configureRichEditableSurface() {
@@ -2242,6 +3830,16 @@ flowchart TD
     const selection = window.getSelection?.();
     if (!selection || !selection.rangeCount || !els.rich.contains(selection.anchorNode)) return null;
     const range = selection.getRangeAt(0);
+    const inlineSource = nodeClosest(range.startContainer, '.rich-inline-source');
+    if (inlineSource && els.rich.contains(inlineSource)) {
+      return {
+        kind: 'inline-source',
+        inlineIndex: richInlineSourceElementIndex(inlineSource),
+        source: normalizeNewlines(inlineSource.textContent || ''),
+        sourceOffset: richInlineSourceCaretOffset(inlineSource) || 0,
+      };
+    }
+
     const before = range.cloneRange();
     before.selectNodeContents(els.rich);
     before.setEnd(range.startContainer, range.startOffset);
@@ -2252,8 +3850,20 @@ flowchart TD
     };
   }
 
+  function richInlineSourceElementIndex(target) {
+    return richInlineSourceLikeElementsInOrder().findIndex((element) => element === target);
+  }
+
+  function richInlineSourceLikeElementsInOrder() {
+    return Array.from(els.rich.querySelectorAll(RICH_INLINE_SOURCE_SELECTOR)).filter((element) => {
+      if (element.classList.contains('rich-inline-source')) return els.rich.contains(element);
+      return Boolean(validRichInlineSourceElement(element));
+    });
+  }
+
   function restoreRichCaret(bookmark) {
     if (!bookmark) return;
+    if (bookmark.kind === 'inline-source' && restoreRichInlineSourceCaret(bookmark)) return;
     const start = findTextPosition(els.rich, bookmark.start);
     const end = findTextPosition(els.rich, bookmark.start + bookmark.length);
     if (!start) {
@@ -2272,6 +3882,18 @@ flowchart TD
     selection.removeAllRanges();
     selection.addRange(range);
     els.rich.focus();
+  }
+
+  function restoreRichInlineSourceCaret(bookmark) {
+    const candidates = richInlineSourceLikeElementsInOrder();
+    const exactIndexCandidate = candidates[bookmark.inlineIndex];
+    const source = normalizeNewlines(bookmark.source || '');
+    const candidate = exactIndexCandidate && richInlineSourceFromElement(exactIndexCandidate) === source
+      ? exactIndexCandidate
+      : candidates.find((element) => richInlineSourceFromElement(element) === source);
+    if (!candidate) return false;
+    activateRichInlineSource(candidate, Math.max(0, bookmark.sourceOffset || 0));
+    return true;
   }
 
   function findTextPosition(root, targetOffset) {
@@ -2478,7 +4100,7 @@ flowchart TD
     textarea.addEventListener('click', (event) => event.stopPropagation());
     textarea.addEventListener('keydown', (event) => {
       event.stopPropagation();
-      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+      if ((event.ctrlKey || event.metaKey) && isEnterKey(event)) {
         event.preventDefault();
         applyRichSourceEditor(kind, element, textarea.value);
       } else if (event.key === 'Escape') {
@@ -2748,7 +4370,7 @@ flowchart TD
   }
 
   function normalizeRichText(value) {
-    return String(value || '').replace(/\u00a0/g, ' ');
+    return String(value || '').replace(/\u00a0/g, ' ').replace(/\u200b/g, '');
   }
 
   function markdownCodeSpan(value) {
@@ -2762,7 +4384,7 @@ flowchart TD
   }
 
   function escapeMarkdownTableCell(value) {
-    return String(value || '').replace(/\|/g, '\\|').replace(/\n+/g, ' ');
+    return String(value || '').replace(/\|/g, '\\|').replace(/\n+/g, '<br>');
   }
 
   function renderOutline() {
@@ -2786,7 +4408,9 @@ flowchart TD
     els.fileNameLabel.textContent = state.fileName;
     const dirtyText = state.dirty ? '未保存' : '保存済み';
     const autoText = state.lastAutoSaved ? formatTime(state.lastAutoSaved) : '未保存';
-    els.saveState.textContent = `${dirtyText} / 自動保存: ${autoText}`;
+    const folderAccess = state.directoryHandle ? ' / FSAフォルダ' : state.markdownRelativePath ? ' / フォルダ入力' : '';
+    els.saveState.textContent = `${dirtyText} / 自動保存: ${autoText}${folderAccess}`;
+    document.body.dataset.folderAccess = state.directoryHandle ? 'fsa' : state.markdownRelativePath ? 'input' : 'none';
   }
 
   function setStatus(message) {
@@ -2830,6 +4454,9 @@ flowchart TD
         return highlightCodeWithVendor(code, normalizeCodeLanguage(lang));
       },
     });
+    try {
+      md.enable(['strikethrough']);
+    } catch (_) {}
 
     md.renderer.rules.fence = (tokens, index) => {
       const token = tokens[index];
@@ -3120,6 +4747,8 @@ flowchart TD
         return renderMathBlock(block.raw);
       case 'list':
         return renderList(block.raw, block);
+      case 'table':
+        return renderTable(block.raw);
       default: {
         const vendorHtml = renderBlockWithVendor(block.raw, block);
         if (vendorHtml) return vendorHtml;
@@ -3129,8 +4758,6 @@ flowchart TD
     switch (block.type) {
       case 'rule':
         return '<hr>';
-      case 'table':
-        return renderTable(block.raw);
       case 'quote':
         return renderQuote(block.raw);
       default:
@@ -3239,22 +4866,22 @@ flowchart TD
 
   function renderList(raw, block = null) {
     const lines = getLines(raw).filter((line) => line.text.trim() !== '');
-    const ordered = /^\s*\d+\.\s+/.test(lines[0]?.text || '');
+    const ordered = /^\s*\d+\.(?:\s+|$)/.test(lines[0]?.text || '');
     const tag = ordered ? 'ol' : 'ul';
     let hasTasks = false;
     const itemsData = [];
 
     for (const line of lines) {
       const textLine = line.text.replace(/\n$/, '');
-      const markerLine = textLine.match(/^\s*(?:[-+*]|\d+\.)\s+(.*)$/);
+      const markerLine = textLine.match(/^\s*(?:[-+*]|\d+\.)(?:\s+(.*)|$)$/);
       if (!markerLine && itemsData.length) {
         itemsData[itemsData.length - 1].lines.push(textLine.replace(/^\s{2,}/, ''));
         continue;
       }
 
-      const taskLine = textLine.match(/^(\s*(?:[-+*]|\d+\.)\s+)\[( |x|X)\]\s+(.*)$/);
+      const taskLine = textLine.match(/^(\s*(?:[-+*]|\d+\.)\s+)\[( |x|X)\](?:\s+(.*)|\s*)$/);
       const item = {
-        lines: [markerLine ? markerLine[1] : textLine],
+        lines: [markerLine ? (markerLine[1] || '') : textLine],
         checkbox: '',
         className: '',
       };
@@ -3265,13 +4892,13 @@ flowchart TD
         const taskOffset = Number.isFinite(block?.start) ? block.start + line.start + taskLine[1].length + 1 : '';
         const offsetAttr = taskOffset === '' ? '' : ` data-task-pos="${escapeAttribute(taskOffset)}"`;
         item.checkbox = `<input class="task-checkbox" type="checkbox"${offsetAttr}${checked}>`;
-        item.lines[0] = taskLine[3];
+        item.lines[0] = taskLine[3] || '';
       }
       itemsData.push(item);
     }
 
     const items = itemsData.map((item) => {
-      const body = item.lines.map((line) => renderInlineMarkdown(line)).join('<br>');
+      const body = item.lines.map((line) => renderInlineMarkdown(line)).join('<br>') || '<br>';
       return `<li${item.className}>${item.checkbox}${body}</li>`;
     }).join('');
     const classAttr = hasTasks ? ' class="task-list"' : '';
@@ -3284,9 +4911,16 @@ flowchart TD
     const headers = splitTableRow(lines[0]);
     const aligns = splitTableRow(lines[1]).map(parseAlign);
     const rows = lines.slice(2).map(splitTableRow);
-    const head = headers.map((cell, i) => `<th${alignAttr(aligns[i])}>${renderInline(cell)}</th>`).join('');
-    const body = rows.map((row) => `<tr>${headers.map((_, i) => `<td${alignAttr(aligns[i])}>${renderInline(row[i] || '')}</td>`).join('')}</tr>`).join('');
+    const head = headers.map((cell, i) => `<th${alignAttr(aligns[i])}>${renderTableCell(cell)}</th>`).join('');
+    const body = rows.map((row) => `<tr>${headers.map((_, i) => `<td${alignAttr(aligns[i])}>${renderTableCell(row[i] || '')}</td>`).join('')}</tr>`).join('');
     return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  }
+
+  function renderTableCell(raw) {
+    return String(raw || '')
+      .split(/<br\s*\/?>/i)
+      .map((part) => renderInline(part))
+      .join('<br>');
   }
 
   function renderToc(headings) {
@@ -3605,7 +5239,7 @@ flowchart TD
 
   function renderMermaidFallback(code, message) {
     return [
-      '<figure class="mermaid-diagram mermaid-fallback">',
+      `<figure class="mermaid-diagram mermaid-fallback" data-mermaid-source="${escapeAttribute(code)}">`,
       `<figcaption>Mermaid <span>${escapeHtml(message)}</span></figcaption>`,
       `<pre class="code-block language-mermaid"><code data-lang="mermaid">${escapeHtml(code)}</code></pre>`,
       '</figure>',
@@ -3625,7 +5259,7 @@ flowchart TD
     const edges = parsed.edges.map((edge) => renderFlowEdge(edge, layout.positions, parsed.direction, markerId)).join('');
 
     return [
-      '<figure class="mermaid-diagram mermaid-flowchart">',
+      `<figure class="mermaid-diagram mermaid-flowchart" data-mermaid-source="${escapeAttribute(code)}">`,
       '<figcaption>Mermaid flowchart</figcaption>',
       `<svg class="mermaid-svg" role="img" aria-label="Mermaid flowchart" width="${layout.width}" height="${layout.height}" viewBox="0 0 ${layout.width} ${layout.height}" preserveAspectRatio="xMidYMid meet">`,
       `<defs><marker id="${markerId}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>`,
@@ -3898,7 +5532,7 @@ flowchart TD
     }).join('');
 
     return [
-      '<figure class="mermaid-diagram mermaid-sequence">',
+      `<figure class="mermaid-diagram mermaid-sequence" data-mermaid-source="${escapeAttribute(code)}">`,
       '<figcaption>Mermaid sequenceDiagram</figcaption>',
       `<svg class="mermaid-svg" role="img" aria-label="Mermaid sequence diagram" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet">`,
       `<defs><marker id="${markerId}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>`,
@@ -4656,7 +6290,7 @@ ${body}
   function isHeadingLine(line) { return /^\s*#{1,6}\s+\S/.test(line); }
   function isHorizontalRule(line) { return /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line); }
   function isTocLine(line) { return /^\s*\[toc\]\s*$/i.test(line); }
-  function isListLine(line) { return /^\s*(?:[-+*]|\d+\.)\s+/.test(line); }
+  function isListLine(line) { return /^\s*(?:[-+*]|\d+\.)(?:\s+|$)/.test(line); }
   function isQuoteLine(line) { return /^\s*>/.test(line); }
   function hasPipe(line) { return line.includes('|'); }
 

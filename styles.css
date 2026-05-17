@@ -408,6 +408,12 @@ body.outline-collapsed .sidebar { display: none; }
   box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
+#sourceEditor.is-drag-over,
+.rich-editor.is-drag-over {
+  box-shadow: inset 0 0 0 2px var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, var(--panel));
+}
+
 .rich-editor .toc,
 .rich-editor .mermaid-diagram,
 .rich-editor pre.code-block,
@@ -479,6 +485,10 @@ body.outline-collapsed .sidebar { display: none; }
 .markdown-body h3, .rich-editor h3 { font-size: 1.28rem; }
 .markdown-body h4, .rich-editor h4 { font-size: 1.1rem; }
 .markdown-body p, .rich-editor p { margin: 0.9rem 0; }
+.rich-editor p[data-rich-trailing="true"] {
+  min-height: 1.6em;
+  margin-bottom: 0;
+}
 .markdown-body a, .rich-editor a { color: var(--accent); text-underline-offset: 0.18em; }
 
 .markdown-body code, .rich-editor code {
