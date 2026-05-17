@@ -12,7 +12,8 @@ assert.match(index, /connect-src 'none'/);
 assert.match(index, /script-src 'self'/);
 assert.match(index, /style-src 'self' 'unsafe-inline'/);
 assert.doesNotMatch(index, /frame-ancestors/, 'frame-ancestors is ignored in meta CSP and should not be present');
-assert.match(index, /img-src 'self' data: blob: file:/);
+assert.match(index, /img-src 'self' data: blob:/);
+assert.doesNotMatch(index, /img-src[^"]*file:/, 'file: images should not be allowed by CSP');
 assert.doesNotMatch(index, /https?:\/\/.*\.(js|css)/i, 'no external JS/CSS');
 
 assert.doesNotMatch(app, /\beval\s*\(/, 'eval must not be used');
@@ -39,10 +40,28 @@ assert.match(app, /mermaidRenderQueue/, 'Mermaid renders should be serialized to
 assert.match(app, /async function\s+renderMermaidTargets/, 'Mermaid render queue should process targets sequentially');
 assert.doesNotMatch(app, /isSimpleLocalFlowchart\(source\)\)\s*return/, 'runtime flowcharts should not skip Mermaid.js rendering');
 assert.match(index, /id="codeLanguageOptions"/, 'code language suggestion list should exist');
+assert.match(index, /id="markdownEntryDialog"/, 'folder Markdown selection should use an app dialog');
+assert.match(index, /data-action="grant-folder"/, 'current document should support granting folder access without reopening Markdown');
 assert.match(app, /code-language-input/, 'rendered code blocks should expose a language input');
+assert.match(app, /showOpenFilePicker/, 'Open should use File System Access API when available');
+assert.match(app, /function\s+requestDirectoryForOpenedMarkdown/, 'opened Markdown files should be able to request containing folder access');
+assert.match(app, /async function\s+grantFolderForCurrentDocument/, 'folder permission should be attachable to the current document without reloading contents');
+assert.match(app, /async function\s+grantFolderEntriesForCurrentDocument/, 'folder permission attachment should reuse current Markdown state');
+assert.match(app, /captureCurrentMarkdownFromEditor\(\)/, 'granting folder access should capture current edits before attaching folder access');
+assert.match(app, /isSameEntry\(fileHandle\)/, 'selected directory should be matched to the opened file handle when possible');
 assert.match(app, /showDirectoryPicker\(\{\s*mode:\s*'readwrite'\s*\}\)/, 'folder picker should request write access for assets image insertion');
 assert.match(app, /async function\s+insertImageFilesAsAssets/, 'pasted and dropped images should be routed through assets insertion');
+assert.match(app, /async function\s+onImageChosen[\s\S]+insertImageFilesAsAssets/, 'image picker should also use assets insertion instead of Data URLs');
+assert.doesNotMatch(app, /readAsDataURL/, 'image picker must not embed selected images as large Data URLs');
 assert.match(app, /createWritable\(\)/, 'assets image insertion should write through File System Access API');
+assert.match(app, /async function\s+saveMarkdownToOpenedFile/, 'save should overwrite the opened Markdown file when File System Access folder permission exists');
+assert.match(app, /function\s+renderBlockedImage/, 'blocked or unresolved images should show an explanatory placeholder');
+assert.match(app, /RICH_INLINE_SOURCE_SELECTOR[\s\S]+\.blocked-image/, 'unresolved image placeholders should participate in inline source editing');
+assert.match(app, /classList\?\.contains\('blocked-image'\)[\s\S]+serializeBlockedImageElement/, 'unresolved image placeholders should restore Markdown image source while editing');
+assert.match(app, /function\s+hasNonCollapsedRichSelection/, 'rich editor should preserve normal text range selection');
+assert.match(app, /function\s+decodeLocalImagePath/, 'percent-encoded local image paths should be normalized before validation');
+assert.match(app, /function\s+snapshotRichDeleteFromKeydown/, 'rich delete operations should be undoable even when beforeinput is skipped');
+assert.match(app, /フォルダが許可されていない/, 'missing folder permission should be explained to the user');
 assert.match(app, /addEventListener\('drop', onEditorDrop\)/, 'editors should accept dropped image files');
 assert.match(app, /addEventListener\('paste', onMarkdownPaste\)/, 'source editor should handle pasted image files');
 assert.match(app, /dataset\.folderAccess = state\.directoryHandle \? 'fsa'/, 'UI should expose when the current folder came from File System Access API');
@@ -90,11 +109,13 @@ assert.match(rendered, /tok-keyword/, 'code blocks should be highlighted');
 assert.match(rendered, /mermaid-diagram/, 'mermaid blocks should render locally');
 assert.match(rendered, /<svg class="mermaid-svg"[^>]+width="\d+"[^>]+height="\d+"/, 'mermaid SVG should have explicit dimensions');
 assert.match(rendered, /mermaid-flow-node-label/, 'local flowchart labels should use readable flowchart text styling');
-assert.match(rendered, /file:\/\/\/Z:\/share\/local%20sample\.webp/, 'Windows drive images should render as file URLs');
+assert.doesNotMatch(rendered, /file:\/\/\/Z:\/share\/local%20sample\.webp/, 'Windows drive images should not render as file URLs');
+assert.match(rendered, /ローカル絶対パスは直接読み込みません/, 'Windows drive images should explain that absolute paths are not loaded directly');
 assert.match(rendered, /blocked-image/, 'remote images should remain blocked');
 assert.equal(renderer.sanitizeLinkUrl('javascript:alert(1)'), '');
 assert.equal(renderer.sanitizeImageUrl('https://example.com/a.png'), '');
-assert.equal(renderer.sanitizeImageUrl(uncPath), 'file://server/share/local%20sample.webp');
+assert.equal(renderer.sanitizeImageUrl(uncPath), '');
+assert.equal(renderer.sanitizeImageUrl('C:%5CUsers%5Crokuh%5CDocuments%5Cimage-3.png'), '');
 
 const branchRendered = renderer.renderMarkdownHtml([
   '```mermaid',
@@ -153,6 +174,11 @@ assert.equal(renderer.sanitizeLinkUrl('https://evil.example.net/a'), '');
 
 renderer.state.assetUrls.set('images/a.png', 'blob:local-image');
 assert.match(renderer.renderMarkdownHtml('![a](images/a.png)'), /src="blob:local-image"/);
+renderer.state.assetUrls.clear();
+const missingRelativeImage = renderer.renderMarkdownHtml('![image-3](sample.assets/image-3.png)');
+assert.match(missingRelativeImage, /画像未表示/, 'relative image without folder access should render an explanation');
+assert.match(missingRelativeImage, /フォルダが許可されていない/, 'relative image explanation should mention missing folder permission');
+assert.doesNotMatch(missingRelativeImage, /<img\b/, 'relative image without folder access should not load as an app-relative URL');
 
 function memoryDirectoryHandle(name = 'root') {
   const directories = new Map();

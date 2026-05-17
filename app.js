@@ -6,13 +6,12 @@
   const FSA_DB_NAME = 'portable-markdown-editor:fsa:v1';
   const FSA_STORE_NAME = 'handles';
   const FSA_DIRECTORY_HANDLE_KEY = 'last-directory';
-  const MAX_EMBEDDED_IMAGE_BYTES = 2 * 1024 * 1024;
   const MAX_ASSET_IMAGE_BYTES = 25 * 1024 * 1024;
   const MAX_HIGHLIGHT_CHARS = 120000;
   const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
   const IMAGE_EXTENSION_PATTERN = /\.(?:png|jpe?g|gif|webp)(?:[?#].*)?$/i;
   const VENDOR_TOC_MARKER = 'PME_TOC_MARKER_7B4E2D8C';
-  const RICH_INLINE_SOURCE_SELECTOR = 'strong, b, em, i, del, s, code, a, img, .math-inline';
+  const RICH_INLINE_SOURCE_SELECTOR = 'strong, b, em, i, del, s, code, a, img, .math-inline, .blocked-image';
   const RICH_INLINE_EDIT_BLOCK_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, li, td, th';
   const RICH_TRAILING_BLOCK_SELECTOR = '.toc, .mermaid-diagram, pre.code-block, .math-display, table, hr, ul, ol, blockquote';
   const MAX_RICH_UNDO_STEPS = 50;
@@ -105,6 +104,7 @@ flowchart TD
     richInlineParseBlock: null,
     richUndoStack: [],
     richUndoRestoring: false,
+    richUndoPreserveNextInput: false,
     richSelectionLock: false,
     mermaidPan: null,
     allowedLinkDomains: [],
@@ -112,6 +112,9 @@ flowchart TD
     directoryHandle: null,
     directoryName: '',
     markdownRelativePath: '',
+    fileHandle: null,
+    folderInputMode: 'open',
+    pendingImageInsertionContext: null,
   };
 
   const els = {};
@@ -148,6 +151,9 @@ flowchart TD
     els.securityDialog = document.getElementById('securityDialog');
     els.linkDomainDialog = document.getElementById('linkDomainDialog');
     els.allowedDomainsInput = document.getElementById('allowedDomainsInput');
+    els.markdownEntryDialog = document.getElementById('markdownEntryDialog');
+    els.markdownEntryList = document.getElementById('markdownEntryList');
+    els.markdownEntryCancel = document.getElementById('markdownEntryCancel');
   }
 
   function restoreSettings() {
@@ -194,7 +200,7 @@ flowchart TD
       if (!directoryHandle) return false;
       const permission = await queryDirectoryPermission(directoryHandle, 'read');
       if (permission !== 'granted') {
-        setStatus('前回のフォルダ権限が必要です。「フォルダ」から開き直してください');
+        setStatus('前回のフォルダ権限が必要です。「フォルダ許可」または「フォルダから開く」を使ってください');
         return false;
       }
       const entries = await collectDirectoryEntries(directoryHandle);
@@ -206,7 +212,7 @@ flowchart TD
       setStatus(`${state.fileName} のフォルダ参照をFile System Access APIから復元しました。画像候補: ${state.assetUrls.size}`);
       return true;
     } catch (_) {
-      setStatus('前回のフォルダ参照を復元できませんでした。「フォルダ」から開き直してください');
+      setStatus('前回のフォルダ参照を復元できませんでした。「フォルダ許可」または「フォルダから開く」を使ってください');
       return false;
     }
   }
@@ -331,13 +337,16 @@ flowchart TD
         newDocument();
         break;
       case 'open':
-        els.fileInput.click();
+        openMarkdownFile();
         break;
       case 'open-folder':
         openFolder();
         break;
+      case 'grant-folder':
+        grantFolderForCurrentDocument();
+        break;
       case 'save-md':
-        downloadMarkdown();
+        saveMarkdown();
         break;
       case 'export-html':
         exportHtml();
@@ -361,7 +370,7 @@ flowchart TD
         insertLink();
         break;
       case 'insert-image':
-        els.imageInput.click();
+        beginImageInsertion(event);
         break;
       case 'insert-image-ref':
         insertImageReference();
@@ -495,6 +504,8 @@ flowchart TD
 
     if (target.closest('.task-checkbox, .code-language-input, .rich-inline-source')) return;
 
+    if (hasNonCollapsedRichSelection()) return;
+
     if (activatePendingMathShortcutFromSelection()) {
       event.preventDefault();
       event.stopPropagation();
@@ -509,8 +520,11 @@ flowchart TD
 
     const inlineRendered = validRichInlineSourceElement(target.closest(RICH_INLINE_SOURCE_SELECTOR));
     if (inlineRendered) {
-      event.preventDefault();
-      activateRichInlineSource(inlineRendered, 'end');
+      const selection = window.getSelection?.();
+      if (!selection || selection.isCollapsed) {
+        event.preventDefault();
+        activateRichInlineSource(inlineRendered, 'end');
+      }
       return;
     }
 
@@ -538,6 +552,17 @@ flowchart TD
     const selection = window.getSelection?.();
     const selectionSource = nodeClosest(selection?.anchorNode, '.rich-inline-source');
     return selectionSource && els.rich.contains(selectionSource) ? selectionSource : null;
+  }
+
+  function hasNonCollapsedRichSelection() {
+    const selection = window.getSelection?.();
+    return Boolean(
+      selection
+      && selection.rangeCount
+      && !selection.isCollapsed
+      && els.rich.contains(selection.anchorNode)
+      && els.rich.contains(selection.focusNode)
+    );
   }
 
   function findRichSourceBackedElement(target) {
@@ -869,7 +894,13 @@ flowchart TD
 
   function onRichInput(event) {
     if (event.target?.closest?.('.task-checkbox, .code-language-input, .rich-source-editor')) return;
-    if (!state.richUndoRestoring && event?.isTrusted) clearRichUndoStack();
+    if (!state.richUndoRestoring && event?.isTrusted) {
+      if (state.richUndoPreserveNextInput) {
+        state.richUndoPreserveNextInput = false;
+      } else {
+        clearRichUndoStack();
+      }
+    }
     if (!richInlineSourceFromEventContext(event)) {
       maybeApplyRichMarkdownTrigger(event);
     }
@@ -879,6 +910,10 @@ flowchart TD
 
   function onRichBeforeInput(event) {
     if (event.defaultPrevented || !isRichBeforeInputContext(event)) return;
+    if (shouldSnapshotRichBeforeInput(event)) {
+      pushRichUndoSnapshot('delete');
+      state.richUndoPreserveNextInput = true;
+    }
     if (event.inputType === 'insertParagraph') {
       handleRichEnter(event);
       return;
@@ -888,6 +923,12 @@ flowchart TD
       insertRichLineBreak();
       syncRichMarkdownFromDom('rich-input');
     }
+  }
+
+  function shouldSnapshotRichBeforeInput(event) {
+    if (!String(event.inputType || '').startsWith('delete')) return false;
+    if (nodeClosest(window.getSelection?.()?.anchorNode, '.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
+    return true;
   }
 
   function onDocumentBeforeInput(event) {
@@ -1438,7 +1479,7 @@ flowchart TD
       return false;
     }
 
-    const ready = await ensureImageAssetWriteAccess();
+    const ready = await ensureImageAssetWriteAccess(actionLabel || '画像挿入');
     if (!ready) return false;
 
     let inserted = 0;
@@ -1464,17 +1505,10 @@ flowchart TD
     return false;
   }
 
-  async function ensureImageAssetWriteAccess() {
-    if (!window.isSecureContext) {
-      setStatus('画像をassetsフォルダに保存するには、localhostなどの安全なHTTP環境で開いてください');
-      return false;
-    }
-    if (!state.directoryHandle || !state.markdownRelativePath) {
-      setStatus('画像をassetsフォルダに保存するには、「フォルダ」からMarkdownのあるフォルダを開いてください');
-      return false;
-    }
+  async function ensureImageAssetWriteAccess(actionLabel = '画像挿入') {
+    if (!hasImageAssetFolderContext(actionLabel)) return false;
     if (!await ensureDirectoryPermission(state.directoryHandle, 'readwrite')) {
-      setStatus('画像保存に必要なフォルダ書き込み権限がありません');
+      setStatus(`${actionLabel}: 画像保存に必要なフォルダ書き込み権限がありません`);
       return false;
     }
     return true;
@@ -1524,6 +1558,12 @@ flowchart TD
       handle = await handle.getDirectoryHandle(part, { create: false });
     }
     return handle;
+  }
+
+  async function markdownFileHandle() {
+    const directoryHandle = await markdownDirectoryHandle();
+    const fileName = basenamePath(state.markdownRelativePath) || ensureExtension(state.fileName || 'untitled.md', '.md');
+    return directoryHandle.getFileHandle(fileName, { create: true });
   }
 
   function markdownAssetsDirName() {
@@ -1678,6 +1718,9 @@ flowchart TD
       if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && handleRichListArrowNavigation(event)) {
         return;
       }
+      if (event.key === 'Backspace' || event.key === 'Delete') {
+        snapshotRichDeleteFromKeydown();
+      }
       if ((event.key === 'Backspace' || event.key === 'Delete') && handleRichTableLineBreakDelete(event)) {
         return;
       }
@@ -1712,10 +1755,10 @@ flowchart TD
     const key = event.key.toLowerCase();
     if (key === 's') {
       event.preventDefault();
-      downloadMarkdown();
+      saveMarkdown();
     } else if (key === 'o') {
       event.preventDefault();
-      els.fileInput.click();
+      openMarkdownFile();
     } else if (key === 'p') {
       event.preventDefault();
       printPreview();
@@ -1732,6 +1775,12 @@ flowchart TD
       event.preventDefault();
       insertMermaid();
     }
+  }
+
+  function snapshotRichDeleteFromKeydown() {
+    if (nodeClosest(window.getSelection?.()?.anchorNode, '.rich-inline-source, .rich-source-editor, .code-language-input')) return;
+    pushRichUndoSnapshot('delete');
+    state.richUndoPreserveNextInput = true;
   }
 
   function isEnterKey(event) {
@@ -2888,6 +2937,7 @@ flowchart TD
     state.directoryHandle = null;
     state.directoryName = '';
     state.markdownRelativePath = '';
+    state.fileHandle = null;
     clearPersistedDirectoryHandle();
     state.dirty = false;
     els.source.value = state.markdown;
@@ -2896,32 +2946,130 @@ flowchart TD
     setStatus('新規文書を作成しました');
   }
 
-  function onFileChosen(event) {
+  async function openMarkdownFile() {
+    if (window.showOpenFilePicker) {
+      try {
+        const [fileHandle] = await window.showOpenFilePicker({
+          multiple: false,
+          types: [{
+            description: 'Markdown',
+            accept: {
+              'text/markdown': ['.md', '.markdown'],
+              'text/plain': ['.txt'],
+            },
+          }],
+        });
+        if (!fileHandle) return;
+        const file = await fileHandle.getFile();
+        await openSingleMarkdownFile(file, { fileHandle });
+        return;
+      } catch (error) {
+        if (error?.name !== 'AbortError') setStatus('ファイルの読み込みに失敗しました');
+        return;
+      }
+    }
+
+    els.fileInput.click();
+  }
+
+  async function onFileChosen(event) {
     const [file] = event.target.files || [];
     event.target.value = '';
     if (!file) return;
+    await openSingleMarkdownFile(file);
+  }
+
+  async function openSingleMarkdownFile(file, options = {}) {
     if (file.size > 10 * 1024 * 1024) {
       setStatus('10MBを超えるファイルは読み込みません');
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = () => {
+    try {
+      const text = await readTextFile(file);
       clearAssetUrls();
-      state.markdown = normalizeNewlines(String(reader.result || ''));
+      state.markdown = normalizeNewlines(text);
       state.fileName = safeFileName(file.name || 'untitled.md');
       state.directoryHandle = null;
       state.directoryName = '';
       state.markdownRelativePath = '';
+      state.fileHandle = options.fileHandle || null;
       clearPersistedDirectoryHandle();
       state.dirty = false;
       els.source.value = state.markdown;
       renderAll('open');
       persistDraft();
       setStatus(`${state.fileName} を開きました`);
-    };
-    reader.onerror = () => setStatus('ファイルの読み込みに失敗しました');
-    reader.readAsText(file, 'utf-8');
+      await requestDirectoryForOpenedMarkdown(file, options.fileHandle || null);
+    } catch (_) {
+      setStatus('ファイルの読み込みに失敗しました');
+    }
+  }
+
+  function readTextFile(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(reader.error || new Error('ファイルの読み込みに失敗しました'));
+      reader.readAsText(file, 'utf-8');
+    });
+  }
+
+  async function requestDirectoryForOpenedMarkdown(file, fileHandle) {
+    if (!window.showDirectoryPicker) return false;
+    if (!confirm('相対画像の表示と画像挿入のため、開いたMarkdownファイルがあるフォルダの使用を許可しますか？')) {
+      setStatus(`${state.fileName} を開きました。相対画像やassets保存には「フォルダ許可」または「フォルダから開く」を使ってください`);
+      return false;
+    }
+
+    try {
+      const directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+      return await attachDirectoryToOpenedMarkdown(file, fileHandle, directoryHandle);
+    } catch (error) {
+      if (error?.name !== 'AbortError') setStatus('フォルダの読み込みに失敗しました');
+      return false;
+    }
+  }
+
+  async function attachDirectoryToOpenedMarkdown(file, fileHandle, directoryHandle) {
+    const entries = await collectDirectoryEntries(directoryHandle);
+    const chosen = await findOpenedMarkdownEntry(entries, file, fileHandle);
+    if (!chosen) {
+      setStatus(`${state.fileName} を開きました。選択フォルダ内に同じMarkdownファイルが見つかりませんでした`);
+      return false;
+    }
+
+    state.markdownRelativePath = normalizeAssetPath(chosen.relativePath || chosen.file.name || state.fileName);
+    state.directoryHandle = directoryHandle;
+    state.directoryName = directoryHandle.name || '';
+    state.fileHandle = chosen.handle || state.fileHandle || null;
+    clearAssetUrls();
+    buildFolderAssetUrls(entries, dirnamePath(state.markdownRelativePath));
+    await persistDirectoryHandle(directoryHandle);
+    renderAll('open-file-folder');
+    persistDraft();
+    setStatus(`${state.fileName} を開きました。フォルダ参照を許可済み (${state.directoryName || 'selected folder'})。画像候補: ${state.assetUrls.size}`);
+    return true;
+  }
+
+  async function findOpenedMarkdownEntry(entries, file, fileHandle) {
+    if (fileHandle?.isSameEntry) {
+      for (const entry of entries) {
+        if (!entry.handle?.isSameEntry) continue;
+        try {
+          if (await entry.handle.isSameEntry(fileHandle)) return entry;
+        } catch (_) {}
+      }
+    }
+
+    const candidates = entries.filter((entry) => (
+      isMarkdownFile(entry.file)
+      && entry.file.name === file.name
+      && (!Number.isFinite(file.size) || entry.file.size === file.size)
+    ));
+    if (candidates.length === 1) return candidates[0];
+    if (candidates.length > 1) return chooseMarkdownEntry(candidates);
+    return null;
   }
 
   async function openFolder() {
@@ -2936,7 +3084,129 @@ flowchart TD
         return;
       }
     }
+    state.folderInputMode = 'open';
     els.folderInput.click();
+  }
+
+  async function grantFolderForCurrentDocument() {
+    captureCurrentMarkdownFromEditor();
+    if (!state.fileName || state.fileName === 'untitled.md') {
+      setStatus('先にMarkdownファイルを開くか、保存してファイル名を確定してください');
+      return;
+    }
+
+    if (window.showDirectoryPicker) {
+      try {
+        const directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+        const entries = await collectDirectoryEntries(directoryHandle);
+        await grantFolderEntriesForCurrentDocument(entries, directoryHandle.name || 'selected folder', directoryHandle);
+        return;
+      } catch (error) {
+        if (error?.name !== 'AbortError') setStatus('フォルダ許可に失敗しました');
+        return;
+      }
+    }
+
+    state.folderInputMode = 'grant-current';
+    els.folderInput.click();
+  }
+
+  async function grantFolderEntriesForCurrentDocument(entries, folderName, directoryHandle = null) {
+    if (!entries.length) return;
+    const chosen = await findCurrentMarkdownEntry(entries);
+    if (!chosen) {
+      setStatus(`${state.fileName} が選択フォルダ内に見つかりませんでした。編集中内容は変更していません`);
+      return;
+    }
+
+    const previousDirty = state.dirty;
+    const previousMode = state.mode;
+    const sourceSelection = sourceSelectionBookmark();
+    const richBookmark = previousMode === 'rich' ? getRichCaretBookmark() : null;
+
+    state.markdownRelativePath = normalizeAssetPath(chosen.relativePath || chosen.file.name || state.fileName);
+    state.directoryHandle = directoryHandle;
+    state.directoryName = directoryHandle?.name || folderName || '';
+    state.fileHandle = chosen.handle || state.fileHandle || null;
+    clearAssetUrls();
+    buildFolderAssetUrls(entries, dirnamePath(state.markdownRelativePath));
+    if (directoryHandle) {
+      await persistDirectoryHandle(directoryHandle);
+    } else {
+      await clearPersistedDirectoryHandle();
+    }
+    els.source.value = state.markdown;
+    refreshAfterFolderGrant(previousMode, richBookmark, sourceSelection);
+    state.dirty = previousDirty;
+    persistDraft();
+    state.dirty = previousDirty;
+    updateStatusBar();
+    const access = directoryHandle ? 'File System Access API' : 'フォルダ入力';
+    setStatus(`${state.fileName} の編集中内容を維持したままフォルダを許可しました (${access})。画像候補: ${state.assetUrls.size}`);
+  }
+
+  async function findCurrentMarkdownEntry(entries) {
+    if (state.fileHandle?.isSameEntry) {
+      for (const entry of entries) {
+        if (!entry.handle?.isSameEntry) continue;
+        try {
+          if (await entry.handle.isSameEntry(state.fileHandle)) return entry;
+        } catch (_) {}
+      }
+    }
+
+    const currentRelative = normalizeAssetPath(state.markdownRelativePath || '');
+    if (currentRelative) {
+      const exact = entries.find((entry) => normalizeAssetPath(entry.relativePath || '') === currentRelative);
+      if (exact) return exact;
+    }
+
+    const currentName = safeFileName(state.fileName || '');
+    const candidates = entries.filter((entry) => isMarkdownFile(entry.file) && entry.file.name === currentName);
+    if (candidates.length === 1) return candidates[0];
+    if (candidates.length > 1) return chooseMarkdownEntry(candidates);
+    return null;
+  }
+
+  function captureCurrentMarkdownFromEditor() {
+    if (state.mode === 'rich' && els.rich) {
+      state.markdown = normalizeNewlines(serializeRichMarkdown(els.rich));
+    } else {
+      state.markdown = normalizeNewlines(els.source.value || state.markdown);
+    }
+    els.source.value = state.markdown;
+  }
+
+  function sourceSelectionBookmark() {
+    if (document.activeElement !== els.source) return null;
+    return {
+      start: els.source.selectionStart,
+      end: els.source.selectionEnd,
+      scrollTop: els.source.scrollTop,
+    };
+  }
+
+  function restoreSourceSelection(bookmark) {
+    if (!bookmark) return;
+    els.source.focus();
+    els.source.setSelectionRange(bookmark.start, bookmark.end);
+    els.source.scrollTop = bookmark.scrollTop || 0;
+  }
+
+  function refreshAfterFolderGrant(previousMode, richBookmark, sourceBookmark) {
+    renderPreview();
+    if (previousMode === 'rich') {
+      renderRich();
+      restoreRichCaret(richBookmark);
+    } else if (previousMode === 'split' || previousMode === 'source') {
+      renderRich();
+      restoreSourceSelection(sourceBookmark);
+    } else {
+      renderRich();
+    }
+    renderOutline();
+    updateStatusBar();
+    document.body.classList.toggle('outline-collapsed', state.outlineCollapsed);
   }
 
   function onFolderChosen(event) {
@@ -2944,7 +3214,14 @@ flowchart TD
     event.target.value = '';
     if (!files.length) return;
 
-    openFolderEntries(files.map((file) => fileEntry(file)), '', null);
+    const entries = files.map((file) => fileEntry(file));
+    const mode = state.folderInputMode;
+    state.folderInputMode = 'open';
+    if (mode === 'grant-current') {
+      grantFolderEntriesForCurrentDocument(entries, '', null);
+      return;
+    }
+    openFolderEntries(entries, '', null);
   }
 
   async function collectDirectoryEntries(directoryHandle, prefix = '') {
@@ -2956,7 +3233,7 @@ flowchart TD
       const relativePath = normalizeAssetPath(`${prefix}${name || handle.name || ''}`);
       if (handle.kind === 'file') {
         const file = await handle.getFile();
-        entries.push(fileEntry(file, relativePath));
+        entries.push(fileEntry(file, relativePath, handle));
       } else if (handle.kind === 'directory') {
         entries.push(...await collectDirectoryEntries(handle, `${relativePath}/`));
       }
@@ -2973,7 +3250,7 @@ flowchart TD
       return;
     }
 
-    const chosen = chooseMarkdownEntry(markdownEntries);
+    const chosen = await chooseMarkdownEntry(markdownEntries);
     if (!chosen) return;
     if (chosen.file.size > 10 * 1024 * 1024) {
       setStatus('10MBを超えるファイルは読み込みません');
@@ -2988,6 +3265,7 @@ flowchart TD
       state.markdownRelativePath = normalizeAssetPath(chosen.relativePath || chosen.file.name || '');
       state.directoryHandle = directoryHandle;
       state.directoryName = directoryHandle?.name || folderName || '';
+      state.fileHandle = chosen.handle || null;
       buildFolderAssetUrls(entries, dirnamePath(state.markdownRelativePath));
       if (directoryHandle) {
         await persistDirectoryHandle(directoryHandle);
@@ -3008,27 +3286,70 @@ flowchart TD
     reader.readAsText(chosen.file, 'utf-8');
   }
 
-  function onImageChosen(event) {
-    const [file] = event.target.files || [];
+  async function onImageChosen(event) {
+    const files = Array.from(event.target.files || []);
     event.target.value = '';
-    if (!file) return;
-    if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
-      setStatus('PNG/JPEG/GIF/WebPのみ埋め込めます');
+    if (!files.length) return;
+
+    const insertionContext = state.pendingImageInsertionContext || createImageInsertionContext(event);
+    state.pendingImageInsertionContext = null;
+    await insertImageFilesAsAssets(files, insertionContext, '画像挿入');
+  }
+
+  function beginImageInsertion(event) {
+    state.pendingImageInsertionContext = createImageInsertionContext(event);
+    if (!hasImageAssetFolderContext('画像挿入')) {
+      state.pendingImageInsertionContext = null;
       return;
     }
-    if (file.size > MAX_EMBEDDED_IMAGE_BYTES) {
-      setStatus('画像は2MB以下にしてください');
-      return;
+    els.imageInput.click();
+  }
+
+  function hasImageAssetFolderContext(actionLabel = '画像挿入') {
+    if (!window.isSecureContext) {
+      setStatus(`${actionLabel}: 画像をassetsフォルダに保存するには、localhostなどの安全なHTTP環境で開いてください`);
+      return false;
+    }
+    if (!state.directoryHandle || !state.markdownRelativePath) {
+      setStatus(`${actionLabel}: フォルダが許可されていないため画像を保存できません。「フォルダ許可」で現在のMarkdownがあるフォルダを許可してください`);
+      return false;
+    }
+    return true;
+  }
+
+  async function saveMarkdown() {
+    if (await saveMarkdownToOpenedFile()) return;
+    downloadMarkdown();
+  }
+
+  async function saveMarkdownToOpenedFile() {
+    if (!state.directoryHandle || !state.markdownRelativePath) return false;
+    if (!window.isSecureContext) {
+      setStatus('上書き保存にはlocalhostなどの安全なHTTP環境が必要です。ダウンロード保存に切り替えます');
+      return false;
+    }
+    if (!await ensureDirectoryPermission(state.directoryHandle, 'readwrite')) {
+      setStatus('Markdownファイルの上書き保存に必要なフォルダ書き込み権限がありません。ダウンロード保存に切り替えます');
+      return false;
     }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      const alt = stripExtension(file.name).replace(/[\]\n\r]/g, ' ');
-      insertAtSelection(`![${alt}](${String(reader.result)})`);
-      setStatus('画像をData URLとして埋め込みました');
-    };
-    reader.onerror = () => setStatus('画像の読み込みに失敗しました');
-    reader.readAsDataURL(file);
+    try {
+      const fileHandle = await markdownFileHandle();
+      const writable = await fileHandle.createWritable();
+      try {
+        await writable.write(new Blob([state.markdown], { type: 'text/markdown;charset=utf-8' }));
+      } finally {
+        await writable.close();
+      }
+      state.dirty = false;
+      persistDraft();
+      updateStatusBar();
+      setStatus(`${state.markdownRelativePath} に上書き保存しました`);
+      return true;
+    } catch (_) {
+      setStatus('Markdownファイルの上書き保存に失敗しました。ダウンロード保存に切り替えます');
+      return false;
+    }
   }
 
   function downloadMarkdown() {
@@ -3036,7 +3357,7 @@ flowchart TD
     downloadBlob(name, state.markdown, 'text/markdown;charset=utf-8');
     state.dirty = false;
     updateStatusBar();
-    setStatus(`${name} を保存しました`);
+    setStatus(`${name} をダウンロード保存しました`);
   }
 
   function exportHtml() {
@@ -3375,20 +3696,20 @@ flowchart TD
 
     focusMarkdownInput();
     const label = sanitizeMarkdownLabel(getSelectedText() || '画像');
-    const rawPath = prompt('画像パスを入力してください。例: ./images/pic.png, Z:\\share\\pic.png, \\\\server\\share\\pic.png', './images/example.png');
+    const rawPath = prompt('画像パスを入力してください。フォルダ許可済みMarkdown基準の相対パスだけ表示します。例: ./images/pic.png', './images/example.png');
     if (!rawPath) return;
     const path = rawPath.trim();
     if (!sanitizeImageUrl(path)) {
-      setStatus('PNG/JPEG/GIF/WebPのローカル画像パスのみ参照できます');
+      setStatus('画像参照はフォルダ許可済みMarkdown基準のPNG/JPEG/GIF/WebP相対パスのみ表示できます');
       return;
     }
     replaceSelection(`![${label}](${formatMarkdownTarget(path)})`);
-    setStatus('ローカル画像参照を挿入しました');
+    setStatus('相対画像参照を挿入しました');
   }
 
   function insertRichImageReference() {
     const label = sanitizeMarkdownLabel(richSelectedText() || '画像');
-    const rawPath = prompt('画像パスを入力してください。例: ./images/pic.png, Z:\\share\\pic.png, \\\\server\\share\\pic.png', './images/example.png');
+    const rawPath = prompt('画像パスを入力してください。フォルダ許可済みMarkdown基準の相対パスだけ表示します。例: ./images/pic.png', './images/example.png');
     if (!rawPath) return;
     insertRichImageElement(label, rawPath.trim());
   }
@@ -4051,6 +4372,7 @@ flowchart TD
     if (tag === 'a') return serializeLinkElement(element);
     if (tag === 'img') return serializeImageElement(element);
     if (element.classList?.contains('math-inline')) return serializeMathElement(element);
+    if (element.classList?.contains('blocked-image')) return serializeBlockedImageElement(element);
     return '';
   }
 
@@ -4246,6 +4568,7 @@ flowchart TD
     if (element.classList.contains('mermaid-diagram')) return serializeMermaidDiagram(element);
     if (element.classList.contains('math-display')) return serializeMathElement(element);
     if (element.classList.contains('math-inline')) return serializeMathElement(element);
+    if (element.classList.contains('blocked-image') && element.getAttribute('data-markdown-src')) return serializeBlockedImageElement(element);
 
     const tag = element.tagName.toLowerCase();
     if (/^h[1-6]$/.test(tag)) return `${'#'.repeat(Number(tag[1]))} ${serializeInlineChildren(element).trim()}`;
@@ -4286,6 +4609,9 @@ flowchart TD
     const element = node;
     if (element.classList.contains('rich-inline-source')) return normalizeNewlines(element.textContent || '');
     if (element.classList.contains('math-inline') || element.classList.contains('math-display')) return serializeMathElement(element);
+    if (element.classList.contains('blocked-image') && element.getAttribute('data-markdown-src')) {
+      return serializeBlockedImageElement(element);
+    }
     if (element.classList.contains('code-language-input') || element.classList.contains('task-checkbox')) return '';
 
     const tag = element.tagName.toLowerCase();
@@ -4356,6 +4682,12 @@ flowchart TD
     const src = image.getAttribute('data-markdown-src') || image.getAttribute('src') || '';
     const alt = image.getAttribute('alt') || '画像';
     return sanitizeImageUrl(src) ? `![${escapeMarkdownLabel(alt)}](${formatMarkdownTarget(src)})` : escapeMarkdownLabel(alt);
+  }
+
+  function serializeBlockedImageElement(element) {
+    const src = element.getAttribute('data-markdown-src') || '';
+    const alt = element.getAttribute('data-markdown-alt') || '画像';
+    return `![${escapeMarkdownLabel(alt)}](${formatMarkdownTarget(src)})`;
   }
 
   function serializeMermaidDiagram(figure) {
@@ -4501,7 +4833,7 @@ flowchart TD
       const src = token.attrGet('src') || '';
       const safe = sanitizeImageUrl(src);
       const alt = token.content || token.attrGet('alt') || 'no alt';
-      if (!safe) return `<span class="blocked-image">画像ブロック: ${escapeHtml(alt)}</span>`;
+      if (!safe) return renderBlockedImage(src, alt);
       return `<img alt="${escapeAttribute(alt)}" src="${escapeAttribute(safe)}" data-markdown-src="${escapeAttribute(src)}">`;
     };
 
@@ -4941,7 +5273,7 @@ flowchart TD
     text = text.replace(/!\[([^\]]*)\]\((<[^>]+>|[^)]+)\)/g, (_match, alt, target) => {
       const url = parseMarkdownTarget(target);
       const safe = sanitizeImageUrl(url);
-      if (!safe) return hold(`<span class="blocked-image">画像ブロック: ${escapeHtml(alt || 'no alt')}</span>`);
+      if (!safe) return hold(renderBlockedImage(url, alt || 'no alt'));
       return hold(`<img alt="${escapeAttribute(alt)}" src="${escapeAttribute(safe)}" data-markdown-src="${escapeAttribute(url)}">`);
     });
 
@@ -5639,7 +5971,7 @@ flowchart TD
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; img-src 'self' data: blob: file:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; img-src 'self' data: blob:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none';">
 <title>${title}</title>
 <style>
 body{margin:0;padding:clamp(1rem,4vw,4rem);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.75;color:#111827;background:#fff}main{max-width:920px;margin:auto}h1,h2{border-bottom:1px solid #e5e7eb;padding-bottom:.25rem}pre{overflow:auto;background:#0f172a;color:#e5e7eb;border-radius:.75rem;padding:1rem}code{font-family:Consolas,monospace;background:#f3f4f6;border-radius:.25rem;padding:.1rem .25rem}pre code{background:transparent;padding:0}.code-lang{float:right;color:#94a3b8;font:700 .72rem system-ui}.tok-comment{color:#94a3b8}.tok-string{color:#a7f3d0}.tok-number{color:#fde68a}.tok-keyword{color:#93c5fd}.tok-function{color:#f9a8d4}.tok-property{color:#c4b5fd}.tok-tag{color:#fca5a5}.tok-operator{color:#cbd5e1}blockquote{border-left:.25rem solid #2563eb;margin:1rem 0;padding:.25rem 1rem;background:#eff6ff}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d1d5db;padding:.5rem}.align-left{text-align:left}.align-center{text-align:center}.align-right{text-align:right}img{max-width:100%}.meta{color:#6b7280;font-size:.9rem}.blocked-image,.blocked-link{color:#b42318;border:1px solid #f3b8b1;border-radius:.3rem;padding:.1rem .3rem}.toc{border:1px solid #e5e7eb;border-radius:.75rem;padding:1rem}.toc a{display:block;color:#2563eb;text-decoration:none}.mermaid-diagram{margin:1.25rem 0}.mermaid-diagram figcaption{font-weight:700;color:#475569;margin-bottom:.4rem}.mermaid-svg{width:100%;height:auto;min-height:10rem;max-height:none;border:1px solid #d1d5db;border-radius:.75rem;background:#f8fafc}.mermaid-sequence .mermaid-svg,.mermaid-svg.mindmapDiagram{max-width:min(100%,820px);margin-inline:auto}.mermaid-svg.flowchart{display:block;width:min(100%,560px);margin-inline:auto}.mermaid-svg.flowchart text{font-size:12px!important}.mermaid-fallback pre{margin:0}.mermaid-svg .edgeLabel text,.mermaid-svg .edgeLabel tspan{paint-order:stroke;stroke:#f8fafc;stroke-width:7px;stroke-linejoin:round}.mermaid-node rect,.mermaid-node ellipse,.mermaid-node polygon,.mermaid-seq-participant rect{fill:#fff;stroke:#2563eb;stroke-width:1.5}.mermaid-svg.mindmapDiagram .section-root circle,.mermaid-svg.mindmapDiagram .node-bkg{fill:#fff!important;stroke:#2563eb!important}.mermaid-svg.mindmapDiagram .label .background{fill:#fff!important;opacity:.92!important}.mermaid-svg.mindmapDiagram .edge{stroke:#2563eb!important;stroke-width:2px!important;stroke-opacity:.22}.mermaid-edge path,.mermaid-message path{stroke:#334155;stroke-width:1.6;fill:none}.mermaid-edge-label,.mermaid-message text{font:650 18px system-ui;fill:#475569;text-anchor:middle;paint-order:stroke;stroke:#f8fafc;stroke-width:7px;stroke-linejoin:round}.mermaid-node-label{font:650 16px system-ui;fill:#0f172a}.mermaid-flow-node-label{font:650 24px system-ui;fill:#0f172a}.mermaid-lifeline{stroke:#94a3b8;stroke-dasharray:5 5}.mermaid-note rect{fill:#fef3c7;stroke:#f59e0b}
@@ -6118,42 +6450,24 @@ ${body}
   }
 
   function normalizeLocalImageUrl(raw) {
-    const value = String(raw || '').trim().replace(/[\u0000-\u001F\u007F]/g, '');
+    const value = decodeLocalImagePath(String(raw || '').trim().replace(/[\u0000-\u001F\u007F]/g, ''));
     if (!value || value.startsWith('//')) return '';
-    if (/^file:/i.test(value)) return normalizeFileImageUrl(value);
-    if (/^[A-Za-z]:[\\/]/.test(value)) return windowsPathToFileUrl(value);
-    if (/^\\\\[^\\]+\\[^\\]+/.test(value)) return uncPathToFileUrl(value);
+    if (isLocalAbsoluteImageReference(value)) return '';
     if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) return '';
     return relativeImageUrl(value);
   }
 
-  function normalizeFileImageUrl(value) {
+  function decodeLocalImagePath(value) {
+    const raw = String(value || '');
+    if (!/%[0-9A-Fa-f]{2}/.test(raw)) return raw;
     try {
-      const url = new URL(value);
-      if (url.protocol !== 'file:') return '';
-      const path = decodeURIComponent(url.pathname || '');
-      if (!hasRasterImageExtension(path)) return '';
-      return url.href;
+      return decodeURIComponent(raw);
     } catch (_) {
-      return '';
+      return raw
+        .replace(/%5c/gi, '\\')
+        .replace(/%2f/gi, '/')
+        .replace(/%20/gi, ' ');
     }
-  }
-
-  function windowsPathToFileUrl(value) {
-    const normalized = value.replace(/\\/g, '/');
-    if (!hasRasterImageExtension(normalized)) return '';
-    const drive = normalized.slice(0, 2);
-    const rest = normalized.slice(2).replace(/^\/+/, '');
-    return `file:///${drive}/${encodePathSegments(rest)}`;
-  }
-
-  function uncPathToFileUrl(value) {
-    const normalized = value.replace(/^\\\\/, '').replace(/\\/g, '/');
-    if (!hasRasterImageExtension(normalized)) return '';
-    const parts = normalized.split('/').filter(Boolean);
-    if (parts.length < 3) return '';
-    const [host, ...pathParts] = parts;
-    return `file://${encodeURIComponent(host)}/${pathParts.map((part) => encodeURIComponent(part)).join('/')}`;
   }
 
   function relativeImageUrl(value) {
@@ -6162,7 +6476,43 @@ ${body}
     if (!hasRasterImageExtension(normalized)) return '';
     const asset = resolveFolderAssetUrl(normalized);
     if (asset) return asset;
-    return encodePathSegments(normalized);
+    return '';
+  }
+
+  function renderBlockedImage(src, alt) {
+    const label = escapeHtml(alt || '画像');
+    const reason = imageBlockReason(src);
+    return `<span class="blocked-image" data-markdown-src="${escapeAttribute(src)}" data-markdown-alt="${escapeAttribute(alt || '画像')}">画像未表示: ${label} (${escapeHtml(reason)})</span>`;
+  }
+
+  function imageBlockReason(raw) {
+    const value = cleanupUrl(raw, { keepSpaces: true });
+    const decoded = decodeLocalImagePath(value);
+    const compact = cleanupUrl(decoded);
+    if (!value) return '画像パスが空です';
+    if (/^https?:\/\//i.test(compact)) return 'http/https画像はローカル実行と追跡防止のためブロックしています';
+    if (isLocalAbsoluteImageReference(decoded)) return 'ローカル絶対パスは直接読み込みません。フォルダを許可してMarkdown基準の相対パスで参照してください';
+    if (isRelativeImageReference(decoded)) {
+      const normalized = normalizeAssetPath(decoded);
+      if (isUnsafeRelativePath(normalized)) return '安全でない相対パスです';
+      if (!state.markdownRelativePath) return 'フォルダが許可されていないため、Markdownファイル基準の相対画像を読めません';
+      return '許可済みフォルダ内に画像ファイルが見つかりません';
+    }
+    return '許可されていない画像パスです';
+  }
+
+  function isRelativeImageReference(value) {
+    const normalized = decodeLocalImagePath(String(value || '').trim()).replace(/\\/g, '/');
+    if (!normalized || normalized.startsWith('//')) return false;
+    if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(normalized)) return false;
+    return hasRasterImageExtension(normalized);
+  }
+
+  function isLocalAbsoluteImageReference(value) {
+    const decoded = decodeLocalImagePath(value).trim();
+    return /^file:/i.test(decoded)
+      || /^[A-Za-z]:[\\/]/.test(decoded)
+      || /^\\\\[^\\]+\\[^\\]+/.test(decoded);
   }
 
   function resolveFolderAssetUrl(value) {
@@ -6176,10 +6526,6 @@ ${body}
 
   function hasRasterImageExtension(value) {
     return IMAGE_EXTENSION_PATTERN.test(String(value || '').split(/[?#]/, 1)[0]);
-  }
-
-  function encodePathSegments(value) {
-    return String(value || '').split('/').map((segment) => encodeURIComponent(segment)).join('/');
   }
 
   function cleanupUrl(raw, options = {}) {
@@ -6201,15 +6547,93 @@ ${body}
     return /\.(?:md|markdown|txt)$/.test(name) || ['text/markdown', 'text/plain'].includes(file?.type || '');
   }
 
-  function fileEntry(file, relativePath = '') {
+  function fileEntry(file, relativePath = '', handle = null) {
     return {
       file,
+      handle,
       relativePath: normalizeAssetPath(relativePath || file.webkitRelativePath || file.name || ''),
     };
   }
 
-  function chooseMarkdownEntry(entries) {
+  async function chooseMarkdownEntry(entries) {
     if (entries.length === 1) return entries[0];
+    if (els.markdownEntryDialog && els.markdownEntryList) {
+      return showMarkdownEntryDialog(entries);
+    }
+    return chooseMarkdownEntryWithPrompt(entries);
+  }
+
+  function showMarkdownEntryDialog(entries) {
+    return new Promise((resolve) => {
+      const dialog = els.markdownEntryDialog;
+      const list = els.markdownEntryList;
+      let settled = false;
+
+      const cleanup = () => {
+        dialog.removeEventListener('close', onClose);
+        els.markdownEntryCancel?.removeEventListener('click', onCancel);
+        list.replaceChildren();
+      };
+
+      const onClose = () => finish(null);
+      const onCancel = () => finish(null);
+      const closeDialog = (returnValue) => {
+        if (typeof dialog.close === 'function' && dialog.open) {
+          dialog.close(returnValue);
+        } else {
+          dialog.removeAttribute('open');
+        }
+      };
+      const fragment = document.createDocumentFragment();
+      entries.forEach((entry, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'markdown-entry-option';
+        button.setAttribute('role', 'option');
+        button.dataset.entryIndex = String(index);
+
+        const name = document.createElement('strong');
+        name.textContent = entry.file.name || 'untitled.md';
+        button.appendChild(name);
+        const pathText = markdownEntryPathLabel(entry);
+        if (pathText) {
+          const path = document.createElement('span');
+          path.textContent = pathText;
+          button.appendChild(path);
+        }
+        button.addEventListener('click', () => finish(entry));
+        fragment.appendChild(button);
+      });
+
+      list.replaceChildren(fragment);
+      dialog.addEventListener('close', onClose);
+      els.markdownEntryCancel?.addEventListener('click', onCancel);
+      if (typeof dialog.showModal === 'function') {
+        dialog.showModal();
+      } else {
+        dialog.setAttribute('open', '');
+      }
+      list.querySelector('button')?.focus();
+
+      function finish(entry) {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        closeDialog(entry ? 'selected' : 'cancel');
+        resolve(entry || null);
+      }
+    });
+  }
+
+  function markdownEntryPathLabel(entry) {
+    const relative = normalizeAssetPath(entry.relativePath || '');
+    const fileName = entry.file.name || '';
+    if (!relative || relative === fileName) return '';
+    const dir = dirnamePath(relative);
+    return dir ? dir : relative;
+  }
+
+  function chooseMarkdownEntryWithPrompt(entries) {
     const names = entries.map((entry) => entry.relativePath || entry.file.name || '');
     const answer = prompt(`開くMarkdownファイル名を入力してください。\n\n${names.join('\n')}`, names[0] || '');
     if (!answer) return null;
@@ -6250,6 +6674,12 @@ ${body}
     const normalized = normalizeAssetPath(value);
     const index = normalized.lastIndexOf('/');
     return index >= 0 ? normalized.slice(0, index) : '';
+  }
+
+  function basenamePath(value) {
+    const normalized = normalizeAssetPath(value);
+    const index = normalized.lastIndexOf('/');
+    return index >= 0 ? normalized.slice(index + 1) : normalized;
   }
 
   function makeRelativePath(baseDir, targetPath) {

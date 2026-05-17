@@ -402,6 +402,8 @@ body.outline-collapsed .sidebar { display: none; }
   background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 98%, white), var(--panel));
   caret-color: var(--accent);
   outline: none;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .rich-editor:focus {
@@ -1194,7 +1196,7 @@ body.outline-collapsed .sidebar { display: none; }
 }
 
 .blocked-image, .blocked-link {
-  display: inline-flex;
+  display: inline;
   align-items: center;
   gap: 0.3rem;
   border-radius: 0.4rem;
@@ -1204,6 +1206,11 @@ body.outline-collapsed .sidebar { display: none; }
   background: color-mix(in srgb, var(--danger) 10%, transparent);
   font-family: var(--sans);
   font-size: 0.9em;
+}
+
+.rich-editor .blocked-image {
+  cursor: text;
+  user-select: text;
 }
 
 .toc {
@@ -1342,6 +1349,39 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.58); backdrop-filter: blur(4px
 .dialog-textarea:focus,
 .dialog-field select:focus,
 .dialog-field input:focus { border-color: var(--accent); }
+
+.markdown-entry-list {
+  display: grid;
+  gap: 0.5rem;
+  max-height: min(48vh, 26rem);
+  overflow: auto;
+  margin: 1rem 0;
+}
+
+.markdown-entry-option {
+  display: grid;
+  gap: 0.15rem;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  padding: 0.72rem 0.85rem;
+  background: var(--panel-soft);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.markdown-entry-option:hover,
+.markdown-entry-option:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.markdown-entry-option span {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
 
 @media (max-width: 1280px) {
   .topbar {

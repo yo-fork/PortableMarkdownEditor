@@ -34,14 +34,14 @@ Markdown本文に含まれる `<script>`, `<img onerror=...>`, `<iframe>` など
 リンクと画像のURLは別々に検証します。
 
 - リンク: 完全ローカル性を優先し、相対リンク、アンカー、ユーザーが明示的に許可したドメインの `http`/`https` のみ許可。`mailto`, `tel`, `file` などのスキーム付きURLはリンク化しません。
-- 画像: `data:image/png`, `data:image/jpeg`, `data:image/gif`, `data:image/webp`, `blob:`, フォルダ選択時のMarkdownファイル基準の相対パス、`file:` URL、Windowsドライブパス、UNCパスを許可。
+- 画像: `data:image/png`, `data:image/jpeg`, `data:image/gif`, `data:image/webp`, `blob:`, フォルダ選択時のMarkdownファイル基準の相対パスを許可。`file:` URL、Windowsドライブパス、UNCパスは直接読み込みません。
 - `javascript:`, `vbscript:`, `data:text/html`, SVG data画像、プロトコル相対URL、外部リンク、外部画像はブロック。
 
 ### 4. 画像挿入の制限
 
-画像埋め込みは PNG/JPEG/GIF/WebP のみで、2MB以下に制限しています。画像は Data URL としてMarkdown本文に埋め込まれるため、外部サーバーから画像を取得しません。
+画像挿入は PNG/JPEG/GIF/WebP のみで、File System Access APIで開いたMarkdownファイルと同じ場所に `MarkdownFileName.assets/` フォルダを作り、その中へ保存した画像を相対パスで参照します。Markdown本文へ巨大な Data URL は埋め込みません。フォルダの読み書き権限がない場合、画像挿入は行わず、フォルダ許可が必要であることを画面上に表示します。
 
-画像参照は PNG/JPEG/GIF/WebP の拡張子を持つローカル参照に限定しています。フォルダ選択でMarkdownを開いた場合、相対パスはMarkdownファイルの場所を基準にフォルダ内画像を Blob URL として表示します。対応ブラウザでは File System Access API のフォルダ選択を使い、未対応環境では `webkitdirectory` のファイル入力にフォールバックします。ブラウザ仕様上、絶対フォルダパスは取得せず、選択フォルダ内の相対パスだけを扱います。`file:` URL、`Z:\share\image.png` のようなWindowsドライブパス、`\\server\share\image.png` のようなUNCパスも許可します。`http`/`https` 画像は許可しません。
+画像参照は PNG/JPEG/GIF/WebP の拡張子を持つ相対参照に限定しています。対応ブラウザでは `ファイルから開く` でMarkdownファイルを選んだ後、ユーザー許可により同じフォルダを File System Access API で選択できます。編集中内容を維持したままフォルダだけ許可する場合は、`フォルダ許可` で現在のMarkdownを読み直さずにフォルダ参照だけ接続します。その場合、相対パスはMarkdownファイルの場所を基準にフォルダ内画像を Blob URL として表示します。フォルダ未許可時や許可済みフォルダ内に対象画像がない場合は、画像を相対URLとして読み込まず、理由を示すプレースホルダーを表示します。未対応環境では `フォルダから開く` ボタンの `webkitdirectory` ファイル入力にフォールバックします。ブラウザ仕様上、絶対フォルダパスは取得せず、選択フォルダ内の相対パスだけを扱います。`file:` URL、`Z:\share\image.png` のようなWindowsドライブパス、`\\server\share\image.png` のようなUNCパスは直接読み込みません。ネットワークドライブ上の画像は、ユーザーがそのフォルダを選択した上で相対パスとして参照します。`http`/`https` 画像は許可しません。
 
 ### 5. 外部リンク許可ドメイン
 

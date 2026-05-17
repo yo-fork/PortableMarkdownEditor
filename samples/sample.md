@@ -4,7 +4,9 @@
 
 ## 概要
 
-これは Portable Markdown Editer のサンプルです。
+![sample image](sample.assets/image.png)
+
+これは Portable Markdown Editor のサンプルです。
 
 - **太字**
 - *斜体*

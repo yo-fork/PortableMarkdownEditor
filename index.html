@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; media-src data: blob:; font-src 'self' data:; connect-src 'none'; worker-src 'none'; manifest-src 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src data: blob:; font-src 'self' data:; connect-src 'none'; worker-src 'none'; manifest-src 'none';">
   <title>Portable Markdown Editor</title>
   <link rel="stylesheet" href="./vendor/highlight/styles/github-dark.min.css">
   <link rel="stylesheet" href="./vendor/katex/katex.min.css">
@@ -13,7 +13,7 @@
   <script src="./vendor/highlight/highlight.min.js" defer></script>
   <script src="./vendor/mermaid/mermaid.min.js" defer></script>
   <script src="./vendor/katex/katex.min.js" defer></script>
-  <script src="./app.js?v=rich-list-softline-arrow-3" defer></script>
+  <script src="./app.js?v=grant-current-folder-1" defer></script>
 </head>
 <body data-mode="rich">
   <a class="skip-link" href="#mainWorkspace">本文へ移動</a>
@@ -30,9 +30,10 @@
 
       <nav class="toolbar" aria-label="ファイル操作">
         <button type="button" data-action="new" title="新規作成">新規</button>
-        <button type="button" data-action="open" title="Markdownファイルを開く">開く</button>
-        <button type="button" data-action="open-folder" title="Markdownと画像を含むフォルダを開く">フォルダ</button>
-        <button type="button" data-action="save-md" title="Markdownとして保存">保存</button>
+        <button type="button" data-action="open" title="Markdownファイルを1つ選んで開く">ファイルから開く</button>
+        <button type="button" data-action="open-folder" title="フォルダ内のMarkdownを選んで開く">フォルダから開く</button>
+        <button type="button" data-action="grant-folder" title="編集中のMarkdownを読み直さずにフォルダだけ許可">フォルダ許可</button>
+        <button type="button" data-action="save-md" title="フォルダ許可時はMarkdownへ上書き保存、未許可時はダウンロード保存">保存</button>
         <button type="button" data-action="export-html" title="安全化済みHTMLを書き出す">HTML</button>
         <button type="button" data-action="print" title="PDF化・印刷">PDF/印刷</button>
         <button type="button" data-action="copy-html" title="HTMLをクリップボードへコピー">HTMLコピー</button>
@@ -52,7 +53,7 @@
         <button type="button" data-action="format" data-format="toc" title="目次">TOC</button>
         <button type="button" data-action="insert-link" title="リンク">リンク</button>
         <button type="button" data-action="insert-mermaid" title="Mermaid図を挿入">Mermaid</button>
-        <button type="button" data-action="insert-image" title="画像をData URLとして埋め込む">画像埋込</button>
+        <button type="button" data-action="insert-image" title="assetsフォルダへ保存して相対参照を挿入">画像挿入</button>
         <button type="button" data-action="insert-image-ref" title="ローカル/ネットワークドライブ画像を参照">画像参照</button>
       </nav>
 
@@ -112,7 +113,7 @@
 
   <input id="fileInput" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden>
   <input id="folderInput" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain,image/png,image/jpeg,image/gif,image/webp" webkitdirectory multiple hidden>
-  <input id="imageInput" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+  <input id="imageInput" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
   <datalist id="codeLanguageOptions">
     <option value="text"></option>
     <option value="js"></option>
@@ -138,7 +139,7 @@
         <li>Content Security Policyで通信、埋め込み、フォーム送信、外部スクリプトを禁止。</li>
         <li>Markdown内のHTMLは実行せず、文字としてエスケープ。</li>
         <li>JavaScript URL、危険なプロトコル、外部画像読み込みをブロック。</li>
-        <li>画像はPNG/JPEG/GIF/WebPのみ。Data URL埋め込み、相対パス、file URL、Windowsドライブ、UNCパスの参照に限定。</li>
+        <li>画像はPNG/JPEG/GIF/WebPのみ。挿入画像はassetsフォルダへの相対参照にし、File System Access APIで許可されたフォルダ内の相対パスだけを表示。</li>
         <li>データ保存はブラウザのlocalStorageとユーザー操作によるダウンロードのみ。</li>
       </ul>
       <menu>
@@ -155,6 +156,17 @@
       <menu>
         <button type="submit">キャンセル</button>
         <button type="button" data-action="save-link-domains">保存</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="markdownEntryDialog" aria-labelledby="markdownEntryTitle">
+    <form method="dialog" class="dialog-card markdown-entry-dialog">
+      <h2 id="markdownEntryTitle">Markdownファイルを選択</h2>
+      <p>選択したフォルダ内のMarkdownファイルを開きます。</p>
+      <div id="markdownEntryList" class="markdown-entry-list" role="listbox" aria-label="Markdownファイル"></div>
+      <menu>
+        <button id="markdownEntryCancel" type="button">キャンセル</button>
       </menu>
     </form>
   </dialog>

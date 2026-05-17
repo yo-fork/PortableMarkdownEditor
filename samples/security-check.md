@@ -15,8 +15,10 @@ script:alert(1))
 
 ![SVG data画像](data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+)
 
-以下のようなローカル画像参照は、PNG/JPEG/GIF/WebPに限って許可されます。
+以下のような相対画像参照は、フォルダ許可済みのPNG/JPEG/GIF/WebPに限って表示されます。
 
 ![相対画像](./images/local-sample.png)
+
+以下のような絶対パスやUNCパスは直接読み込みません。
 
 ![ネットワークドライブ画像](<\\server\share\local sample.webp>)
