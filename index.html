@@ -13,7 +13,7 @@
   <script src="./vendor/highlight/highlight.min.js" defer></script>
   <script src="./vendor/mermaid/mermaid.min.js" defer></script>
   <script src="./vendor/katex/katex.min.js" defer></script>
-  <script src="./app.js?v=grant-current-folder-1" defer></script>
+  <script src="./app.js?v=rich-source-transaction-128" defer></script>
 </head>
 <body data-mode="rich">
   <a class="skip-link" href="#mainWorkspace">本文へ移動</a>
@@ -114,6 +114,7 @@
   <input id="fileInput" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden>
   <input id="folderInput" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain,image/png,image/jpeg,image/gif,image/webp" webkitdirectory multiple hidden>
   <input id="imageInput" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+  <input id="settingsInput" type="file" accept=".json,application/json" hidden>
   <datalist id="codeLanguageOptions">
     <option value="text"></option>
     <option value="js"></option>
@@ -140,8 +141,21 @@
         <li>Markdown内のHTMLは実行せず、文字としてエスケープ。</li>
         <li>JavaScript URL、危険なプロトコル、外部画像読み込みをブロック。</li>
         <li>画像はPNG/JPEG/GIF/WebPのみ。挿入画像はassetsフォルダへの相対参照にし、File System Access APIで許可されたフォルダ内の相対パスだけを表示。</li>
-        <li>データ保存はブラウザのlocalStorageとユーザー操作によるダウンロードのみ。</li>
+        <li>下書き、設定、リンク許可ドメインはブラウザのlocalStorageに保存。リンク許可ドメインはユーザーが選んだJSON設定ファイルから読み込み、JSONとして書き出せます。許可した設定フォルダは起動時に自動読み込みし、同じJSONへ上書き保存できます。File System Access APIのフォルダハンドルはIndexedDBに保存。</li>
+        <li>Markdown保存は、フォルダ許可済みなら開いているMarkdownファイルへ上書きし、未許可時はユーザー操作によるダウンロード保存。</li>
+        <li>貼り付け/ドロップ画像は、フォルダ許可済みの場合だけMarkdownファイル横のassetsフォルダへ保存。外部アップロードや同期は行いません。</li>
       </ul>
+      <section class="data-management-panel" aria-labelledby="dataManagementTitle">
+        <h3 id="dataManagementTitle">ローカルデータ管理</h3>
+        <p>この操作はブラウザ内の下書き・設定を削除します。保存済みMarkdownファイルや assets フォルダ内の画像は削除しません。</p>
+        <div class="data-management-actions">
+          <button type="button" data-action="clear-draft">下書きを削除</button>
+          <button type="button" data-action="reset-settings">設定をリセット</button>
+          <button type="button" data-action="clear-allowed-domains">許可ドメインを削除</button>
+          <button type="button" data-action="clear-folder-permissions">フォルダ権限の記録を削除</button>
+          <button type="button" data-action="clear-all-local-data">すべてのローカルデータを削除</button>
+        </div>
+      </section>
       <menu>
         <button type="submit">閉じる</button>
       </menu>
@@ -152,8 +166,13 @@
     <form method="dialog" class="dialog-card">
       <h2 id="linkDomainTitle">外部リンクの許可ドメイン</h2>
       <p>1行に1ドメインを入力します。許可されていない外部リンクはプレビューでリンク化しません。</p>
+      <p>設定ファイルを読み込むと、この一覧を更新してlocalStorageへ保存します。</p>
       <textarea id="allowedDomainsInput" class="dialog-textarea" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="example.com"></textarea>
       <menu>
+        <button type="button" data-action="import-settings">設定ファイルを読み込む</button>
+        <button type="button" data-action="export-settings">設定をファイルに書き出す</button>
+        <button type="button" data-action="grant-settings-folder">設定フォルダ許可</button>
+        <button type="button" data-action="save-settings-file">設定フォルダに保存</button>
         <button type="submit">キャンセル</button>
         <button type="button" data-action="save-link-domains">保存</button>
       </menu>
@@ -167,6 +186,35 @@
       <div id="markdownEntryList" class="markdown-entry-list" role="listbox" aria-label="Markdownファイル"></div>
       <menu>
         <button id="markdownEntryCancel" type="button">キャンセル</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="inlineInsertDialog" aria-labelledby="inlineInsertTitle" aria-describedby="inlineInsertDescription">
+    <form method="dialog" class="dialog-card">
+      <h2 id="inlineInsertTitle">リンクを挿入</h2>
+      <p id="inlineInsertDescription">許可ドメイン制は維持されます。許可されていない外部リンクや危険なURLは挿入しません。</p>
+      <label class="dialog-field">
+        表示テキスト
+        <input id="inlineInsertLabel" type="text" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="dialog-field">
+        <span id="inlineInsertTargetLabel">URL</span>
+        <input id="inlineInsertTarget" type="text" autocomplete="off" spellcheck="false" placeholder="./README.md">
+      </label>
+      <menu>
+        <button type="button" data-action="cancel-inline-insert">キャンセル</button>
+        <button type="button" data-action="confirm-inline-insert">挿入</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="folderScanWarningDialog" aria-labelledby="folderScanWarningTitle">
+    <form method="dialog" class="dialog-card">
+      <h2 id="folderScanWarningTitle">フォルダ走査の警告</h2>
+      <p id="folderScanWarningMessage">選択フォルダが大きいため、一部を読み飛ばしました。</p>
+      <menu>
+        <button type="submit">閉じる</button>
       </menu>
     </form>
   </dialog>

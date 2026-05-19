@@ -45,3 +45,6 @@ Run these checks without npm, package managers, CDN, or network access.
 15. Confirm `http`/`https` images remain blocked.
 16. Confirm normal external links open only after adding the domain in `リンク許可`; unlisted domains remain blocked.
 17. Open `tests/browser-selftest.html` directly and confirm every row reports `PASS`.
+18. Open the security dialog, use `下書きを削除`, reload the page, and confirm the previous edited draft is not restored.
+19. Open the security dialog, use `設定をリセット`, and confirm theme, display mode, and allowed link domains return to their initial state.
+20. Open a Markdown file with relative images through a granted folder, then use `フォルダ権限の記録を削除`. Reload and confirm relative images are not displayed again until the folder is granted again.

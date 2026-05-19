@@ -6,14 +6,22 @@
   const FSA_DB_NAME = 'portable-markdown-editor:fsa:v1';
   const FSA_STORE_NAME = 'handles';
   const FSA_DIRECTORY_HANDLE_KEY = 'last-directory';
+  const FSA_PICKER_START_HANDLE_KEY = 'picker-start-directory';
+  const FSA_SETTINGS_DIRECTORY_HANDLE_KEY = 'settings-directory';
+  const CONFIG_SETTINGS_FILE_NAME = 'portable-markdown-editor-settings.json';
   const MAX_ASSET_IMAGE_BYTES = 25 * 1024 * 1024;
   const MAX_HIGHLIGHT_CHARS = 120000;
+  const MAX_FOLDER_SCAN_FILES = 5000;
+  const MAX_FOLDER_SCAN_DEPTH = 8;
   const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
   const IMAGE_EXTENSION_PATTERN = /\.(?:png|jpe?g|gif|webp)(?:[?#].*)?$/i;
   const VENDOR_TOC_MARKER = 'PME_TOC_MARKER_7B4E2D8C';
-  const RICH_INLINE_SOURCE_SELECTOR = 'strong, b, em, i, del, s, code, a, img, .math-inline, .blocked-image';
-  const RICH_INLINE_EDIT_BLOCK_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, li, td, th';
+  const RICH_INLINE_SOURCE_SELECTOR = '.rich-inline-atom, strong, b, em, i, del, s, code, a, img, .math-inline, .blocked-image';
+  const RICH_INLINE_EDIT_BLOCK_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, li, td, th, blockquote';
   const RICH_TRAILING_BLOCK_SELECTOR = '.toc, .mermaid-diagram, pre.code-block, .math-display, table, hr, ul, ol, blockquote';
+  const RICH_SOURCE_BLOCK_SELECTOR = '[data-block-id][data-source-start][data-source-end]';
+  const RICH_ATOMIC_SOURCE_BLOCK_SELECTOR = '.mermaid-diagram, pre.code-block, .math-display, hr';
+  const RICH_CARET_TOKEN_PATTERN = /@PME_CARET_[A-Za-z0-9]+_\d+@/g;
   const MAX_RICH_UNDO_STEPS = 50;
   const DEFAULT_MERMAID_ZOOM = 0.7;
   const MERMAID_ZOOM_FACTOR = 1.1;
@@ -106,15 +114,24 @@ flowchart TD
     richUndoRestoring: false,
     richUndoPreserveNextInput: false,
     richSelectionLock: false,
+    richInputUsedSourceTransaction: false,
+    richTransactionBlank: null,
+    richLineBreakInputOffset: null,
+    scrollSyncLock: false,
     mermaidPan: null,
     allowedLinkDomains: [],
     assetUrls: new Map(),
     directoryHandle: null,
+    pickerStartDirectoryHandle: null,
+    settingsDirectoryHandle: null,
+    settingsDirectoryName: '',
     directoryName: '',
     markdownRelativePath: '',
     fileHandle: null,
     folderInputMode: 'open',
+    folderScanLimitMessage: '',
     pendingImageInsertionContext: null,
+    pendingInlineInsertContext: null,
   };
 
   const els = {};
@@ -128,10 +145,11 @@ flowchart TD
     bindEvents();
     applyTheme();
     initializeVendorLibraries();
-    applyMode(state.mode);
     els.source.value = state.markdown;
+    applyMode(state.mode, { preserveScroll: false });
     renderAll('init');
     setStatus('準備完了');
+    restorePersistedSettingsDirectoryHandle();
     restorePersistedDirectoryHandle();
   }
 
@@ -144,6 +162,7 @@ flowchart TD
     els.fileInput = document.getElementById('fileInput');
     els.folderInput = document.getElementById('folderInput');
     els.imageInput = document.getElementById('imageInput');
+    els.settingsInput = document.getElementById('settingsInput');
     els.status = document.getElementById('statusMessage');
     els.stats = document.getElementById('documentStats');
     els.saveState = document.getElementById('saveState');
@@ -154,21 +173,33 @@ flowchart TD
     els.markdownEntryDialog = document.getElementById('markdownEntryDialog');
     els.markdownEntryList = document.getElementById('markdownEntryList');
     els.markdownEntryCancel = document.getElementById('markdownEntryCancel');
+    els.folderScanWarningDialog = document.getElementById('folderScanWarningDialog');
+    els.folderScanWarningMessage = document.getElementById('folderScanWarningMessage');
+    els.inlineInsertDialog = document.getElementById('inlineInsertDialog');
+    els.inlineInsertTitle = document.getElementById('inlineInsertTitle');
+    els.inlineInsertDescription = document.getElementById('inlineInsertDescription');
+    els.inlineInsertLabel = document.getElementById('inlineInsertLabel');
+    els.inlineInsertTarget = document.getElementById('inlineInsertTarget');
+    els.inlineInsertTargetLabel = document.getElementById('inlineInsertTargetLabel');
   }
 
   function restoreSettings() {
     const settings = readJson(SETTINGS_KEY);
-    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-    state.theme = settings?.theme || (prefersDark ? 'dark' : 'light');
+    state.theme = settings?.theme || defaultTheme();
     state.mode = settings?.mode || 'rich';
     state.outlineCollapsed = Boolean(settings?.outlineCollapsed);
     state.allowedLinkDomains = normalizeDomainList(settings?.allowedLinkDomains || []);
   }
 
+  function defaultTheme() {
+    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    return prefersDark ? 'dark' : 'light';
+  }
+
   function restoreDraft() {
     const draft = readJson(STORAGE_KEY);
     if (!draft || typeof draft.markdown !== 'string') return;
-    state.markdown = draft.markdown;
+    state.markdown = stripRichCaretTokens(draft.markdown);
     state.fileName = safeFileName(draft.fileName || 'untitled.md');
     state.markdownRelativePath = normalizeAssetPath(draft.markdownRelativePath || '');
     state.lastAutoSaved = draft.savedAt || null;
@@ -203,13 +234,14 @@ flowchart TD
         setStatus('前回のフォルダ権限が必要です。「フォルダ許可」または「フォルダから開く」を使ってください');
         return false;
       }
-      const entries = await collectDirectoryEntries(directoryHandle);
+      const entries = await collectLimitedDirectoryEntries(directoryHandle);
       state.directoryHandle = directoryHandle;
+      state.pickerStartDirectoryHandle = directoryHandle;
       state.directoryName = directoryHandle.name || '';
       clearAssetUrls();
       buildFolderAssetUrls(entries, dirnamePath(state.markdownRelativePath));
       renderAll('restore-folder');
-      setStatus(`${state.fileName} のフォルダ参照をFile System Access APIから復元しました。画像候補: ${state.assetUrls.size}`);
+      setStatus(`${state.fileName} のフォルダ参照をFile System Access APIから復元しました。画像候補: ${state.assetUrls.size}${folderScanStatusSuffix()}`);
       return true;
     } catch (_) {
       setStatus('前回のフォルダ参照を復元できませんでした。「フォルダ許可」または「フォルダから開く」を使ってください');
@@ -221,11 +253,60 @@ flowchart TD
     return Boolean(window.isSecureContext && window.indexedDB);
   }
 
+  async function restorePersistedSettingsDirectoryHandle() {
+    if (!canPersistDirectoryHandle()) return false;
+    try {
+      const directoryHandle = await readPersistedSettingsDirectoryHandle();
+      if (!directoryHandle) return false;
+      const permission = await queryDirectoryPermission(directoryHandle, 'readwrite');
+      if (permission !== 'granted') {
+        setStatus('設定フォルダ権限が必要です。「リンク許可」から設定フォルダを再許可してください');
+        return false;
+      }
+      state.settingsDirectoryHandle = directoryHandle;
+      state.settingsDirectoryName = directoryHandle.name || '';
+      const loaded = await loadSettingsFromConfigDirectory(directoryHandle, { missingOk: true });
+      if (loaded) {
+        setStatus(`${CONFIG_SETTINGS_FILE_NAME} から外部リンク許可ドメインを自動読み込みしました: ${state.allowedLinkDomains.length}件`);
+      }
+      return loaded;
+    } catch (_) {
+      setStatus('前回の設定フォルダを復元できませんでした。「リンク許可」から設定フォルダを再許可してください');
+      return false;
+    }
+  }
+
   async function persistDirectoryHandle(directoryHandle) {
     if (!directoryHandle || !canPersistDirectoryHandle()) return false;
     try {
       const db = await openFsaDatabase();
       await idbRequest(db.transaction(FSA_STORE_NAME, 'readwrite').objectStore(FSA_STORE_NAME).put(directoryHandle, FSA_DIRECTORY_HANDLE_KEY));
+      db.close();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function rememberPickerStartDirectory(directoryHandle) {
+    if (!directoryHandle) return false;
+    state.pickerStartDirectoryHandle = directoryHandle;
+    if (!canPersistDirectoryHandle()) return false;
+    try {
+      const db = await openFsaDatabase();
+      await idbRequest(db.transaction(FSA_STORE_NAME, 'readwrite').objectStore(FSA_STORE_NAME).put(directoryHandle, FSA_PICKER_START_HANDLE_KEY));
+      db.close();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function persistSettingsDirectoryHandle(directoryHandle) {
+    if (!directoryHandle || !canPersistDirectoryHandle()) return false;
+    try {
+      const db = await openFsaDatabase();
+      await idbRequest(db.transaction(FSA_STORE_NAME, 'readwrite').objectStore(FSA_STORE_NAME).put(directoryHandle, FSA_SETTINGS_DIRECTORY_HANDLE_KEY));
       db.close();
       return true;
     } catch (_) {
@@ -242,6 +323,30 @@ flowchart TD
     }
   }
 
+  async function readPersistedSettingsDirectoryHandle() {
+    const db = await openFsaDatabase();
+    try {
+      return await idbRequest(db.transaction(FSA_STORE_NAME, 'readonly').objectStore(FSA_STORE_NAME).get(FSA_SETTINGS_DIRECTORY_HANDLE_KEY));
+    } finally {
+      db.close();
+    }
+  }
+
+  async function readPickerStartDirectoryHandle() {
+    if (state.pickerStartDirectoryHandle) return state.pickerStartDirectoryHandle;
+    if (!canPersistDirectoryHandle()) return null;
+    const db = await openFsaDatabase();
+    try {
+      const handle = await idbRequest(db.transaction(FSA_STORE_NAME, 'readonly').objectStore(FSA_STORE_NAME).get(FSA_PICKER_START_HANDLE_KEY));
+      state.pickerStartDirectoryHandle = handle || null;
+      return state.pickerStartDirectoryHandle;
+    } catch (_) {
+      return null;
+    } finally {
+      db.close();
+    }
+  }
+
   async function clearPersistedDirectoryHandle() {
     if (!canPersistDirectoryHandle()) return false;
     try {
@@ -252,6 +357,19 @@ flowchart TD
     } catch (_) {
       return false;
     }
+  }
+
+  function deleteFsaDatabase() {
+    return new Promise((resolve) => {
+      if (!window.indexedDB) {
+        resolve(false);
+        return;
+      }
+      const request = window.indexedDB.deleteDatabase(FSA_DB_NAME);
+      request.onsuccess = () => resolve(true);
+      request.onerror = () => resolve(false);
+      request.onblocked = () => resolve(false);
+    });
   }
 
   function openFsaDatabase() {
@@ -277,6 +395,7 @@ flowchart TD
     document.addEventListener('click', onDocumentClick);
     document.addEventListener('change', onDocumentChange);
     document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('keyup', onDocumentKeyUp);
     document.addEventListener('beforeinput', onDocumentBeforeInput, true);
     document.addEventListener('selectionchange', onSelectionChange);
     document.addEventListener('focusin', onDocumentFocusIn);
@@ -287,13 +406,19 @@ flowchart TD
     document.addEventListener('pointercancel', onDocumentPointerEnd);
 
     els.source.addEventListener('input', () => {
-      state.markdown = normalizeNewlines(els.source.value);
+      state.markdown = stripRichCaretTokens(normalizeNewlines(els.source.value));
+      if (state.markdown !== els.source.value) els.source.value = state.markdown;
       markDirty();
       scheduleRender();
       scheduleAutosave();
     });
 
     els.source.addEventListener('scroll', syncPreviewScroll);
+    els.source.addEventListener('keyup', syncPreviewScroll);
+    els.source.addEventListener('mouseup', syncPreviewScroll);
+    els.preview.addEventListener('scroll', syncSourceScroll);
+    els.preview.addEventListener('keyup', syncSourceScroll);
+    els.preview.addEventListener('mouseup', syncSourceScroll);
     els.source.addEventListener('paste', onMarkdownPaste);
     els.source.addEventListener('dragover', onEditorDragOver);
     els.source.addEventListener('dragleave', onEditorDragLeave);
@@ -301,20 +426,22 @@ flowchart TD
     els.fileInput.addEventListener('change', onFileChosen);
     els.folderInput.addEventListener('change', onFolderChosen);
     els.imageInput.addEventListener('change', onImageChosen);
+    els.settingsInput.addEventListener('change', onSettingsFileChosen);
+    els.inlineInsertDialog.addEventListener('close', () => {
+      if (els.inlineInsertDialog.returnValue !== 'inserted') state.pendingInlineInsertContext = null;
+    });
     els.rich.setAttribute('contenteditable', 'true');
     els.rich.setAttribute('role', 'textbox');
     els.rich.setAttribute('aria-multiline', 'true');
     els.rich.setAttribute('aria-label', 'リッチMarkdown編集');
     els.rich.addEventListener('input', onRichInput);
     els.rich.addEventListener('paste', onRichPaste);
+    els.rich.addEventListener('cut', onRichCut);
     els.rich.addEventListener('dragover', onEditorDragOver);
     els.rich.addEventListener('dragleave', onEditorDragLeave);
     els.rich.addEventListener('drop', onEditorDrop);
     els.rich.addEventListener('compositionstart', () => { state.richComposing = true; });
-    els.rich.addEventListener('compositionend', () => {
-      state.richComposing = false;
-      syncRichMarkdownFromDom('rich-input');
-    });
+    els.rich.addEventListener('compositionend', onRichCompositionEnd);
     els.rich.addEventListener('click', onRichClick);
 
     window.addEventListener('beforeunload', (event) => {
@@ -326,7 +453,9 @@ flowchart TD
 
   function onDocumentClick(event) {
     const target = eventTargetElement(event);
+    commitActiveRichInlineSourceForTarget(target);
     cancelActiveRichSourceEditorForTarget(target);
+    if (state.mode === 'rich') parsePendingRichMathShortcutAwayFromTarget(target);
 
     const actionButton = event.target.closest('[data-action]');
     if (!actionButton) return;
@@ -363,6 +492,33 @@ flowchart TD
       case 'save-link-domains':
         saveLinkDomains();
         break;
+      case 'import-settings':
+        openSettingsFile();
+        break;
+      case 'export-settings':
+        exportSettingsFile();
+        break;
+      case 'grant-settings-folder':
+        grantSettingsDirectory();
+        break;
+      case 'save-settings-file':
+        saveSettingsToConfigDirectory();
+        break;
+      case 'clear-draft':
+        clearDraftData();
+        break;
+      case 'reset-settings':
+        resetSettingsData();
+        break;
+      case 'clear-allowed-domains':
+        clearAllowedDomainsData();
+        break;
+      case 'clear-folder-permissions':
+        clearFolderPermissionRecords();
+        break;
+      case 'clear-all-local-data':
+        clearAllLocalData();
+        break;
       case 'format':
         applyFormat(actionButton.dataset.format);
         break;
@@ -374,6 +530,12 @@ flowchart TD
         break;
       case 'insert-image-ref':
         insertImageReference();
+        break;
+      case 'confirm-inline-insert':
+        confirmInlineInsertDialog();
+        break;
+      case 'cancel-inline-insert':
+        cancelInlineInsertDialog();
         break;
       case 'insert-code-block':
         insertCodeBlock();
@@ -401,6 +563,18 @@ flowchart TD
     }
   }
 
+  function commitActiveRichInlineSourceForTarget(target) {
+    const active = state.richInlineSource?.element;
+    if (!active || !target || active.contains(target)) return false;
+    if (!els.rich?.contains(active)) {
+      state.richInlineSource = null;
+      return false;
+    }
+    const committed = commitRichInlineSource(active);
+    if (committed) suppressRichInlineActivation();
+    return committed;
+  }
+
   function onDocumentWheel(event) {
     const target = eventTargetElement(event)?.closest?.('.mermaid-render-target.is-zoomable');
     if (!target) return;
@@ -418,6 +592,8 @@ flowchart TD
   function onDocumentPointerDown(event) {
     if (event.button !== 0) return;
     const target = eventTargetElement(event);
+    state.richLineBreakInputOffset = null;
+    clearRichTransactionBlankForPointer(target);
     parsePendingRichInlineMarkdownBeforePointer(target);
     const renderTarget = target?.closest?.('.mermaid-render-target.is-zoomable');
     if (!renderTarget || !els.preview.contains(renderTarget)) return;
@@ -506,6 +682,12 @@ flowchart TD
 
     if (hasNonCollapsedRichSelection()) return;
 
+    if (parsePendingRichMathShortcutAwayFromTarget(target)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
     if (activatePendingMathShortcutFromSelection()) {
       event.preventDefault();
       event.stopPropagation();
@@ -524,6 +706,7 @@ flowchart TD
       if (!selection || selection.isCollapsed) {
         event.preventDefault();
         activateRichInlineSource(inlineRendered, 'end');
+        event.stopPropagation();
       }
       return;
     }
@@ -686,11 +869,21 @@ flowchart TD
 
     const range = caretRangeFromPoint(event.clientX, event.clientY);
     if (!range || !els.rich.contains(range.startContainer)) return;
+    const atom = nodeClosest(range.startContainer, '.rich-inline-atom');
+    if (atom && els.rich.contains(atom)) {
+      placeCaretAtInlineBoundary(atom, inlineAtomPointerBoundary(atom, event.clientX));
+      return;
+    }
     const selection = window.getSelection?.();
     if (!selection) return;
     selection.removeAllRanges();
     selection.addRange(range);
     els.rich.focus();
+  }
+
+  function inlineAtomPointerBoundary(atom, clientX) {
+    const rect = atom.getBoundingClientRect();
+    return clientX <= rect.left + (rect.width / 2) ? 'before' : 'after';
   }
 
   function caretRangeFromPoint(clientX, clientY) {
@@ -745,18 +938,60 @@ flowchart TD
     state.richInlineParseBlock = current;
     if (!previous || previous === current || !previous.isConnected || !els.rich.contains(previous)) return false;
     if (previous.closest('.rich-source-editor, .mermaid-diagram, pre.code-block, .math-display')) return false;
+    if (parsePendingRichMathShortcutInBlock(previous)) {
+      suppressRichInlineActivation();
+      return true;
+    }
     if (!parsePendingRichInlineMarkdownInBlock(previous)) return false;
     configureRichEditableSurface();
     suppressRichInlineActivation();
+    finalizeRichProjectionChange('rich-input');
+    return true;
+  }
+
+  function parsePendingRichMathShortcutInBlock(block) {
+    if (!block || block.tagName?.toLowerCase() !== 'p' || block.closest('li')) return false;
+    const text = normalizeRichText(block.textContent || '');
+    if (text !== '$$' && text !== '$$$$') return false;
+    if (block.matches?.(RICH_SOURCE_BLOCK_SELECTOR) && applyRichBlockMarkdownTriggerTransaction(block, text, { allowBareMath: true })) {
+      return true;
+    }
+    if (guardUnsupportedRichBlockMarkdownTriggerFallback(block)) return true;
+    if (text === '$$$$') {
+      replaceParagraphWithMathDisplayEditor(block);
+    } else {
+      replaceParagraphWithMathInlineSource(block);
+    }
     syncRichMarkdownFromDom('rich-input');
     return true;
   }
 
+  function parsePendingRichMathShortcutAwayFromTarget(target) {
+    const targetBlock = nodeClosest(target, 'p');
+    const pending = Array.from(els.rich.querySelectorAll('p')).find((block) => {
+      if (block === targetBlock || block.closest('li')) return false;
+      const text = normalizeRichText(block.textContent || '');
+      return text === '$$' || text === '$$$$';
+    });
+    if (!pending) return false;
+    return parsePendingRichMathShortcutInBlock(pending);
+  }
+
+  function richPendingMathShortcutBlockFromRange(range) {
+    const direct = nodeClosest(range?.startContainer, 'p');
+    if (direct && els.rich.contains(direct)) return direct;
+    return Array.from(els.rich.querySelectorAll('p')).find((block) => {
+      const text = normalizeRichText(block.textContent || '');
+      return text === '$$' || text === '$$$$';
+    }) || null;
+  }
+
   function richInlineEditBlockFromSelection(selection) {
-    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return null;
-    if (nodeClosest(selection.anchorNode, '.rich-source-editor, .code-language-input, .rich-inline-source')) return null;
-    if (nodeClosest(selection.anchorNode, '.mermaid-diagram, pre.code-block, .math-display')) return null;
-    return richInlineEditBlockForRange(selection.getRangeAt(0));
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return null;
+    if (nodeClosest(range.startContainer, '.rich-source-editor, .code-language-input, .rich-inline-source')) return null;
+    if (nodeClosest(range.startContainer, '.mermaid-diagram, pre.code-block, .math-display')) return null;
+    return richInlineEditBlockForRange(range);
   }
 
   function nodeElement(node) {
@@ -769,22 +1004,14 @@ flowchart TD
   }
 
   function findRichInlineSourceCandidate(selection) {
-    const range = selection.getRangeAt(0);
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return null;
     if (isRichCaretBoundaryMarker(range.startContainer)) return null;
     const editBlock = richInlineEditBlockForRange(range);
     if (!editBlock) return null;
 
     const direct = validRichInlineSourceElement(nodeElement(range.startContainer)?.closest?.(RICH_INLINE_SOURCE_SELECTOR));
     if (direct && isSameRichInlineEditBlock(direct, editBlock)) return { element: direct, position: 'end' };
-
-    const before = adjacentCaretNode(range.startContainer, range.startOffset, 'before');
-    const beforeElement = validRichInlineSourceElement(nodeElement(before)?.closest?.(RICH_INLINE_SOURCE_SELECTOR));
-    if (beforeElement && isSameRichInlineEditBlock(beforeElement, editBlock)) return { element: beforeElement, position: 'end' };
-
-    const after = adjacentCaretNode(range.startContainer, range.startOffset, 'after');
-    const afterElement = validRichInlineSourceElement(nodeElement(after)?.closest?.(RICH_INLINE_SOURCE_SELECTOR));
-    if (afterElement && isSameRichInlineEditBlock(afterElement, editBlock)) return { element: afterElement, position: 'start' };
-
     return null;
   }
 
@@ -803,6 +1030,7 @@ flowchart TD
     const walker = document.createTreeWalker(els.rich, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         if (!String(node.nodeValue || '').includes('\u200b')) return NodeFilter.FILTER_REJECT;
+        if (nodeClosest(node, '.rich-list-caret-anchor, .rich-line-break-caret-anchor') && (node.nodeValue || '') === '\u200b') return NodeFilter.FILTER_REJECT;
         if (nodeClosest(node, 'td, th')) return NodeFilter.FILTER_REJECT;
         return NodeFilter.FILTER_ACCEPT;
       },
@@ -851,6 +1079,8 @@ flowchart TD
 
   function validRichInlineSourceElement(element) {
     if (!element || !els.rich.contains(element)) return null;
+    const atom = element.closest?.('.rich-inline-atom');
+    if (atom && els.rich.contains(atom)) element = atom;
     if (element.classList.contains('rich-inline-source')) return null;
     if (element.closest('.rich-source-editor, .mermaid-diagram, pre.code-block, .math-display')) return null;
     if (element.tagName?.toLowerCase() === 'code' && element.closest('pre')) return null;
@@ -893,7 +1123,18 @@ flowchart TD
   }
 
   function onRichInput(event) {
+    sanitizeRichCaretTokensInDomPreservingSelection(els.rich);
     if (event.target?.closest?.('.task-checkbox, .code-language-input, .rich-source-editor')) return;
+    const inlineSource = richInlineSourceFromEventContext(event);
+    if (inlineSource) {
+      syncActiveRichInlineSourceMarkdown(inlineSource, 'rich-inline-source-input');
+      cleanupRichCaretBoundaryMarkers({ preserveSelection: true });
+      return;
+    }
+    if (repairRichLineBreakCaretInput(event)) {
+      cleanupRichCaretBoundaryMarkers({ preserveSelection: true });
+      return;
+    }
     if (!state.richUndoRestoring && event?.isTrusted) {
       if (state.richUndoPreserveNextInput) {
         state.richUndoPreserveNextInput = false;
@@ -901,18 +1142,257 @@ flowchart TD
         clearRichUndoStack();
       }
     }
-    if (!richInlineSourceFromEventContext(event)) {
-      maybeApplyRichMarkdownTrigger(event);
+    let handledBySourceTransaction = false;
+    state.richInputUsedSourceTransaction = false;
+    maybeApplyRichMarkdownTrigger(event);
+    handledBySourceTransaction = state.richInputUsedSourceTransaction;
+    state.richInputUsedSourceTransaction = false;
+    if (!handledBySourceTransaction) {
+      if (!applyRichSourceBackedDomTransaction(event, 'rich-input-source-fallback')) {
+        if (!guardUnsupportedRichSourceBackedDomSync(event, 'rich-input-source-fallback')) {
+          syncRichMarkdownFromDom('rich-input');
+          if (!applySyncedRichBlockMarkdownShortcutAfterInput()) {
+            applySyncedMarkdownShortcutFromSource();
+          }
+        }
+      } else if (!applySyncedRichBlockMarkdownShortcutAfterInput()) {
+        applySyncedMarkdownShortcutFromSource();
+      }
+      scheduleSyncedMarkdownShortcutFromSource();
+    }
+    cleanupRichCaretBoundaryMarkers({ preserveSelection: true });
+  }
+
+  function onRichCompositionEnd(event) {
+    state.richComposing = false;
+    if (event.target?.closest?.('.rich-source-editor, .code-language-input')) return;
+    const inlineSource = richInlineSourceFromEventContext(event);
+    if (inlineSource) {
+      syncActiveRichInlineSourceMarkdown(inlineSource, 'rich-inline-source-composition');
+      cleanupRichCaretBoundaryMarkers({ preserveSelection: true });
+      return;
+    }
+    if (repairRichLineBreakCaretDomSync('rich-composition')) {
+      cleanupRichCaretBoundaryMarkers({ preserveSelection: true });
+      return;
+    }
+    if (applyRichSourceBackedDomTransaction(event, 'rich-composition')) {
+      cleanupRichCaretBoundaryMarkers({ preserveSelection: true });
+      return;
+    }
+    if (guardUnsupportedRichSourceBackedDomSync(event, 'rich-composition')) {
+      cleanupRichCaretBoundaryMarkers({ preserveSelection: true });
+      return;
     }
     syncRichMarkdownFromDom('rich-input');
     cleanupRichCaretBoundaryMarkers({ preserveSelection: true });
   }
 
+  function applyRichSourceBackedDomTransaction(event, reason = 'rich-input-source-fallback') {
+    const sourceBlock = richSourceBackedDomBlock(event);
+    if (!sourceBlock) return false;
+    const start = numericData(sourceBlock, 'sourceStart');
+    const end = numericData(sourceBlock, 'sourceEnd');
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || end > markdown.length) {
+      renderAll(`${reason}-revert`);
+      setStatus('この入力をMarkdownソースへ反映できませんでした');
+      return true;
+    }
+
+    const insert = stripRichCaretTokens(serializeSourceBackedDomBlockNode(sourceBlock));
+    if (!insert && sourceBlock.textContent?.trim()) {
+      renderAll(`${reason}-revert`);
+      setStatus('この入力をMarkdownソースへ反映できませんでした');
+      return true;
+    }
+    const shortcut = richSourceBackedDomShortcutReplacement(sourceBlock, start, end, insert, reason);
+    if (shortcut) {
+      applySourceTransaction({
+        from: start,
+        to: end,
+        insert: shortcut.insert,
+        selectionAfter: shortcut.selectionAfter,
+        blankParagraphAt: shortcut.blankParagraphAt,
+      }, `rich-markdown-trigger-${shortcut.kind}`);
+      finishRichBlockMarkdownTriggerReplacement(shortcut, start, shortcut.insert.length);
+      suppressRichInlineActivation();
+      return true;
+    }
+    if (markdown.slice(start, end) === insert) {
+      refreshRichSourceRangesFromMarkdown();
+      scheduleRender(reason);
+      return true;
+    }
+
+    const selectionAfter = richSourceBackedDomSelectionAfter(sourceBlock, start, insert.length);
+    applySourceTransaction({
+      from: start,
+      to: end,
+      insert,
+      selectionAfter,
+    }, reason);
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richSourceBackedDomShortcutReplacement(sourceBlock, start, end, insert, reason) {
+    if (!['rich-input-source-fallback', 'rich-composition'].includes(reason)) return null;
+    if (sourceBlock?.tagName?.toLowerCase() !== 'p' || sourceBlock.closest('li')) return null;
+    const sourceText = normalizeRichText(sourceBlock.textContent || insert);
+    const replacement = richBlockMarkdownTriggerReplacement(sourceText, { allowBareMath: false });
+    if (!replacement) return null;
+    const selectionOffset = start + (Number.isFinite(replacement.selectionOffset)
+      ? replacement.selectionOffset
+      : replacement.insert.length);
+    return {
+      ...replacement,
+      from: start,
+      to: end,
+      selectionAfter: {
+        anchor: selectionOffset,
+        focus: selectionOffset,
+        affinity: 'after',
+      },
+      blankParagraphAt: replacement.blankParagraphAt ? start + replacement.insert.length : undefined,
+    };
+  }
+
+  function serializeSourceBackedDomBlockNode(sourceBlock) {
+    if (sourceBlock?.tagName?.toLowerCase() === 'p') {
+      return serializeInlineChildren(sourceBlock);
+    }
+    return serializeBlockNode(sourceBlock);
+  }
+
+  function richSourceBackedDomBlock(event) {
+    const selection = window.getSelection?.();
+    const nodes = [
+      eventTargetElement(event),
+      selection?.anchorNode,
+      selection?.focusNode,
+    ].filter(Boolean);
+    for (const node of nodes) {
+      if (nodeClosest(node, '.rich-inline-source, .rich-source-editor, .code-language-input')) return null;
+      const sourceBlock = nodeClosest(node, RICH_SOURCE_BLOCK_SELECTOR);
+      if (sourceBlock && els.rich.contains(sourceBlock)) return richTopLevelBlock(sourceBlock) || sourceBlock;
+    }
+    return null;
+  }
+
+  function guardUnsupportedRichSourceBackedDomSync(event, reason = 'rich-input-source-fallback') {
+    const selection = window.getSelection?.();
+    const target = eventTargetElement(event);
+    const nodes = [target, selection?.anchorNode, selection?.focusNode].filter(Boolean);
+    if (nodes.some((node) => nodeClosest(node, '.rich-inline-source, .rich-source-editor, .code-language-input'))) return false;
+    const touchesSource = nodes.some((node) => {
+      const sourceBlock = nodeClosest(node, RICH_SOURCE_BLOCK_SELECTOR);
+      return Boolean(sourceBlock && els.rich.contains(sourceBlock));
+    }) || richSelectionTouchesSourceBlock(selection);
+    if (!touchesSource) return false;
+    renderAll(`${reason}-revert`);
+    setStatus('この入力をMarkdownソースへ反映できませんでした');
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richSourceBackedDomSelectionAfter(sourceBlock, start, insertLength) {
+    const selection = window.getSelection?.();
+    const point = selection?.rangeCount && els.rich.contains(selection.anchorNode)
+      ? domPointToSourceOffset(selection.anchorNode, selection.anchorOffset)
+      : null;
+    const localOffset = Number.isFinite(point?.offset)
+      ? Math.max(0, Math.min(insertLength, point.offset - start))
+      : insertLength;
+    return {
+      anchor: start + localOffset,
+      focus: start + localOffset,
+      affinity: point?.affinity || 'after',
+    };
+  }
+
+  function repairRichLineBreakCaretInput(event) {
+    const selection = window.getSelection?.();
+    const activeAnchor = nodeClosest(selection?.anchorNode, '.rich-line-break-caret-anchor')
+      || eventTargetElement(event)?.closest?.('.rich-line-break-caret-anchor')
+      || els.rich.querySelector('.rich-line-break-caret-anchor[data-source-offset]');
+    const offset = state.richLineBreakInputOffset !== null && Number.isFinite(Number(state.richLineBreakInputOffset))
+      ? Number(state.richLineBreakInputOffset)
+      : Number(activeAnchor?.dataset?.sourceOffset);
+    if (!Number.isFinite(offset)) return false;
+    if (event?.inputType && !String(event.inputType).startsWith('insert')) return false;
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    if (offset <= 0 || offset > markdown.length || markdown[offset - 1] !== '\n') return false;
+    const block = renderedBlockForSourceOffset(els.rich, offset);
+    if (!block?.matches?.('p, h1, h2, h3, h4, h5, h6')) return false;
+    const insert = richLineBreakCaretInputText(event, block, markdown);
+    if (!insert || insert.includes('\n')) return false;
+    state.richLineBreakInputOffset = null;
+    applySourceTransaction({
+      from: offset,
+      to: offset,
+      insert,
+      selectionAfter: {
+        anchor: offset + insert.length,
+        focus: offset + insert.length,
+        affinity: 'after',
+      },
+    }, 'rich-line-break-caret-input');
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richLineBreakCaretInputText(event, block, markdown) {
+    if (typeof event?.data === 'string' && event.data) {
+      return stripRichCaretTokens(normalizeNewlines(event.data));
+    }
+    const start = numericData(block, 'sourceStart');
+    const end = numericData(block, 'sourceEnd');
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return '';
+    const previousLine = markdown.slice(start, end);
+    if (!/[ \t]{2}$/.test(previousLine)) return '';
+    const previousVisible = previousLine.replace(/[ \t]{2}$/, '');
+    const current = stripRichCaretTokens(serializeInlineChildren(block));
+    if (!current.endsWith('\n')) return '';
+    const beforeBreak = current.slice(0, -1);
+    if (!beforeBreak.startsWith(previousVisible)) return '';
+    return beforeBreak.slice(previousVisible.length).replace(/[ \t]+$/, '').trimStart();
+  }
+
   function onRichBeforeInput(event) {
+    if (handleRichInlineSourceBeforeInput(event)) return;
     if (event.defaultPrevented || !isRichBeforeInputContext(event)) return;
     if (shouldSnapshotRichBeforeInput(event)) {
       pushRichUndoSnapshot('delete');
       state.richUndoPreserveNextInput = true;
+    }
+    if (isRichPlainTextInsertInput(event) && handleRichInlineBoundaryTextInput(event)) {
+      return;
+    }
+    if (isRichPlainTextInsertInput(event) && handleRichPlainTextInput(event)) {
+      return;
+    }
+    if ((event.inputType === 'deleteContentBackward' || event.inputType === 'deleteContentForward') && handleRichInlineBoundaryDelete(event)) {
+      return;
+    }
+    if ((event.inputType === 'deleteContentBackward' || event.inputType === 'deleteContentForward') && handleRichTableBlockBoundaryDelete(event)) {
+      return;
+    }
+    if ((event.inputType === 'deleteContentBackward' || event.inputType === 'deleteContentForward') && handleRichTextBlockBoundaryDelete(event)) {
+      return;
+    }
+    if ((event.inputType === 'deleteContentBackward' || event.inputType === 'deleteContentForward') && handleRichListItemBoundaryDelete(event)) {
+      return;
+    }
+    if ((event.inputType === 'deleteContentBackward' || event.inputType === 'deleteContentForward') && handleRichListBlockBoundaryDelete(event)) {
+      return;
+    }
+    if ((event.inputType === 'deleteContentBackward' || event.inputType === 'deleteContentForward') && handleRichPlainTextDelete(event)) {
+      return;
+    }
+    if (event.inputType === 'deleteByCut' || event.inputType === 'deleteContent') {
+      if (handleRichPlainTextSelectionReplacement(event, '', 'rich-selection-cut')) return;
+      if (guardUnsupportedRichSelectionMutationFallback(event)) return;
     }
     if (event.inputType === 'insertParagraph') {
       handleRichEnter(event);
@@ -920,9 +1400,66 @@ flowchart TD
     }
     if (event.inputType === 'insertLineBreak') {
       event.preventDefault();
-      insertRichLineBreak();
-      syncRichMarkdownFromDom('rich-input');
+      if (handleRichLineBreakTransaction({ pushUndo: true })) return;
+      if (insertRichLineBreak()) syncRichMarkdownFromDom('rich-input');
     }
+  }
+
+  function handleRichInlineSourceBeforeInput(event) {
+    if (event.defaultPrevented || state.mode !== 'rich' || state.richComposing) return false;
+    const inlineSource = richInlineSourceFromEventContext(event);
+    if (!inlineSource) return false;
+    const inputType = String(event.inputType || '');
+    if (!inputType.startsWith('insert') && !inputType.startsWith('delete')) return false;
+    if (applyRichInlineSourceInputTransaction(event, inlineSource, inputType)) return true;
+    captureRichInlineSourceUndoSnapshot(inlineSource, 'inline-source');
+    return false;
+  }
+
+  function applyRichInlineSourceInputTransaction(event, inlineSource, inputType) {
+    const sourceRange = richInlineSourceRange(inlineSource);
+    const selectionRange = richInlineSourceSelectionRange(inlineSource);
+    if (!sourceRange || !selectionRange) return false;
+    const source = stripRichCaretTokens(normalizeNewlines(inlineSource.textContent || ''));
+    let from = selectionRange.from;
+    let to = selectionRange.to;
+    let insert = '';
+
+    if (inputType === 'insertText' || inputType === 'insertReplacementText') {
+      if (typeof event.data !== 'string') return false;
+      insert = stripRichCaretTokens(normalizeNewlines(event.data));
+    } else if (inputType === 'deleteContentBackward') {
+      if (from === to) {
+        if (from <= 0) return false;
+        from = previousStringOffset(source, from);
+      }
+    } else if (inputType === 'deleteContentForward') {
+      if (from === to) {
+        if (to >= source.length) return false;
+        to = nextStringOffset(source, to);
+      }
+    } else {
+      return false;
+    }
+
+    event.preventDefault();
+    captureRichInlineSourceUndoSnapshot(inlineSource, 'inline-source');
+    applyActiveRichInlineSourceTransaction(inlineSource, {
+      from,
+      to,
+      insert,
+      sourceRange,
+      reason: `rich-inline-source-${inputType}`,
+    });
+    return true;
+  }
+
+  function captureRichInlineSourceUndoSnapshot(inlineSource, label) {
+    const active = state.richInlineSource;
+    if (!active || active.element !== inlineSource || active.undoCaptured) return false;
+    pushRichUndoSnapshot(label || 'inline-source');
+    active.undoCaptured = true;
+    return true;
   }
 
   function shouldSnapshotRichBeforeInput(event) {
@@ -931,8 +1468,1509 @@ flowchart TD
     return true;
   }
 
+  function isRichPlainTextInsertInput(event) {
+    return event.inputType === 'insertText' || event.inputType === 'insertReplacementText';
+  }
+
+  function handleRichInlineBoundaryTextInput(event) {
+    if (state.richComposing || typeof event.data !== 'string' || event.data === '') return false;
+    if (event.ctrlKey || event.metaKey || event.altKey) return false;
+    const selection = window.getSelection?.();
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return false;
+    if (nodeClosest(range.startContainer, '.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
+    const inlineElement = validRichInlineSourceElement(nodeElement(range.startContainer)?.closest?.(RICH_INLINE_SOURCE_SELECTOR));
+    if (!inlineElement) return false;
+    const block = richInlineEditBlockForRange(range);
+    if (!block || !isSameRichInlineEditBlock(inlineElement, block)) return false;
+
+    const offset = richInlineElementTextOffsetForRange(inlineElement, range);
+    const length = normalizeRichText(inlineElement.textContent || '').length;
+    const atStart = offset <= 0;
+    const atEnd = offset >= length;
+    if (!atStart && !atEnd) return false;
+
+    const sourceTransaction = richInlineBoundaryInsertTransaction(inlineElement, event.data, atStart ? 'before' : 'after');
+    if (sourceTransaction) {
+      event.preventDefault();
+      applySourceTransaction(sourceTransaction, 'rich-inline-boundary-insert');
+      suppressRichInlineActivation();
+      return true;
+    }
+
+    if (guardUnsupportedRichInlineBoundaryFallback(inlineElement, block)) {
+      event.preventDefault();
+      return true;
+    }
+
+    event.preventDefault();
+    const caretToken = richCaretToken();
+    const textNode = document.createTextNode(atStart ? `${event.data}${caretToken}` : `${event.data}${caretToken}`);
+    state.richSelectionLock = true;
+    if (atStart) inlineElement.before(textNode);
+    else inlineElement.after(textNode);
+    reparseRichInlineEditBlockContent(block, { caretToken });
+    configureRichEditableSurface();
+    syncRichMarkdownFromDom('rich-input');
+    state.richSelectionLock = false;
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function guardUnsupportedRichInlineBoundaryFallback(inlineElement, block) {
+    if (!inlineElement || !block || !els.rich.contains(block)) return false;
+    if (richTopLevelBlock(block)?.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) {
+      setStatus('この位置ではMarkdownソースへ変換できません');
+      suppressRichInlineActivation();
+      return true;
+    }
+    return false;
+  }
+
+  function handleRichInlineBoundaryDelete(event) {
+    const selection = window.getSelection?.();
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return false;
+    if (nodeClosest(range.startContainer, '.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
+    const direction = event.inputType === 'deleteContentBackward' ? 'before' : 'after';
+    const atom = richInlineBoundaryDeleteCandidate(range, direction);
+    if (!atom) return false;
+    const start = Number(atom.dataset.srcStart);
+    const end = Number(atom.dataset.srcEnd);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return false;
+    event.preventDefault();
+    applySourceTransaction({
+      from: start,
+      to: end,
+      insert: '',
+      selectionAfter: {
+        anchor: start,
+        focus: start,
+        affinity: 'before',
+      },
+    }, 'rich-inline-boundary-delete');
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richInlineBoundaryDeleteCandidate(range, direction) {
+    const direct = validRichInlineSourceElement(nodeElement(range.startContainer)?.closest?.('.rich-inline-atom'));
+    if (direct?.classList?.contains('rich-inline-atom')) return direct;
+    const adjacent = adjacentCaretNode(range.startContainer, range.startOffset, direction);
+    const atom = nodeElement(adjacent)?.closest?.('.rich-inline-atom');
+    return atom && els.rich.contains(atom) ? atom : null;
+  }
+
+  function handleRichHomeEndNavigation(event) {
+    if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return false;
+    const selection = window.getSelection?.();
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return false;
+    if (nodeClosest(range.startContainer, '.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
+    const editBlock = richInlineEditBlockForRange(range);
+    if (!editBlock || !els.rich.contains(editBlock)) return false;
+    const boundary = event.key === 'Home' ? 'start' : 'end';
+    const offset = richEditBlockBoundarySourceOffset(editBlock, boundary);
+    if (!Number.isFinite(offset)) return false;
+    event.preventDefault();
+    restoreRichCaretFromSourceSelection({
+      anchor: offset,
+      focus: offset,
+      affinity: boundary === 'start' ? 'before' : 'after',
+    });
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richEditBlockBoundarySourceOffset(editBlock, boundary) {
+    if (editBlock.tagName?.toLowerCase() === 'li') {
+      return richListItemBoundarySourceOffset(editBlock, boundary);
+    }
+    if (!editBlock.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) return NaN;
+    const start = numericData(editBlock, 'sourceStart');
+    const end = numericData(editBlock, 'sourceEnd');
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return NaN;
+    if (editBlock.tagName?.toLowerCase() === 'blockquote') {
+      return richQuoteBoundarySourceOffset(editBlock, boundary);
+    }
+    return boundary === 'start' ? start + sourceContentBaseOffset(editBlock) : end;
+  }
+
+  function richQuoteBoundarySourceOffset(blockquote, boundary) {
+    const start = numericData(blockquote, 'sourceStart');
+    const end = numericData(blockquote, 'sourceEnd');
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return NaN;
+    const raw = stripRichCaretTokens(state.markdown || '').slice(start, end);
+    const model = parseMarkdownQuoteSource(raw);
+    const first = model?.lines?.[0];
+    const last = model?.lines?.[model.lines.length - 1];
+    if (!first || !last) return NaN;
+    return boundary === 'start'
+      ? start + first.line.start + first.contentStart
+      : start + last.line.start + last.contentEnd;
+  }
+
+  function richListItemBoundarySourceOffset(item, boundary) {
+    const list = item.closest('ul, ol');
+    if (!list?.matches?.(RICH_SOURCE_BLOCK_SELECTOR) || item.parentElement !== list) return NaN;
+    const blockStart = numericData(list, 'sourceStart');
+    const blockEnd = numericData(list, 'sourceEnd');
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return NaN;
+    const raw = stripRichCaretTokens(state.markdown || '').slice(blockStart, blockEnd);
+    const sourceItems = flatListSourceItems(raw);
+    const items = Array.from(list.children).filter((child) => child.tagName?.toLowerCase() === 'li');
+    const itemIndex = items.indexOf(item);
+    if (itemIndex < 0 || sourceItems.length !== items.length) return NaN;
+    const sourceItem = sourceItems[itemIndex];
+    const contentLength = visibleTextFromListSourceItem(sourceItem).length;
+    const textOffset = boundary === 'start' ? 0 : contentLength;
+    return blockStart + sourceOffsetFromListItemTextOffset(sourceItem, textOffset);
+  }
+
+  function handleRichPlainTextInput(event) {
+    if (state.richComposing || typeof event.data !== 'string' || event.data === '') return false;
+    if (event.ctrlKey || event.metaKey || event.altKey) return false;
+    if (handleRichPlainTextSelectionReplacement(event, event.data, 'rich-selection-insert')) return true;
+    if (guardUnsupportedRichSelectionMutationFallback(event)) return true;
+    const range = currentCollapsedRichRange();
+    if (!range || !isSourceTransactionTextRange(range)) return false;
+    if (handleRichBlockMarkdownShortcutInput(event, range)) return true;
+    const point = activeRichTransactionBlankPoint() || richPlainTextSourcePointFromRange(range);
+    if (!point) return false;
+    if (handleRichBlockMarkdownShortcutSourceInput(event, point)) return true;
+    if (shouldLetDomHandleMarkdownShortcutInput(range, event.data)) return false;
+    event.preventDefault();
+    const input = point.tableCell
+      ? markdownTableCellTextFromPlainText(event.data)
+      : point.quoteBlock
+        ? markdownQuoteTextFromPlainText(event.data)
+        : stripRichCaretTokens(event.data);
+    const trailingPrefix = point.trailingParagraph && (state.markdown || '').length ? '\n\n' : '';
+    const insert = point.blankParagraph ? `${input}\n\n` : `${trailingPrefix}${input}`;
+    const nextOffset = point.offset + trailingPrefix.length + input.length;
+    applySourceTransaction({
+      from: point.offset,
+      to: point.offset,
+      insert,
+      selectionAfter: {
+        anchor: nextOffset,
+        focus: nextOffset,
+        affinity: 'after',
+      },
+    }, 'rich-text-insert');
+    if (point.blankParagraph) state.richTransactionBlank = null;
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function handleRichBlockMarkdownShortcutSourceInput(event, point) {
+    const block = renderedBlockForSourceOffset(els.rich, point.offset);
+    if (!block || block.tagName?.toLowerCase() !== 'p' || !block.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) return false;
+    const start = numericData(block, 'sourceStart');
+    const end = numericData(block, 'sourceEnd');
+    const base = sourceContentBaseOffset(block);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || point.offset < start || point.offset > end) return false;
+    const source = stripRichCaretTokens(state.markdown || els.source.value || '');
+    const raw = source.slice(start, end);
+    const local = Math.max(0, Math.min(raw.length, point.offset - start - base));
+    const next = `${raw.slice(0, local)}${event.data || ''}${raw.slice(local)}`;
+    const replacement = richBlockMarkdownTriggerReplacement(next, { allowBareMath: false });
+    if (!replacement) return false;
+    event.preventDefault();
+    return applyRichBlockMarkdownTriggerTransaction(block, next, { allowBareMath: false });
+  }
+
+  function handleRichBlockMarkdownShortcutInput(event, range) {
+    const block = richParagraphBlockForShortcutRange(range);
+    if (!block || block.closest('li') || !block.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) return false;
+    const current = normalizeRichText(block.textContent || '');
+    const caretOffset = getCaretCharacterOffsetWithin(block, window.getSelection?.());
+    const next = `${current.slice(0, caretOffset)}${event.data || ''}${current.slice(caretOffset)}`;
+    if (caretOffset !== current.length) return false;
+    const replacement = richBlockMarkdownTriggerReplacement(next, { allowBareMath: false });
+    if (!replacement) return false;
+    event.preventDefault();
+    return applyRichBlockMarkdownTriggerTransaction(block, next, { allowBareMath: false });
+  }
+
+  function richParagraphBlockForShortcutRange(range) {
+    const direct = nodeClosest(range?.startContainer, 'p');
+    if (direct && els.rich.contains(direct)) return direct;
+    const point = richPlainTextSourcePointFromRange(range);
+    if (!point) return null;
+    const block = renderedBlockForSourceOffset(els.rich, point.offset);
+    return block?.tagName?.toLowerCase() === 'p' ? block : null;
+  }
+
+  function applySyncedRichBlockMarkdownShortcutAfterInput() {
+    const selection = window.getSelection?.();
+    const selectedBlock = selection?.rangeCount && els.rich.contains(selection.anchorNode)
+      ? nodeClosest(selection.anchorNode, 'p')
+      : null;
+    const candidates = selectedBlock ? [selectedBlock] : Array.from(els.rich.querySelectorAll(`p${RICH_SOURCE_BLOCK_SELECTOR}`));
+    for (const block of candidates) {
+      if (!block || block.closest('li') || !block.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) continue;
+      const text = normalizeRichText(block.textContent || '');
+      const replacement = richBlockMarkdownTriggerReplacement(text, { allowBareMath: false });
+      if (!replacement) continue;
+      return applyRichBlockMarkdownTriggerTransaction(block, text, { allowBareMath: false });
+    }
+    return false;
+  }
+
+  function applySyncedMarkdownShortcutFromSource() {
+    const markdown = stripRichCaretTokens(els.source?.value || state.markdown || '');
+    if (markdown !== stripRichCaretTokens(state.markdown || '')) {
+      state.markdown = markdown;
+      if (els.source) els.source.value = markdown;
+    }
+    const selection = window.getSelection?.();
+    const sourcePoint = selection?.rangeCount && els.rich.contains(selection.anchorNode)
+      ? domPointToSourceOffset(selection.anchorNode, selection.anchorOffset)
+      : null;
+    const blocks = buildBlockModel(markdown).filter((block) => block.type === 'paragraph');
+    const selected = Number.isFinite(sourcePoint?.offset)
+      ? blocks.find((block) => block.start <= sourcePoint.offset && sourcePoint.offset <= block.end)
+      : null;
+    const candidates = selected ? [selected, ...blocks.filter((block) => block !== selected)] : blocks;
+
+    for (const block of candidates) {
+      const replacement = richBlockMarkdownTriggerReplacement(block.raw, { allowBareMath: false });
+      if (!replacement) continue;
+      const selectionOffset = block.start + (Number.isFinite(replacement.selectionOffset)
+        ? replacement.selectionOffset
+        : replacement.insert.length);
+      state.richInputUsedSourceTransaction = true;
+      return applySourceTransaction({
+        from: block.start,
+        to: block.end,
+        insert: replacement.insert,
+        selectionAfter: {
+          anchor: selectionOffset,
+          focus: selectionOffset,
+          affinity: 'after',
+        },
+        blankParagraphAt: replacement.blankParagraphAt ? block.start + replacement.insert.length : undefined,
+      }, `rich-markdown-trigger-${replacement.kind}-synced`);
+    }
+    return false;
+  }
+
+  function scheduleSyncedMarkdownShortcutFromSource() {
+    window.setTimeout(() => {
+      if (state.mode !== 'rich' || state.richComposing || state.richInlineSource?.element) return;
+      applySyncedMarkdownShortcutFromSource();
+    }, 0);
+  }
+
+  function handleRichPlainTextDelete(event) {
+    if (handleRichPlainTextSelectionReplacement(event, '', 'rich-selection-delete')) return true;
+    if (guardUnsupportedRichSelectionMutationFallback(event)) return true;
+    const range = currentCollapsedRichRange();
+    if (!range || !isSourceTransactionTextRange(range)) return false;
+    const backward = event.inputType === 'deleteContentBackward' || event.key === 'Backspace';
+    if (!backward && event.inputType !== 'deleteContentForward' && event.key !== 'Delete') return false;
+    const lineBreakDeletion = richLineBreakCaretDeleteTransaction(window.getSelection?.(), backward);
+    if (lineBreakDeletion) {
+      event.preventDefault();
+      state.richLineBreakInputOffset = null;
+      applySourceTransaction(lineBreakDeletion, 'rich-line-break-caret-delete');
+      suppressRichInlineActivation();
+      return true;
+    }
+    const point = richPlainTextSourcePointFromRange(range);
+    if (!point) return false;
+    const quoteDeletion = richQuoteBoundaryDeleteTransaction(point, backward);
+    if (quoteDeletion) {
+      event.preventDefault();
+      applySourceTransaction(quoteDeletion, backward ? 'rich-quote-line-merge-backward' : 'rich-quote-line-merge-forward');
+      suppressRichInlineActivation();
+      return true;
+    }
+    const deletionRange = richPlainTextDeletionRange(point, backward);
+    if (!deletionRange) return false;
+    const { from, to } = deletionRange;
+    if (from < point.contentStart || to > point.contentEnd || from < 0 || to <= from) return false;
+    event.preventDefault();
+    applySourceTransaction({
+      from,
+      to,
+      insert: '',
+      selectionAfter: {
+        anchor: from,
+        focus: from,
+        affinity: backward ? 'before' : 'after',
+      },
+    }, backward ? 'rich-text-delete-backward' : 'rich-text-delete-forward');
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richPlainTextDeletionRange(point, backward) {
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    if (point.tableCell) {
+      if (backward && markdown.slice(point.offset - 2, point.offset) === '\\|') {
+        return { from: point.offset - 2, to: point.offset };
+      }
+      if (!backward && markdown.slice(point.offset, point.offset + 2) === '\\|') {
+        return { from: point.offset, to: point.offset + 2 };
+      }
+    }
+    if (backward && /[ \t]{2}\n$/.test(markdown.slice(point.offset - 3, point.offset))) {
+      return { from: point.offset - 3, to: point.offset };
+    }
+    if (backward && /[ \t]{2}\n/.test(markdown.slice(point.offset - 1, point.offset + 2))) {
+      return { from: point.offset - 1, to: point.offset + 2 };
+    }
+    if (backward && /[ \t]{2}\n/.test(markdown.slice(point.offset - 2, point.offset + 1))) {
+      return { from: point.offset - 2, to: point.offset + 1 };
+    }
+    if (!backward && /[ \t]{2}\n/.test(markdown.slice(point.offset, point.offset + 3))) {
+      return { from: point.offset, to: point.offset + 3 };
+    }
+    return backward
+      ? { from: point.offset - 1, to: point.offset }
+      : { from: point.offset, to: point.offset + 1 };
+  }
+
+  function handleRichTextBlockBoundaryDelete(event) {
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
+    const selection = window.getSelection?.();
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return false;
+    if (nodeClosest(range.startContainer, '.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
+    const backward = event.inputType === 'deleteContentBackward' || event.key === 'Backspace';
+    if (!backward && event.inputType !== 'deleteContentForward' && event.key !== 'Delete') return false;
+    const transaction = richTextBlockBoundaryDeleteTransaction(range, backward);
+    if (!transaction) return false;
+    event.preventDefault();
+    applySourceTransaction(transaction, backward ? 'rich-block-boundary-delete-backward' : 'rich-block-boundary-delete-forward');
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richTextBlockBoundaryDeleteTransaction(range, backward) {
+    if (!range?.collapsed || !isSourceTransactionTextRange(range)) return null;
+    const block = nodeClosest(range.startContainer, 'p, h1, h2, h3, h4, h5, h6, blockquote');
+    if (!block?.matches?.(RICH_SOURCE_BLOCK_SELECTOR) || !els.rich.contains(block) || block.closest('li')) return null;
+    const point = richPlainTextSourcePointFromRange(range);
+    if (!point || !Number.isFinite(point.offset)) return null;
+    const blockStart = numericData(block, 'sourceStart');
+    const blockEnd = numericData(block, 'sourceEnd');
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return null;
+    const isQuoteBlock = block.tagName?.toLowerCase() === 'blockquote';
+    if (isQuoteBlock) {
+      if (backward || point.offset !== blockEnd) return null;
+    } else {
+      if (backward && point.offset !== point.contentStart) return null;
+      if (!backward && point.offset !== point.contentEnd) return null;
+    }
+
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    const adjacent = backward ? adjacentSourceBackedBlock(block, 'previous') : adjacentSourceBackedBlock(block, 'next');
+    if (!adjacent) return null;
+    const adjacentStart = numericData(adjacent, 'sourceStart');
+    const adjacentEnd = numericData(adjacent, 'sourceEnd');
+    if (!Number.isFinite(adjacentStart) || !Number.isFinite(adjacentEnd)) return null;
+    const from = backward ? adjacentEnd : blockEnd;
+    const to = backward ? blockStart : adjacentStart;
+    if (from < 0 || to <= from || to > markdown.length || !/^\n{1,2}$/.test(markdown.slice(from, to))) return null;
+    return {
+      from,
+      to,
+      insert: '',
+      selectionAfter: {
+        anchor: from,
+        focus: from,
+        affinity: backward ? 'before' : 'after',
+      },
+    };
+  }
+
+  function handleRichTableBlockBoundaryDelete(event) {
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
+    const selection = window.getSelection?.();
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return false;
+    if (nodeClosest(range.startContainer, '.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
+    const backward = event.inputType === 'deleteContentBackward' || event.key === 'Backspace';
+    if (!backward && event.inputType !== 'deleteContentForward' && event.key !== 'Delete') return false;
+    const transaction = richTableBlockBoundaryDeleteTransaction(range, backward);
+    if (!transaction) return false;
+    event.preventDefault();
+    applySourceTransaction(transaction, backward ? 'rich-table-boundary-delete-backward' : 'rich-table-boundary-delete-forward');
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richTableBlockBoundaryDeleteTransaction(range, backward) {
+    if (!range?.collapsed) return null;
+    const cell = nodeClosest(range.startContainer, 'td, th');
+    if (cell && els.rich.contains(cell)) {
+      return richTableCellParagraphBoundaryDeleteTransaction(cell, range, backward);
+    }
+    const paragraph = nodeClosest(range.startContainer, 'p');
+    if (paragraph && els.rich.contains(paragraph)) {
+      return richParagraphTableBoundaryDeleteTransaction(paragraph, range, backward);
+    }
+    return null;
+  }
+
+  function richParagraphTableBoundaryDeleteTransaction(paragraph, range, backward) {
+    if (!isRichSourceParagraphBlock(paragraph) || !isSourceTransactionTextRange(range)) return null;
+    const point = richPlainTextSourcePointFromRange(range);
+    if (!point || !Number.isFinite(point.offset)) return null;
+    if (backward) {
+      if (point.offset !== point.contentStart) return null;
+      const table = adjacentSourceBackedBlock(paragraph, 'previous');
+      return isRichSourceTableBlock(table) ? richTableBeforeParagraphMergeTransaction(table, paragraph) : null;
+    }
+    if (point.offset !== point.contentEnd) return null;
+    const table = adjacentSourceBackedBlock(paragraph, 'next');
+    return isRichSourceTableBlock(table) ? richParagraphBeforeTableMergeTransaction(paragraph, table) : null;
+  }
+
+  function richTableCellParagraphBoundaryDeleteTransaction(cell, range, backward) {
+    const table = cell?.closest?.('table');
+    if (!isRichSourceTableBlock(table)) return null;
+    const point = richTableSourcePointFromRange(cell, range);
+    if (!point || !Number.isFinite(point.offset)) return null;
+    if (backward) {
+      if (cell !== richFirstTableCell(table) || point.offset !== point.contentStart) return null;
+      const paragraph = adjacentSourceBackedBlock(table, 'previous');
+      return isRichSourceParagraphBlock(paragraph) ? richParagraphBeforeTableMergeTransaction(paragraph, table) : null;
+    }
+    if (cell !== richLastTableCell(table) || point.offset !== point.contentEnd) return null;
+    const paragraph = adjacentSourceBackedBlock(table, 'next');
+    return isRichSourceParagraphBlock(paragraph) ? richTableBeforeParagraphMergeTransaction(table, paragraph) : null;
+  }
+
+  function richParagraphBeforeTableMergeTransaction(paragraph, table) {
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    const paragraphSource = richSourceParagraphForTableMerge(paragraph, markdown);
+    const firstCell = richFirstTableCell(table);
+    const cellRange = firstCell ? richTableCellSourceRange(firstCell) : null;
+    if (!paragraphSource || !cellRange || cellRange.table !== table) return null;
+    if (!/^\n{1,2}$/.test(markdown.slice(paragraphSource.end, cellRange.blockStart))) return null;
+    const tablePrefix = markdown.slice(cellRange.blockStart, cellRange.contentStart);
+    const insert = `${tablePrefix}${paragraphSource.cellText}`;
+    const selectionOffset = paragraphSource.start + insert.length;
+    return {
+      from: paragraphSource.start,
+      to: cellRange.contentStart,
+      insert,
+      selectionAfter: {
+        anchor: selectionOffset,
+        focus: selectionOffset,
+        affinity: 'after',
+      },
+    };
+  }
+
+  function richTableBeforeParagraphMergeTransaction(table, paragraph) {
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    const paragraphSource = richSourceParagraphForTableMerge(paragraph, markdown);
+    const lastCell = richLastTableCell(table);
+    const cellRange = lastCell ? richTableCellSourceRange(lastCell) : null;
+    if (!paragraphSource || !cellRange || cellRange.table !== table) return null;
+    if (!/^\n{1,2}$/.test(markdown.slice(cellRange.blockEnd, paragraphSource.start))) return null;
+    const tableTail = markdown.slice(cellRange.contentEnd, cellRange.blockEnd);
+    const insert = `${paragraphSource.cellText}${tableTail}`;
+    const selectionOffset = cellRange.contentEnd + paragraphSource.cellText.length;
+    return {
+      from: cellRange.contentEnd,
+      to: paragraphSource.end,
+      insert,
+      selectionAfter: {
+        anchor: selectionOffset,
+        focus: selectionOffset,
+        affinity: 'after',
+      },
+    };
+  }
+
+  function richSourceParagraphForTableMerge(paragraph, markdown) {
+    if (!isRichSourceParagraphBlock(paragraph)) return null;
+    const start = numericData(paragraph, 'sourceStart');
+    const end = numericData(paragraph, 'sourceEnd');
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || end > markdown.length) return null;
+    const raw = markdown.slice(start, end);
+    return {
+      start,
+      end,
+      cellText: markdownTableCellTextFromPlainText(raw),
+    };
+  }
+
+  function richFirstTableCell(table) {
+    return table?.querySelector?.('th, td') || null;
+  }
+
+  function richLastTableCell(table) {
+    const cells = Array.from(table?.querySelectorAll?.('th, td') || []);
+    return cells.length ? cells[cells.length - 1] : null;
+  }
+
+  function isRichSourceParagraphBlock(block) {
+    return block?.tagName?.toLowerCase() === 'p'
+      && block.matches?.(RICH_SOURCE_BLOCK_SELECTOR)
+      && els.rich.contains(block)
+      && !block.closest('li');
+  }
+
+  function isRichSourceTableBlock(block) {
+    return block?.tagName?.toLowerCase() === 'table'
+      && block.matches?.(RICH_SOURCE_BLOCK_SELECTOR)
+      && els.rich.contains(block);
+  }
+
+  function adjacentSourceBackedBlock(block, direction) {
+    const siblingProperty = direction === 'previous' ? 'previousElementSibling' : 'nextElementSibling';
+    let sibling = block?.[siblingProperty] || null;
+    while (sibling) {
+      if (sibling.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) return sibling;
+      if (!isIgnorableRichBoundaryElement(sibling)) return null;
+      sibling = sibling[siblingProperty];
+    }
+    return null;
+  }
+
+  function handleRichListItemBoundaryDelete(event) {
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
+    const selection = window.getSelection?.();
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return false;
+    if (nodeClosest(range.startContainer, '.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
+    const backward = event.inputType === 'deleteContentBackward' || event.key === 'Backspace';
+    if (!backward && event.inputType !== 'deleteContentForward' && event.key !== 'Delete') return false;
+    const transaction = richListItemBoundaryDeleteTransaction(range, backward);
+    if (!transaction) return false;
+    event.preventDefault();
+    applySourceTransaction(transaction, backward ? 'rich-list-item-boundary-delete-backward' : 'rich-list-item-boundary-delete-forward');
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richListItemBoundaryDeleteTransaction(range, backward) {
+    if (!range?.collapsed) return null;
+    const item = richListItemFromRange(range);
+    const list = item?.closest?.('ul, ol');
+    if (!item || !list?.matches?.(RICH_SOURCE_BLOCK_SELECTOR) || item.parentElement !== list) return null;
+    if (item.querySelector('.rich-inline-source')) return null;
+    const point = richListSourcePointFromRange(item, range);
+    if (!point || !Number.isFinite(point.offset)) return null;
+    const blockStart = numericData(list, 'sourceStart');
+    const blockEnd = numericData(list, 'sourceEnd');
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return null;
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    const raw = markdown.slice(blockStart, blockEnd);
+    const sourceItems = flatListSourceItems(raw);
+    const items = Array.from(list.children).filter((child) => child.tagName?.toLowerCase() === 'li');
+    const itemIndex = items.indexOf(item);
+    if (itemIndex < 0 || sourceItems.length !== items.length) return null;
+    const sourceItem = sourceItems[itemIndex];
+    const neighbor = sourceItems[itemIndex + (backward ? -1 : 1)];
+    if (!sourceItem || !neighbor) return null;
+    const itemContentStart = blockStart + sourceItem.lines[0].start + sourceItem.parsed.prefix.length;
+    const itemContentEnd = blockStart + listSourceItemTextEnd(sourceItem);
+    if (backward && point.offset !== itemContentStart) return null;
+    if (!backward && point.offset !== itemContentEnd) return null;
+    const from = backward
+      ? blockStart + listSourceItemTextEnd(neighbor)
+      : itemContentEnd;
+    const to = backward
+      ? itemContentStart
+      : blockStart + neighbor.lines[0].start + neighbor.parsed.prefix.length;
+    const removed = markdown.slice(from, to);
+    if (from < blockStart || to > blockEnd || to <= from || !removed.startsWith('\n') || removed.slice(1).includes('\n')) return null;
+    return {
+      from,
+      to,
+      insert: '',
+      selectionAfter: {
+        anchor: from,
+        focus: from,
+        affinity: backward ? 'before' : 'after',
+      },
+    };
+  }
+
+  function handleRichListBlockBoundaryDelete(event) {
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
+    const selection = window.getSelection?.();
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return false;
+    if (nodeClosest(range.startContainer, '.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
+    const backward = event.inputType === 'deleteContentBackward' || event.key === 'Backspace';
+    if (!backward && event.inputType !== 'deleteContentForward' && event.key !== 'Delete') return false;
+    const transaction = richListBlockBoundaryDeleteTransaction(range, backward);
+    if (!transaction) return false;
+    event.preventDefault();
+    applySourceTransaction(transaction, backward ? 'rich-list-boundary-delete-backward' : 'rich-list-boundary-delete-forward');
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richListBlockBoundaryDeleteTransaction(range, backward) {
+    if (!range?.collapsed) return null;
+    const item = richListItemFromRange(range);
+    const list = item?.closest?.('ul, ol');
+    if (!item || !list?.matches?.(RICH_SOURCE_BLOCK_SELECTOR) || item.parentElement !== list) return null;
+    if (item.querySelector('.rich-inline-source')) return null;
+    const point = richListSourcePointFromRange(item, range);
+    if (!point || !Number.isFinite(point.offset)) return null;
+    const blockStart = numericData(list, 'sourceStart');
+    const blockEnd = numericData(list, 'sourceEnd');
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return null;
+    const raw = stripRichCaretTokens(state.markdown || '').slice(blockStart, blockEnd);
+    const sourceItems = flatListSourceItems(raw);
+    const items = Array.from(list.children).filter((child) => child.tagName?.toLowerCase() === 'li');
+    const itemIndex = items.indexOf(item);
+    if (itemIndex < 0 || sourceItems.length !== items.length) return null;
+    if (backward) {
+      if (itemIndex !== 0 || point.offset !== point.contentStart) return null;
+    } else if (itemIndex !== sourceItems.length - 1 || point.offset !== point.contentEnd) {
+      return null;
+    }
+
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    const adjacent = backward ? adjacentSourceBackedBlock(list, 'previous') : adjacentSourceBackedBlock(list, 'next');
+    if (!adjacent) return null;
+    const adjacentStart = numericData(adjacent, 'sourceStart');
+    const adjacentEnd = numericData(adjacent, 'sourceEnd');
+    if (!Number.isFinite(adjacentStart) || !Number.isFinite(adjacentEnd)) return null;
+    const from = backward ? adjacentEnd : blockEnd;
+    const to = backward ? blockStart : adjacentStart;
+    if (from < 0 || to <= from || to > markdown.length || !/^\n{1,2}$/.test(markdown.slice(from, to))) return null;
+    return {
+      from,
+      to,
+      insert: '',
+      selectionAfter: {
+        anchor: from,
+        focus: from,
+        affinity: backward ? 'before' : 'after',
+      },
+    };
+  }
+
+  function handleRichPlainTextSelectionReplacement(event, insert, reason) {
+    const selection = window.getSelection?.();
+    const tableRange = richTableTextReplacementRangeFromSelection(selection);
+    const quoteRange = tableRange ? null : richQuoteTextReplacementRangeFromSelection(selection);
+    const rawRange = tableRange || quoteRange || richPlainTextTransactionRangeFromSelection(selection);
+    const replacementRange = rawRange?.from !== rawRange?.to
+      ? expandSourceRangeToIntersectingInlineAtoms(rawRange)
+      : rawRange;
+    if (!replacementRange || replacementRange.from === replacementRange.to) return false;
+
+    event.preventDefault();
+    pushRichUndoSnapshot(reason || 'selection');
+    const replacement = tableRange
+      ? markdownTableCellTextFromPlainText(insert || '')
+      : quoteRange
+        ? markdownQuoteTextFromPlainText(insert || '')
+        : stripRichCaretTokens(insert || '');
+    const nextOffset = replacementRange.from + replacement.length;
+    applySourceTransaction({
+      from: replacementRange.from,
+      to: replacementRange.to,
+      insert: replacement,
+      selectionAfter: {
+        anchor: nextOffset,
+        focus: nextOffset,
+        affinity: 'after',
+      },
+    }, reason || 'rich-selection-replace');
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richPlainTextTransactionRangeFromSelection(selection) {
+    const range = richSelectionRange(selection);
+    if (!range) return null;
+    if (isRichSourceTransactionSelectionEndpointBlocked(range.startContainer)) return null;
+    if (isRichSourceTransactionSelectionEndpointBlocked(range.endContainer)) return null;
+
+    if (range.collapsed) {
+      const lineBreakRange = activeRichLineBreakCaretRange(selection);
+      if (lineBreakRange) return lineBreakRange;
+      if (!isSourceTransactionTextRange(range)) return null;
+      const point = richPlainTextSourcePointFromRange(range);
+      if (!point || !Number.isFinite(point.offset)) return null;
+      return {
+        from: point.offset,
+        to: point.offset,
+        blankParagraph: Boolean(point.blankParagraph),
+        trailingParagraph: Boolean(point.trailingParagraph),
+      };
+    }
+
+    const sourceSelection = domSelectionToSourceSelection(selection);
+    if (!sourceSelection || !Number.isFinite(sourceSelection.anchor) || !Number.isFinite(sourceSelection.focus)) return null;
+    const expanded = expandSourceRangeToIntersectingInlineAtoms({
+      from: Math.min(sourceSelection.anchor, sourceSelection.focus),
+      to: Math.max(sourceSelection.anchor, sourceSelection.focus),
+    });
+    const { from, to } = expanded;
+    if (to < from) return null;
+    return { from, to };
+  }
+
+  function richLineBreakCaretDeleteTransaction(selection, backward) {
+    if (!backward) return null;
+    const range = activeRichLineBreakCaretRange(selection);
+    if (!range) return null;
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    const to = range.from;
+    const from = to - 3;
+    if (from < 0 || markdown[to - 1] !== '\n' || !/[ \t]{2}$/.test(markdown.slice(from, to - 1))) return null;
+    return {
+      from,
+      to,
+      insert: '',
+      selectionAfter: {
+        anchor: from,
+        focus: from,
+        affinity: 'before',
+      },
+    };
+  }
+
+  function expandSourceRangeToIntersectingInlineAtoms(range) {
+    if (!range || !Number.isFinite(range.from) || !Number.isFinite(range.to) || range.to <= range.from) return range;
+    let from = range.from;
+    let to = range.to;
+    for (const atom of Array.from(els.rich.querySelectorAll('.rich-inline-atom[data-src-start][data-src-end]'))) {
+      const start = Number(atom.dataset.srcStart);
+      const end = Number(atom.dataset.srcEnd);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+      if (from < end && to > start) {
+        from = Math.min(from, start);
+        to = Math.max(to, end);
+      }
+    }
+    return { ...range, from, to };
+  }
+
+  function activeRichLineBreakCaretRange(selection) {
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return null;
+    const storedOffset = state.richLineBreakInputOffset !== null && Number.isFinite(Number(state.richLineBreakInputOffset))
+      ? Number(state.richLineBreakInputOffset)
+      : NaN;
+    const activeAnchor = nodeClosest(range.startContainer, '.rich-line-break-caret-anchor')
+      || (Number.isFinite(storedOffset) ? richLineBreakCaretAnchorForOffset(storedOffset) : null);
+    const offset = Number.isFinite(storedOffset)
+      ? storedOffset
+      : Number(activeAnchor?.dataset?.sourceOffset);
+    if (!activeAnchor || !els.rich.contains(activeAnchor) || !Number.isFinite(offset)) return null;
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    if (offset <= 0 || offset > markdown.length || markdown[offset - 1] !== '\n') return null;
+    return { from: offset, to: offset, lineBreakCaret: true };
+  }
+
+  function richLineBreakCaretAnchorForOffset(offset) {
+    return Array.from(els.rich?.querySelectorAll?.('.rich-line-break-caret-anchor[data-source-offset]') || [])
+      .find((anchor) => Number(anchor.dataset.sourceOffset) === offset) || null;
+  }
+
+  function isRichSourceTransactionSelectionEndpointBlocked(node) {
+    return Boolean(nodeClosest(node, '.rich-inline-source, .rich-source-editor, .code-language-input, td, th'));
+  }
+
+  function currentCollapsedRichRange() {
+    const selection = window.getSelection?.();
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return null;
+    if (nodeClosest(range.startContainer, '.rich-inline-source, .rich-source-editor, .code-language-input')) return null;
+    return range;
+  }
+
+  function isSourceTransactionTextRange(range) {
+    if (!range?.collapsed) return false;
+    if (nodeClosest(range.startContainer, '.rich-inline-atom, .rich-source-editor, .mermaid-diagram, pre.code-block, .math-display, .toc')) return false;
+    const editBlock = richInlineEditBlockForRange(range);
+    if (!editBlock || !els.rich.contains(editBlock)) return false;
+    if (editBlock.matches('p[data-rich-trailing="true"]')) return true;
+    if (editBlock.matches('p[data-rich-transaction-blank][data-source-gap]')) return true;
+    if (editBlock.matches('td, th')) return Boolean(richTableSourcePointFromRange(editBlock, range));
+    if (editBlock.matches('blockquote')) return Boolean(richQuoteSourcePointFromRange(editBlock, range));
+    if (editBlock.matches('li')) {
+      const list = editBlock.parentElement;
+      if (!list?.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) return false;
+      if (editBlock.querySelector('.rich-inline-source, ul, ol')) return false;
+      return true;
+    }
+    return Boolean(editBlock.matches?.('p, h1, h2, h3, h4, h5, h6') && editBlock.matches(RICH_SOURCE_BLOCK_SELECTOR));
+  }
+
+  function richPlainTextSourcePointFromRange(range) {
+    const lineBreakAnchor = nodeClosest(range.startContainer, '.rich-line-break-caret-anchor');
+    if (lineBreakAnchor && els.rich.contains(lineBreakAnchor)) {
+      const editBlock = richInlineEditBlockForRange(range);
+      const sourceBlock = nodeClosest(lineBreakAnchor, RICH_SOURCE_BLOCK_SELECTOR);
+      if (!editBlock || !sourceBlock) return null;
+      const blockStart = numericData(sourceBlock, 'sourceStart');
+      const baseOffset = sourceContentBaseOffset(sourceBlock);
+      const before = document.createRange();
+      before.selectNodeContents(editBlock);
+      try {
+        before.setEndBefore(lineBreakAnchor);
+      } catch (_) {
+        return null;
+      }
+      const anchorBefore = document.createRange();
+      anchorBefore.selectNodeContents(lineBreakAnchor);
+      try {
+        anchorBefore.setEnd(range.startContainer, range.startOffset);
+      } catch (_) {
+        return null;
+      }
+      const localSource = stripRichCaretTokens(serializeInlineNodes(Array.from(before.cloneContents().childNodes)));
+      const anchorSource = normalizeRichText(anchorBefore.toString()).replace(/\u200b/g, '');
+      return {
+        offset: blockStart + baseOffset + localSource.length + anchorSource.length,
+        contentStart: blockStart + baseOffset,
+        contentEnd: numericData(sourceBlock, 'sourceEnd'),
+      };
+    }
+
+    const trailingParagraph = nodeClosest(range.startContainer, 'p[data-rich-trailing="true"]');
+    if (trailingParagraph && els.rich.contains(trailingParagraph)) {
+      const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+      const before = range.cloneRange();
+      before.selectNodeContents(trailingParagraph);
+      try {
+        before.setEnd(range.startContainer, range.startOffset);
+      } catch (_) {
+        return null;
+      }
+      const localSource = stripRichCaretTokens(serializeInlineNodes(Array.from(before.cloneContents().childNodes)));
+      const gap = markdown.length;
+      return {
+        offset: gap + localSource.length,
+        contentStart: gap,
+        contentEnd: gap,
+        trailingParagraph: true,
+      };
+    }
+
+    const blankParagraph = nodeClosest(range.startContainer, 'p[data-rich-transaction-blank][data-source-gap]');
+    if (blankParagraph && els.rich.contains(blankParagraph)) {
+      const gap = Number(blankParagraph.dataset.sourceGap);
+      if (!Number.isFinite(gap)) return null;
+      const before = range.cloneRange();
+      before.selectNodeContents(blankParagraph);
+      try {
+        before.setEnd(range.startContainer, range.startOffset);
+      } catch (_) {
+        return null;
+      }
+      const localSource = stripRichCaretTokens(serializeInlineNodes(Array.from(before.cloneContents().childNodes)));
+      return {
+        offset: gap + localSource.length,
+        contentStart: gap,
+        contentEnd: gap,
+        blankParagraph: true,
+      };
+    }
+
+    const item = nodeClosest(range.startContainer, 'li');
+    if (item && els.rich.contains(item)) {
+      return richListSourcePointFromRange(item, range);
+    }
+
+    const cell = nodeClosest(range.startContainer, 'td, th');
+    if (cell && els.rich.contains(cell)) {
+      const point = richTableSourcePointFromRange(cell, range);
+      return point ? { ...point, tableCell: true } : null;
+    }
+
+    const quote = nodeClosest(range.startContainer, 'blockquote');
+    if (quote && els.rich.contains(quote)) {
+      const point = richQuoteSourcePointFromRange(quote, range);
+      return point ? { ...point, quoteBlock: true } : null;
+    }
+
+    const sourceBlock = nodeClosest(range.startContainer, RICH_SOURCE_BLOCK_SELECTOR);
+    if (!sourceBlock) return null;
+    const point = domPointToSourceOffset(range.startContainer, range.startOffset);
+    if (!point) return null;
+    const start = numericData(sourceBlock, 'sourceStart');
+    const end = numericData(sourceBlock, 'sourceEnd');
+    const contentStart = start + sourceContentBaseOffset(sourceBlock);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || point.offset < contentStart || point.offset > end) return null;
+    return {
+      offset: point.offset,
+      contentStart,
+      contentEnd: end,
+    };
+  }
+
+  function richListSourcePointFromRange(item, range) {
+    const list = item.closest('ul, ol');
+    if (!list?.matches?.(RICH_SOURCE_BLOCK_SELECTOR) || item.parentElement !== list) return null;
+    const blockStart = numericData(list, 'sourceStart');
+    const blockEnd = numericData(list, 'sourceEnd');
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return null;
+    const raw = stripRichCaretTokens(state.markdown || '').slice(blockStart, blockEnd);
+    const sourceItems = flatListSourceItems(raw);
+    const items = Array.from(list.children).filter((child) => child.tagName?.toLowerCase() === 'li');
+    const itemIndex = items.indexOf(item);
+    if (itemIndex < 0 || sourceItems.length !== items.length) return null;
+    const sourceItem = sourceItems[itemIndex];
+    const content = visibleTextFromListSourceItem(sourceItem);
+    if (content !== visibleListItemText(item)) return null;
+    const caretOffset = Math.max(0, Math.min(content.length, richListCaretSourceContentOffset(item, range)));
+    const sourceOffset = sourceOffsetFromListItemTextOffset(sourceItem, caretOffset);
+    return {
+      offset: blockStart + sourceOffset,
+      contentStart: blockStart + sourceItem.lines[0].start + sourceItem.parsed.prefix.length,
+      contentEnd: blockStart + sourceItem.end,
+    };
+  }
+
+  function richTableSourcePointFromRange(cell, range) {
+    if (!cell?.matches?.('td, th') || !range?.collapsed) return null;
+    const cellRange = richTableCellSourceRange(cell);
+    if (!cellRange) return null;
+    const before = range.cloneRange();
+    before.selectNodeContents(cell);
+    try {
+      before.setEnd(range.startContainer, range.startOffset);
+    } catch (_) {
+      return null;
+    }
+    const localSource = serializeTableCellInlineNodes(Array.from(before.cloneContents().childNodes));
+    const offset = Math.max(
+      cellRange.contentStart,
+      Math.min(cellRange.contentEnd, cellRange.contentStart + localSource.length),
+    );
+    return {
+      offset,
+      contentStart: cellRange.contentStart,
+      contentEnd: cellRange.contentEnd,
+    };
+  }
+
+  function richQuoteSourcePointFromRange(blockquote, range) {
+    if (!blockquote?.matches?.('blockquote') || !range?.collapsed) return null;
+    const blockStart = numericData(blockquote, 'sourceStart');
+    const blockEnd = numericData(blockquote, 'sourceEnd');
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return null;
+    const raw = stripRichCaretTokens(state.markdown || '').slice(blockStart, blockEnd);
+    const model = parseMarkdownQuoteSource(raw);
+    if (!model?.lines?.length) return null;
+
+    const before = range.cloneRange();
+    before.selectNodeContents(blockquote);
+    try {
+      before.setEnd(range.startContainer, range.startOffset);
+    } catch (_) {
+      return null;
+    }
+    const renderedOffset = stripRichCaretTokens(serializeInlineNodes(Array.from(before.cloneContents().childNodes))).length;
+    const mapped = quoteSourcePositionFromRenderedOffset(model, renderedOffset);
+    if (!mapped) return null;
+    return {
+      offset: blockStart + mapped.sourceOffset,
+      contentStart: blockStart + mapped.line.line.start + mapped.line.contentStart,
+      contentEnd: blockStart + mapped.line.line.start + mapped.line.contentEnd,
+      quote: {
+        blockStart,
+        blockEnd,
+        model,
+        lineIndex: mapped.lineIndex,
+      },
+    };
+  }
+
+  function parseMarkdownQuoteSource(raw) {
+    const lines = getLines(raw).filter((line) => line.text.trim() !== '');
+    const quoteLines = [];
+    let renderedStart = 0;
+    for (const line of lines) {
+      const match = line.text.match(/^(\s*>\s?)(.*)$/);
+      if (!match) return null;
+      const prefix = match[1] || '';
+      const content = match[2] || '';
+      const contentStart = prefix.length;
+      const contentEnd = line.text.length;
+      quoteLines.push({
+        line,
+        prefix,
+        content,
+        contentStart,
+        contentEnd,
+        renderedStart,
+        renderedEnd: renderedStart + content.length,
+      });
+      renderedStart += content.length + 1;
+    }
+    return { lines: quoteLines };
+  }
+
+  function quoteSourcePositionFromRenderedOffset(model, offset) {
+    const lines = model?.lines || [];
+    if (!lines.length) return null;
+    const target = Math.max(0, Number(offset) || 0);
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (target <= line.renderedEnd) {
+        const inLine = Math.max(0, Math.min(line.content.length, target - line.renderedStart));
+        return {
+          line,
+          lineIndex: index,
+          sourceOffset: line.line.start + line.contentStart + inLine,
+        };
+      }
+      if (index < lines.length - 1 && target <= line.renderedEnd + 1) {
+        const next = lines[index + 1];
+        return {
+          line: next,
+          lineIndex: index + 1,
+          sourceOffset: next.line.start + next.contentStart,
+        };
+      }
+    }
+    const lastIndex = lines.length - 1;
+    const last = lines[lastIndex];
+    return {
+      line: last,
+      lineIndex: lastIndex,
+      sourceOffset: last.line.start + last.contentEnd,
+    };
+  }
+
+  function richQuoteBoundaryDeleteTransaction(point, backward) {
+    const quote = point?.quote;
+    if (!quote?.model?.lines?.length) return null;
+    const lines = quote.model.lines;
+    const index = quote.lineIndex;
+    const line = lines[index];
+    if (!line) return null;
+    const localOffset = point.offset - quote.blockStart;
+    if (backward && index === 0 && localOffset === line.line.start + line.contentStart) {
+      const from = quote.blockStart + line.line.start;
+      const to = quote.blockStart + line.line.start + line.contentStart;
+      return {
+        from,
+        to,
+        insert: '',
+        selectionAfter: {
+          anchor: from,
+          focus: from,
+          affinity: 'before',
+        },
+      };
+    }
+    if (backward && index > 0 && localOffset === line.line.start + line.contentStart) {
+      const previous = lines[index - 1];
+      const from = quote.blockStart + previous.line.start + previous.contentEnd;
+      const to = quote.blockStart + line.line.start + line.contentStart;
+      return {
+        from,
+        to,
+        insert: '',
+        selectionAfter: {
+          anchor: from,
+          focus: from,
+          affinity: 'before',
+        },
+      };
+    }
+    if (!backward && index < lines.length - 1 && localOffset === line.line.start + line.contentEnd) {
+      const next = lines[index + 1];
+      const from = quote.blockStart + line.line.start + line.contentEnd;
+      const to = quote.blockStart + next.line.start + next.contentStart;
+      return {
+        from,
+        to,
+        insert: '',
+        selectionAfter: {
+          anchor: from,
+          focus: from,
+          affinity: 'after',
+        },
+      };
+    }
+    if (!backward && index === lines.length - 1 && localOffset === line.line.start + line.contentEnd) {
+      const nextContentStart = nextMarkdownContentStartAfterOffset(quote.blockEnd);
+      const from = quote.blockStart + line.line.start + line.contentEnd;
+      if (Number.isFinite(nextContentStart) && nextContentStart > from) {
+        return {
+          from,
+          to: nextContentStart,
+          insert: '',
+          selectionAfter: {
+            anchor: from,
+            focus: from,
+            affinity: 'after',
+          },
+        };
+      }
+    }
+    return null;
+  }
+
+  function nextMarkdownContentStartAfterOffset(offset) {
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    const start = Math.max(0, Math.min(markdown.length, Number(offset)));
+    for (let index = start; index < markdown.length; index += 1) {
+      if (markdown[index] !== '\n' && markdown[index] !== '\r') return index;
+    }
+    return null;
+  }
+
+  function richTableCellSourceRange(cell) {
+    const location = richTableCellLocation(cell);
+    if (!location) return null;
+    const table = location.table;
+    if (!table.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) return null;
+    const blockStart = numericData(table, 'sourceStart');
+    const blockEnd = numericData(table, 'sourceEnd');
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return null;
+    const raw = stripRichCaretTokens(state.markdown || '').slice(blockStart, blockEnd);
+    const model = parseMarkdownTableSource(raw);
+    const sourceRow = model?.rows?.[location.lineIndex];
+    const sourceCell = sourceRow?.cells?.[location.cellIndex];
+    if (!sourceRow || !sourceCell) return null;
+    return {
+      table,
+      blockStart,
+      blockEnd,
+      line: sourceRow.line,
+      cell: sourceCell,
+      contentStart: blockStart + sourceRow.line.start + sourceCell.contentStart,
+      contentEnd: blockStart + sourceRow.line.start + sourceCell.contentEnd,
+    };
+  }
+
+  function richTableCellLocation(cell) {
+    if (!cell?.matches?.('td, th')) return null;
+    const table = cell.closest('table');
+    const row = cell.parentElement;
+    if (!table || !row || !els.rich.contains(table)) return null;
+    const cellIndex = Array.from(row.children).indexOf(cell);
+    if (cellIndex < 0) return null;
+    if (cell.tagName?.toLowerCase() === 'th') {
+      return { table, lineIndex: 0, cellIndex };
+    }
+    const bodyRows = Array.from(table.querySelectorAll('tbody > tr'));
+    const bodyIndex = bodyRows.indexOf(row);
+    return bodyIndex >= 0 ? { table, lineIndex: bodyIndex + 2, cellIndex } : null;
+  }
+
+  function parseMarkdownTableSource(raw) {
+    const lines = getLines(raw).filter((line) => line.text.trim() !== '');
+    if (lines.length < 2) return null;
+    return {
+      lines,
+      rows: lines.map((line) => ({
+        line,
+        cells: splitTableRowWithSourceRanges(line.text),
+      })),
+    };
+  }
+
+  function splitTableRowWithSourceRanges(line) {
+    const value = String(line || '');
+    let start = 0;
+    let end = value.length;
+    if (value[start] === '|') start += 1;
+    if (end > start && value[end - 1] === '|') end -= 1;
+
+    const cells = [];
+    let cellStart = start;
+    for (let index = start; index <= end; index += 1) {
+      const atEnd = index === end;
+      const isPipe = !atEnd && value[index] === '|' && !isEscapedMarkdownPipe(value, index);
+      if (!atEnd && !isPipe) continue;
+      cells.push(tableCellSourceRangeFromSegment(value, cellStart, index));
+      cellStart = index + 1;
+    }
+    return cells;
+  }
+
+  function isEscapedMarkdownPipe(value, index) {
+    if (String(value || '')[index] !== '|') return false;
+    let slashCount = 0;
+    for (let cursor = index - 1; cursor >= 0 && value[cursor] === '\\'; cursor -= 1) {
+      slashCount += 1;
+    }
+    return slashCount % 2 === 1;
+  }
+
+  function unescapeMarkdownTableCell(value) {
+    return String(value || '').replace(/\\\|/g, '|');
+  }
+
+  function tableCellSourceRangeFromSegment(row, start, end) {
+    const segment = row.slice(start, end);
+    const leading = segment.match(/^\s*/)?.[0].length || 0;
+    const trailing = segment.match(/\s*$/)?.[0].length || 0;
+    const contentStart = start + leading;
+    const contentEnd = Math.max(contentStart, end - trailing);
+    return {
+      start,
+      end,
+      contentStart,
+      contentEnd,
+      raw: row.slice(contentStart, contentEnd),
+    };
+  }
+
+  function shouldLetDomHandleMarkdownShortcutInput(range, text) {
+    const block = nodeClosest(range.startContainer, 'p');
+    if (!block || block.closest('li') || !block.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) return false;
+    const current = normalizeRichText(block.textContent || '');
+    const caretOffset = getCaretCharacterOffsetWithin(block, window.getSelection?.());
+    const next = `${current.slice(0, caretOffset)}${text}${current.slice(caretOffset)}`;
+    return isPendingMarkdownShortcutText(next);
+  }
+
+  function isPendingMarkdownShortcutText(text) {
+    return /^[-+*] $/.test(text)
+      || /^1\. $/.test(text)
+      || /^- \[(?: |x|X)?\]? ?$/.test(text)
+      || text === '| '
+      || text === '---'
+      || text === '$$'
+      || text === '$$$$'
+      || text === '$$ '
+      || text === '$$$$ ';
+  }
+
+  function richInlineBoundaryInsertTransaction(inlineElement, text, boundary) {
+    if (!inlineElement?.classList?.contains('rich-inline-atom')) return null;
+    const start = Number(inlineElement.dataset.srcStart);
+    const end = Number(inlineElement.dataset.srcEnd);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+    const from = boundary === 'before' ? start : end;
+    const nextOffset = from + String(text || '').length;
+    return {
+      from,
+      to: from,
+      insert: String(text || ''),
+      selectionAfter: {
+        anchor: nextOffset,
+        focus: nextOffset,
+        affinity: 'after',
+      },
+    };
+  }
+
+  function applySourceTransaction(transaction, reason = 'source-transaction') {
+    if (!transaction) return false;
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    let from = Math.max(0, Math.min(markdown.length, Number(transaction.from)));
+    let to = Math.max(from, Math.min(markdown.length, Number(transaction.to)));
+    let insert = stripRichCaretTokens(transaction.insert || '');
+    const oldRichBlock = state.mode === 'rich' ? richSourceTransactionBlockForRange(from, to, transaction.selectionAfter) : null;
+    const shortcut = richMarkdownShortcutTransactionRewrite(oldRichBlock, markdown, from, to, insert, reason);
+    if (shortcut) {
+      from = shortcut.from;
+      to = shortcut.to;
+      insert = shortcut.insert;
+      transaction = {
+        ...transaction,
+        selectionAfter: shortcut.selectionAfter,
+        blankParagraphAt: shortcut.blankParagraphAt,
+      };
+      setStatus(shortcut.status);
+    }
+    const canPatchRich = canPatchRichBlockTransaction(oldRichBlock, from, to, insert);
+    state.markdown = markdown.slice(0, from) + insert + markdown.slice(to);
+    els.source.value = state.markdown;
+    markDirty();
+    if (canPatchRich && patchRichBlockAfterTransaction(oldRichBlock, transaction.selectionAfter?.focus ?? from + insert.length)) {
+      if (refreshRichSourceRangesFromMarkdown()) {
+        renderPreview();
+        renderOutline();
+        updateStatusBar();
+      } else {
+        renderAll(reason);
+      }
+    } else {
+      renderAll(reason);
+    }
+    restoreRichCaretFromSourceSelection(transaction.selectionAfter);
+    if (Number.isFinite(transaction.blankParagraphAt)) {
+      ensureRichBlankParagraphAtSourceGap(transaction.blankParagraphAt);
+    }
+    scheduleAutosave();
+    return true;
+  }
+
+  function richSourceTransactionBlockForRange(from, to, selectionAfter) {
+    return renderedBlockForSourceOffset(els.rich, from)
+      || renderedBlockForSourceOffset(els.rich, to)
+      || renderedBlockForSourceOffset(els.rich, selectionAfter?.focus)
+      || renderedBlockForSourceOffset(els.rich, selectionAfter?.anchor);
+  }
+
+  function richMarkdownShortcutTransactionRewrite(oldRichBlock, markdown, from, to, insert, reason) {
+    if (!isRichMarkdownShortcutTransactionReason(reason) || !oldRichBlock?.matches?.(`p${RICH_SOURCE_BLOCK_SELECTOR}`)) return null;
+    if (oldRichBlock.closest('li') || String(insert || '').includes('\n')) return null;
+    const start = numericData(oldRichBlock, 'sourceStart');
+    const end = numericData(oldRichBlock, 'sourceEnd');
+    if (!Number.isFinite(start) || !Number.isFinite(end) || from < start || to > end) return null;
+    const nextBlockSource = markdown.slice(start, from) + insert + markdown.slice(to, end);
+    const replacement = richBlockMarkdownTriggerReplacement(nextBlockSource, { allowBareMath: false });
+    if (!replacement) return null;
+    const selectionOffset = start + (Number.isFinite(replacement.selectionOffset)
+      ? replacement.selectionOffset
+      : replacement.insert.length);
+    return {
+      from: start,
+      to: end,
+      insert: replacement.insert,
+      selectionAfter: {
+        anchor: selectionOffset,
+        focus: selectionOffset,
+        affinity: 'after',
+      },
+      blankParagraphAt: replacement.blankParagraphAt ? start + replacement.insert.length : undefined,
+      status: replacement.status,
+    };
+  }
+
+  function isRichMarkdownShortcutTransactionReason(reason) {
+    return [
+      'rich-text-insert',
+      'rich-selection-insert',
+      'rich-selection-replace',
+      'rich-input-source-fallback',
+      'rich-composition',
+      'rich-inline-boundary-insert',
+      'rich-paste',
+    ].includes(reason);
+  }
+
+  function canPatchRichBlockTransaction(oldRichBlock, from, to, insert) {
+    if (!oldRichBlock || String(insert).includes('\n')) return false;
+    const start = numericData(oldRichBlock, 'sourceStart');
+    const end = numericData(oldRichBlock, 'sourceEnd');
+    return Number.isFinite(start) && Number.isFinite(end) && start <= from && to <= end;
+  }
+
+  function patchRichBlockAfterTransaction(oldRichBlock, focusOffset) {
+    if (!oldRichBlock?.isConnected) return false;
+    const blocks = buildBlockModel(state.markdown);
+    const block = blocks.find((item) => item.start <= focusOffset && focusOffset <= item.end)
+      || blocks.find((item) => item.start <= numericData(oldRichBlock, 'sourceStart') && numericData(oldRichBlock, 'sourceStart') <= item.end);
+    if (!block) return false;
+    const headings = buildHeadingIndex(blocks);
+    const template = document.createElement('template');
+    template.innerHTML = annotateRenderedBlockHtml(renderBlockHtml(block, headings), block);
+    enhanceRenderedHtml(template.content);
+    preserveRichInlineTrailingWhitespace(template.content, block.raw);
+    const nextNodes = Array.from(template.content.childNodes);
+    if (!nextNodes.length) return false;
+    try {
+      oldRichBlock.replaceWith(...nextNodes);
+    } catch (_) {
+      return false;
+    }
+    stabilizePatchedRichInlineBlocks(nextNodes);
+    ensureRichTrailingEditableParagraph();
+    configureRichEditableSurface();
+    return true;
+  }
+
+  function preserveRichInlineTrailingWhitespace(root, source) {
+    const trailing = String(source || '').match(/[ \t]+$/)?.[0] || '';
+    if (!trailing || !root?.querySelector) return false;
+    const block = root.querySelector(RICH_SOURCE_BLOCK_SELECTOR);
+    if (!block?.matches?.(RICH_INLINE_EDIT_BLOCK_SELECTOR)) return false;
+    if (/[ \t\u00a0]$/.test(block.textContent || '')) return false;
+    block.appendChild(document.createTextNode(trailing.replace(/ /g, '\u00a0')));
+    return true;
+  }
+
+  function stabilizePatchedRichInlineBlocks(nodes) {
+    let changed = false;
+    for (const node of nodes) {
+      if (node.nodeType !== Node.ELEMENT_NODE) continue;
+      if (!node.matches?.(RICH_INLINE_EDIT_BLOCK_SELECTOR)) continue;
+      if (parsePendingRichInlineMarkdownInBlock(node)) changed = true;
+      wrapRenderedInlineAtoms(node);
+    }
+    if (changed) annotateRenderedInlineAtomRanges(els.rich);
+    return changed;
+  }
+
+  function ensureRichBlankParagraphAtSourceGap(offset) {
+    if (state.mode !== 'rich' || !els.rich) return false;
+    const target = Number(offset);
+    if (!Number.isFinite(target)) return false;
+    const existing = richEmptySourceParagraphAtGap(target);
+    if (existing) {
+      state.richTransactionBlank = null;
+      configureRichEditableSurface();
+      placeCaretAtStart(existing);
+      return true;
+    }
+    const paragraph = document.createElement('p');
+    paragraph.dataset.richTransactionBlank = 'true';
+    paragraph.dataset.sourceGap = String(target);
+    const anchor = document.createElement('span');
+    anchor.className = 'rich-list-caret-anchor';
+    const textNode = document.createTextNode('\u200b');
+    anchor.appendChild(textNode);
+    paragraph.appendChild(anchor);
+    paragraph.appendChild(document.createElement('br'));
+
+    const blocks = Array.from(els.rich.querySelectorAll(RICH_SOURCE_BLOCK_SELECTOR));
+    const nextBlock = blocks.find((block) => numericData(block, 'sourceStart') >= target);
+    const previousBlock = blocks.slice().reverse().find((block) => numericData(block, 'sourceEnd') <= target);
+    if (nextBlock?.parentNode === els.rich) {
+      nextBlock.before(paragraph);
+    } else if (previousBlock?.parentNode === els.rich) {
+      previousBlock.after(paragraph);
+    } else {
+      els.rich.appendChild(paragraph);
+    }
+    state.richTransactionBlank = { element: paragraph, sourceGap: target };
+    configureRichEditableSurface();
+    placeCaretInTextNode(textNode, textNode.nodeValue.length);
+    return true;
+  }
+
+  function richEmptySourceParagraphAtGap(offset) {
+    return Array.from(els.rich?.querySelectorAll?.(`p${RICH_SOURCE_BLOCK_SELECTOR}`) || [])
+      .find((paragraph) => (
+        numericData(paragraph, 'sourceStart') === offset
+        && numericData(paragraph, 'sourceEnd') === offset
+        && isEmptyRichParagraph(paragraph)
+      )) || null;
+  }
+
   function onDocumentBeforeInput(event) {
     onRichBeforeInput(event);
+  }
+
+  function onDocumentKeyUp(event) {
+    if (event.defaultPrevented || state.mode !== 'rich' || event.key !== ' ') return;
+    applyRichQuoteShortcutAfterSpaceKey();
+  }
+
+  function applyRichQuoteShortcutAfterSpaceKey() {
+    const selection = window.getSelection?.();
+    const selectedBlock = selection?.rangeCount && els.rich.contains(selection.anchorNode)
+      ? nodeClosest(selection.anchorNode, 'p')
+      : null;
+    const candidates = selectedBlock ? [selectedBlock] : Array.from(els.rich.querySelectorAll('p'));
+    for (const block of candidates) {
+      if (!block || block.closest('li') || normalizeRichText(block.textContent || '') !== '| ') continue;
+      if (block.matches?.(RICH_SOURCE_BLOCK_SELECTOR) && applyRichBlockMarkdownTriggerTransaction(block, '| ', { allowBareMath: false })) {
+        return true;
+      }
+      replaceParagraphWithTriggeredQuote(block);
+      return true;
+    }
+    return false;
   }
 
   function isRichBeforeInputContext(event) {
@@ -957,7 +2995,9 @@ flowchart TD
     if (nodeClosest(selection.anchorNode, '.rich-source-editor, .code-language-input, .rich-inline-source')) return false;
     if (nodeClosest(selection.anchorNode, '.mermaid-diagram, pre.code-block, .math-display')) return false;
 
-    return applyRichBlockMarkdownTrigger(selection) || applyRichInlineMarkdownTrigger(selection);
+    return applyRichBlockMarkdownTrigger(selection)
+      || applyRichInlineMarkdownTrigger(selection)
+      || applyRichInlineMarkdownRunTrigger();
   }
 
   function applyRichBlockMarkdownTrigger(selection) {
@@ -965,7 +3005,10 @@ flowchart TD
     if (!block || block.closest('li')) return false;
     const caretOffset = getCaretCharacterOffsetWithin(block, selection);
     const text = normalizeRichText(block.textContent || '');
-    if (caretOffset !== text.length) return false;
+    const blockReplacement = richBlockMarkdownTriggerReplacement(text, { allowBareMath: false });
+    if (caretOffset !== text.length && !blockReplacement) return false;
+
+    if (applyRichBlockMarkdownTriggerTransaction(block, text, { allowBareMath: false })) return true;
 
     if (text === '$$$$ ') {
       replaceParagraphWithMathDisplayEditor(block);
@@ -1016,6 +3059,126 @@ flowchart TD
     return /^- \[(?: |x|X)?\]? ?$/.test(text);
   }
 
+  function applyRichBlockMarkdownTriggerTransaction(block, text, options = {}) {
+    const replacement = richBlockMarkdownTriggerReplacement(text, options);
+    if (!replacement || !block?.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) return false;
+    const start = numericData(block, 'sourceStart');
+    const end = numericData(block, 'sourceEnd');
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return false;
+    const insert = replacement.insert;
+    const selectionOffset = start + (Number.isFinite(replacement.selectionOffset) ? replacement.selectionOffset : insert.length);
+    state.richInputUsedSourceTransaction = true;
+    applySourceTransaction({
+      from: start,
+      to: end,
+      insert,
+      selectionAfter: {
+        anchor: selectionOffset,
+        focus: selectionOffset,
+        affinity: 'after',
+      },
+      blankParagraphAt: replacement.blankParagraphAt ? start + insert.length : undefined,
+    }, `rich-markdown-trigger-${replacement.kind}`);
+    finishRichBlockMarkdownTriggerReplacement(replacement, start, insert.length);
+    return true;
+  }
+
+  function finishRichBlockMarkdownTriggerReplacement(replacement, start, insertLength) {
+    if (replacement.kind === 'math-inline') {
+      if (!activateInsertedInlineSource(start, start + insertLength, 1, 1)) {
+        const block = renderedBlockForSourceOffset(els.rich, start);
+        if (block?.tagName?.toLowerCase() === 'p') replaceParagraphWithMathInlineSource(block);
+      }
+    } else if (replacement.kind === 'math-display') {
+      openInsertedDisplayMathSourceEditor(start, insertLength);
+    }
+    setStatus(replacement.status);
+  }
+
+  function guardUnsupportedRichBlockMarkdownTriggerFallback(block) {
+    if (!block?.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) return false;
+    setStatus('このMarkdownショートカットを反映できませんでした');
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richBlockMarkdownTriggerReplacement(text, options = {}) {
+    const value = String(text || '');
+    const allowBareMath = options.allowBareMath !== false;
+    if (!allowBareMath && (value === '$$' || value === '$$$$')) return null;
+    if (value === '$$' || value === '$$ ') {
+      return {
+        kind: 'math-inline',
+        insert: '$$',
+        selectionOffset: 1,
+        status: 'インライン数式を挿入しました',
+      };
+    }
+    if (value === '$$$$' || value === '$$$$ ') {
+      return {
+        kind: 'math-display',
+        insert: '$$$$',
+        selectionOffset: 2,
+        status: '数式ブロックを挿入しました',
+      };
+    }
+    if (value === '| ') {
+      return {
+        kind: 'quote',
+        insert: '> ',
+        status: '引用を開始しました',
+      };
+    }
+    if (value === '---') {
+      return {
+        kind: 'rule',
+        insert: '---',
+        blankParagraphAt: true,
+        status: '横線を挿入しました',
+      };
+    }
+    const task = value.match(/^- \[( |x|X)\] $/);
+    if (task) {
+      return {
+        kind: 'task-list',
+        insert: `- [${task[1].toLowerCase() === 'x' ? 'x' : ' '}] `,
+        status: 'チェックリストを開始しました',
+      };
+    }
+    const dashList = value.match(/^- (.+)$/);
+    if (dashList && !isPendingTaskListPrefix(value)) {
+      return {
+        kind: 'list',
+        insert: `- ${dashList[1]}`,
+        status: '箇条書きを開始しました',
+      };
+    }
+    if (/^[*+] $/.test(value) || value === '-  ') {
+      return {
+        kind: 'list',
+        insert: `${value[0]} `,
+        status: '箇条書きを開始しました',
+      };
+    }
+    if (/^1\. $/.test(value)) {
+      return {
+        kind: 'ordered-list',
+        insert: '1. ',
+        status: '番号付きリストを開始しました',
+      };
+    }
+    return null;
+  }
+
+  function openInsertedDisplayMathSourceEditor(start, length) {
+    const end = start + length;
+    const display = Array.from(els.rich.querySelectorAll('.math-display'))
+      .find((element) => Number(element.dataset.sourceStart) === start && Number(element.dataset.sourceEnd) === end);
+    if (!display) return false;
+    showRichSourceEditor('math', display, { editorValue: '$$$$', caretOffset: 2 });
+    return true;
+  }
+
   function activatePendingMathShortcutFromSelection() {
     if (state.mode !== 'rich' || state.richComposing) return false;
     const selection = window.getSelection?.();
@@ -1024,11 +3187,15 @@ flowchart TD
     if (!block || block.closest('li')) return false;
     const text = normalizeRichText(block.textContent || '');
     if (text === '$$$$') {
+      if (applyRichBlockMarkdownTriggerTransaction(block, text, { allowBareMath: true })) return true;
+      if (guardUnsupportedRichBlockMarkdownTriggerFallback(block)) return true;
       replaceParagraphWithMathDisplayEditor(block);
       syncRichMarkdownFromDom('rich-input');
       return true;
     }
     if (text === '$$') {
+      if (applyRichBlockMarkdownTriggerTransaction(block, text, { allowBareMath: true })) return true;
+      if (guardUnsupportedRichBlockMarkdownTriggerFallback(block)) return true;
       replaceParagraphWithMathInlineSource(block);
       syncRichMarkdownFromDom('rich-input');
       return true;
@@ -1114,10 +3281,11 @@ flowchart TD
   }
 
   function applyRichInlineMarkdownTrigger(selection) {
-    const range = selection.getRangeAt(0);
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return false;
     const caret = textCaretForMarkdownTrigger(range);
     if (!caret) return false;
-    const { textNode, caretOffset } = caret;
+    const { textNode, caretOffset } = mergeAdjacentTextNodesForMarkdownTrigger(caret.textNode, caret.caretOffset);
     const before = textNode.nodeValue.slice(0, caretOffset);
 
     if (before.endsWith('$$ ') && !before.endsWith('$$$$ ')) {
@@ -1136,6 +3304,37 @@ flowchart TD
     return true;
   }
 
+  function applyRichInlineMarkdownRunTrigger() {
+    const selection = window.getSelection?.();
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return false;
+    const caret = textCaretForMarkdownTrigger(range);
+    if (!caret) return false;
+    const before = (caret.textNode.nodeValue || '').slice(0, caret.caretOffset).replace(/\u200b/g, '');
+    if (!/[`*_~$]$/.test(before)) return false;
+    if (!richInlineMarkdownBeforeCaretEndsWithCompletedToken(before)) return false;
+
+    const block = richInlineEditBlockForRange(range);
+    if (!block || block.closest('.mermaid-diagram, pre.code-block, .math-display, .toc')) return false;
+
+    const markdown = serializeRichInlineEditBlockContent(block);
+    if (!richInlineMarkdownSourceHasCompletedToken(markdown)) return false;
+    return reparseRichInlineEditBlockContent(block, {
+      range,
+      sourceSelection: domSelectionToSourceSelection(selection),
+    });
+  }
+
+  function richInlineMarkdownBeforeCaretEndsWithCompletedToken(before) {
+    const parts = splitPendingRichInlineMarkdown(String(before || ''));
+    const last = parts[parts.length - 1];
+    return Boolean(
+      last
+      && (last.type === 'markdown' || last.type === 'source')
+      && String(before || '').endsWith(last.value)
+    );
+  }
+
   function textCaretForMarkdownTrigger(range) {
     if (range.startContainer.nodeType === Node.TEXT_NODE) {
       return { textNode: range.startContainer, caretOffset: range.startOffset };
@@ -1149,6 +3348,43 @@ flowchart TD
       return { textNode: before, caretOffset: before.nodeValue.length };
     }
     return null;
+  }
+
+  function mergeAdjacentTextNodesForMarkdownTrigger(textNode, caretOffset) {
+    const parent = textNode?.parentNode;
+    if (!parent) return { textNode, caretOffset };
+    const editBlock = nodeClosest(textNode, RICH_INLINE_EDIT_BLOCK_SELECTOR);
+    const nodes = [textNode];
+
+    let previous = textNode.previousSibling;
+    while (previous?.nodeType === Node.TEXT_NODE && nodeClosest(previous, RICH_INLINE_EDIT_BLOCK_SELECTOR) === editBlock) {
+      nodes.unshift(previous);
+      previous = previous.previousSibling;
+    }
+
+    let next = textNode.nextSibling;
+    while (next?.nodeType === Node.TEXT_NODE && nodeClosest(next, RICH_INLINE_EDIT_BLOCK_SELECTOR) === editBlock) {
+      nodes.push(next);
+      next = next.nextSibling;
+    }
+
+    if (nodes.length === 1) return { textNode, caretOffset };
+
+    let rawOffset = caretOffset;
+    for (const node of nodes) {
+      if (node === textNode) break;
+      rawOffset += (node.nodeValue || '').length;
+    }
+
+    const rawValue = nodes.map((node) => node.nodeValue || '').join('');
+    const beforeCaret = rawValue.slice(0, rawOffset).replace(/\u200b/g, '');
+    const afterCaret = rawValue.slice(rawOffset).replace(/\u200b/g, '');
+    const mergedOffset = beforeCaret.length;
+    const merged = document.createTextNode(beforeCaret + afterCaret);
+    parent.insertBefore(merged, nodes[0]);
+    for (const node of nodes) node.remove();
+    placeCaretInTextNode(merged, mergedOffset);
+    return { textNode: merged, caretOffset: mergedOffset };
   }
 
   function findCompletedInlineMarkdownTrigger(textBeforeCaret) {
@@ -1167,12 +3403,19 @@ flowchart TD
     return italic ? { source: italic[2] } : null;
   }
 
+  function richInlineMarkdownSourceHasCompletedToken(source) {
+    return splitPendingRichInlineMarkdown(String(source || ''))
+      .some((part) => part.type === 'markdown' || part.type === 'source');
+  }
+
   function parsePendingRichInlineMarkdownBeforePointer(target) {
     if (state.mode !== 'rich' || state.richComposing || state.richInlineSource?.element) return false;
     if (target?.closest?.('.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
     const selection = window.getSelection?.();
-    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return false;
-    const block = richInlineEditBlockForRange(selection.getRangeAt(0));
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return false;
+    if (nodeClosest(range.startContainer, '.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
+    const block = richInlineEditBlockForRange(range);
     if (!block || block.closest('.mermaid-diagram, pre.code-block, .math-display')) return false;
     const targetBlock = target && els.rich.contains(target) ? nodeClosest(target, RICH_INLINE_EDIT_BLOCK_SELECTOR) : null;
     if (targetBlock === block) return false;
@@ -1180,7 +3423,7 @@ flowchart TD
     if (!parsePendingRichInlineMarkdownInBlock(block)) return false;
     configureRichEditableSurface();
     suppressRichInlineActivation();
-    syncRichMarkdownFromDom('rich-input');
+    finalizeRichProjectionChange('rich-input');
     return true;
   }
 
@@ -1263,14 +3506,14 @@ flowchart TD
       if (match) return { type: 'markdown', value: match[0] };
     }
 
-    if (rest[0] === '*' && rest[1] !== '*' && text[index - 1] !== '*') {
+    if (rest[0] === '*' && rest[1] !== '*' && canOpenSingleDelimiterAt(text, index, '*')) {
       const close = rest.indexOf('*', 1);
       if (close > 1 && !rest.slice(1, close).includes('\n')) {
         return { type: 'markdown', value: rest.slice(0, close + 1) };
       }
     }
 
-    if (rest[0] === '_' && rest[1] !== '_' && text[index - 1] !== '_') {
+    if (rest[0] === '_' && rest[1] !== '_' && canOpenSingleDelimiterAt(text, index, '_')) {
       const close = rest.indexOf('_', 1);
       if (close > 1 && !rest.slice(1, close).includes('\n')) {
         return { type: 'markdown', value: rest.slice(0, close + 1) };
@@ -1278,6 +3521,11 @@ flowchart TD
     }
 
     return null;
+  }
+
+  function canOpenSingleDelimiterAt(text, index, delimiter) {
+    if (text[index - 1] !== delimiter) return true;
+    return text[index - 2] === delimiter;
   }
 
   function replaceTextRangeWithRichInlineSource(textNode, start, end, source, caretOffset) {
@@ -1292,10 +3540,11 @@ flowchart TD
     sourceElement.className = 'rich-inline-source';
     sourceElement.contentEditable = 'true';
     sourceElement.spellcheck = false;
-    sourceElement.dataset.inlineSource = source;
+    const safeSource = stripRichCaretTokens(source);
+    sourceElement.dataset.inlineSource = safeSource;
     sourceElement.setAttribute('role', 'textbox');
     sourceElement.setAttribute('aria-label', 'インラインMarkdownソース');
-    sourceElement.textContent = source;
+    sourceElement.textContent = safeSource;
     return sourceElement;
   }
 
@@ -1361,6 +3610,16 @@ flowchart TD
   }
 
   async function onRichPaste(event) {
+    const control = eventTargetElement(event)?.closest?.('.rich-source-editor, .code-language-input');
+    if (control) return;
+
+    const inlineSource = richInlineSourceFromEventContext(event);
+    if (inlineSource) {
+      if (handleRichInlineSourcePaste(event, inlineSource)) return;
+      captureRichInlineSourceUndoSnapshot(inlineSource, 'inline-source');
+      return;
+    }
+
     const imageFiles = imageFilesFromClipboard(event.clipboardData);
     if (imageFiles.length) {
       event.preventDefault();
@@ -1370,8 +3629,240 @@ flowchart TD
 
     event.preventDefault();
     const text = normalizeNewlines(event.clipboardData?.getData('text/plain') || '');
+    if (handleRichPlainTextPaste(event, text)) return;
+    if (guardUnsupportedRichPlainTextPasteFallback(event)) return;
     insertPlainTextAtSelection(text);
     syncRichMarkdownFromDom('rich-paste');
+  }
+
+  function handleRichInlineSourcePaste(event, inlineSource) {
+    const text = stripRichCaretTokens(normalizeNewlines(event.clipboardData?.getData('text/plain') || ''));
+    if (!text) return false;
+    const sourceRange = richInlineSourceRange(inlineSource);
+    const selectionRange = richInlineSourceSelectionRange(inlineSource);
+    if (!sourceRange || !selectionRange) return false;
+    event.preventDefault();
+    captureRichInlineSourceUndoSnapshot(inlineSource, 'inline-source-paste');
+    applyActiveRichInlineSourceTransaction(inlineSource, {
+      from: selectionRange.from,
+      to: selectionRange.to,
+      insert: text,
+      sourceRange,
+      reason: 'rich-inline-source-paste',
+    });
+    return true;
+  }
+
+  function handleRichPlainTextPaste(event, text) {
+    if (!text) return false;
+    const target = eventTargetElement(event);
+    if (target?.closest?.('.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
+    const selection = window.getSelection?.();
+    const tableRange = richTableTextReplacementRangeFromSelection(selection);
+    const quoteRange = tableRange ? null : richQuoteTextReplacementRangeFromSelection(selection);
+    const blankRange = tableRange || quoteRange ? null : activeRichTransactionBlankRange();
+    const rawRange = tableRange || quoteRange || blankRange || richPlainTextTransactionRangeFromSelection(selection);
+    const replacementRange = rawRange?.from !== rawRange?.to
+      ? expandSourceRangeToIntersectingInlineAtoms(rawRange)
+      : rawRange;
+    if (!replacementRange) return false;
+
+    pushRichUndoSnapshot('paste');
+    let insert = tableRange
+      ? markdownTableCellTextFromPlainText(text)
+      : quoteRange
+        ? markdownQuoteTextFromPlainText(text)
+        : stripRichCaretTokens(normalizeNewlines(text));
+    const selectionLength = insert.length;
+    const trailingPrefix = replacementRange.trailingParagraph && (state.markdown || '').length ? '\n\n' : '';
+    if (replacementRange.blankParagraph) insert = `${insert}\n\n`;
+    else insert = `${trailingPrefix}${insert}`;
+    const nextOffset = replacementRange.from + insert.length;
+    applySourceTransaction({
+      from: replacementRange.from,
+      to: replacementRange.to,
+      insert,
+      selectionAfter: {
+        anchor: replacementRange.blankParagraph ? replacementRange.from + selectionLength : nextOffset,
+        focus: replacementRange.blankParagraph ? replacementRange.from + selectionLength : nextOffset,
+        affinity: 'after',
+      },
+    }, 'rich-paste');
+    if (replacementRange.blankParagraph) state.richTransactionBlank = null;
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function guardUnsupportedRichPlainTextPasteFallback(event) {
+    const selection = window.getSelection?.();
+    const target = eventTargetElement(event);
+    if (richSelectionTouchesSourceBlock(selection)) {
+      setStatus('この位置では貼り付けできません');
+      suppressRichInlineActivation();
+      return true;
+    }
+    let commonAncestor = null;
+    try {
+      commonAncestor = selection?.rangeCount ? selection.getRangeAt(0).commonAncestorContainer : null;
+    } catch (_) {
+      commonAncestor = null;
+    }
+    const nodes = [
+      target,
+      selection?.anchorNode,
+      selection?.focusNode,
+      commonAncestor,
+    ].filter(Boolean);
+    const blockedSelector = [
+      RICH_SOURCE_BLOCK_SELECTOR,
+      '.rich-inline-source',
+      '.rich-source-editor',
+      '.code-language-input',
+      '.rich-inline-atom',
+      'table',
+      'pre.code-block',
+      '.mermaid-diagram',
+      '.math-display',
+      '.toc',
+    ].join(', ');
+    if (!nodes.some((node) => nodeClosest(node, blockedSelector))) return false;
+    setStatus('この位置では貼り付けできません');
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richSourceBlocksIntersectingRange(range) {
+    if (!range || !els.rich.contains(range.startContainer) || !els.rich.contains(range.endContainer)) return [];
+    const blocks = new Set();
+    const rangeNodes = [
+      range.startContainer,
+      range.endContainer,
+      range.commonAncestorContainer,
+    ].filter(Boolean);
+    rangeNodes.forEach((node) => {
+      const block = nodeClosest(node, RICH_SOURCE_BLOCK_SELECTOR);
+      if (block && els.rich.contains(block)) blocks.add(block);
+    });
+    Array.from(els.rich.querySelectorAll(RICH_SOURCE_BLOCK_SELECTOR)).forEach((block) => {
+      try {
+        if (typeof range.intersectsNode === 'function' && range.intersectsNode(block)) blocks.add(block);
+      } catch (_) {
+        // Some browser engines throw for detached/intermediate nodes; ignore them.
+      }
+    });
+    return Array.from(blocks);
+  }
+
+  function richRangeTouchesSourceBlock(range) {
+    return richSourceBlocksIntersectingRange(range).length > 0;
+  }
+
+  function richSelectionTouchesSourceBlock(selection) {
+    const range = richSelectionRange(selection);
+    if (!range || range.collapsed) return false;
+    return richRangeTouchesSourceBlock(range);
+  }
+
+  function guardUnsupportedRichSelectionMutationFallback(event, status = 'この選択はMarkdownソースへ変換できません') {
+    const selection = window.getSelection?.();
+    const range = richSelectionRange(selection);
+    if (!range || range.collapsed) return false;
+    const blockedSelector = '.rich-inline-source, .rich-source-editor, .code-language-input';
+    const target = eventTargetElement(event);
+    const activeNodes = [target, range.startContainer, range.endContainer].filter(Boolean);
+    if (activeNodes.some((node) => nodeClosest(node, blockedSelector))) return false;
+    if (!richSelectionTouchesSourceBlock(selection)) return false;
+    event?.preventDefault?.();
+    setStatus(status);
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function onRichCut(event) {
+    if (state.mode !== 'rich' || state.richComposing) return;
+    const target = eventTargetElement(event);
+    if (target?.closest?.('.rich-inline-source, .rich-source-editor, .code-language-input')) return;
+    const selection = window.getSelection?.();
+    const range = richSelectionRange(selection);
+    if (!range || range.collapsed) return;
+    try {
+      event.clipboardData?.setData?.('text/plain', selection.toString());
+    } catch (_) {
+      // Clipboard writes can be blocked by browser policy; keep source deletion deterministic.
+    }
+    if (handleRichPlainTextSelectionReplacement(event, '', 'rich-selection-cut')) return;
+    guardUnsupportedRichSelectionMutationFallback(event);
+  }
+
+  function richTableTextReplacementRangeFromSelection(selection) {
+    const range = richSelectionRange(selection);
+    if (!range) return null;
+    const anchorCell = nodeClosest(range.startContainer, 'td, th');
+    const focusCell = nodeClosest(range.endContainer, 'td, th');
+    if (!anchorCell || anchorCell !== focusCell || !els.rich.contains(anchorCell)) return null;
+    if (range.collapsed) {
+      const point = richTableSourcePointFromRange(anchorCell, range);
+      return point ? { from: point.offset, to: point.offset } : null;
+    }
+    const sourceSelection = domSelectionToSourceSelection(selection);
+    if (!sourceSelection || !Number.isFinite(sourceSelection.anchor) || !Number.isFinite(sourceSelection.focus)) return null;
+    return {
+      from: Math.min(sourceSelection.anchor, sourceSelection.focus),
+      to: Math.max(sourceSelection.anchor, sourceSelection.focus),
+    };
+  }
+
+  function richQuoteTextReplacementRangeFromSelection(selection) {
+    const range = richSelectionRange(selection);
+    if (!range) return null;
+    const anchorQuote = nodeClosest(range.startContainer, 'blockquote');
+    const focusQuote = nodeClosest(range.endContainer, 'blockquote');
+    if (!anchorQuote || anchorQuote !== focusQuote || !els.rich.contains(anchorQuote)) return null;
+    if (range.collapsed) {
+      const point = richQuoteSourcePointFromRange(anchorQuote, range);
+      return point ? { from: point.offset, to: point.offset } : null;
+    }
+    const sourceSelection = domSelectionToSourceSelection(selection);
+    if (!sourceSelection || !Number.isFinite(sourceSelection.anchor) || !Number.isFinite(sourceSelection.focus)) return null;
+    return {
+      from: Math.min(sourceSelection.anchor, sourceSelection.focus),
+      to: Math.max(sourceSelection.anchor, sourceSelection.focus),
+    };
+  }
+
+  function markdownQuoteTextFromPlainText(text) {
+    return stripRichCaretTokens(normalizeNewlines(text)).split('\n').join('\n> ');
+  }
+
+  function markdownTableCellTextFromPlainText(text) {
+    return escapeMarkdownTableCell(stripRichCaretTokens(normalizeNewlines(text))).replace(/\n+/g, '<br>');
+  }
+
+  function activeRichTransactionBlankPoint() {
+    const blank = state.richTransactionBlank;
+    const element = blank?.element;
+    const sourceGap = Number(blank?.sourceGap);
+    if (!element?.isConnected || !els.rich.contains(element) || !Number.isFinite(sourceGap)) {
+      state.richTransactionBlank = null;
+      return null;
+    }
+    return {
+      offset: sourceGap,
+      contentStart: sourceGap,
+      contentEnd: sourceGap,
+      blankParagraph: true,
+    };
+  }
+
+  function activeRichTransactionBlankRange() {
+    const point = activeRichTransactionBlankPoint();
+    return point ? { from: point.offset, to: point.offset, blankParagraph: true } : null;
+  }
+
+  function clearRichTransactionBlankForPointer(target) {
+    const element = state.richTransactionBlank?.element;
+    if (!element) return;
+    if (!element.isConnected || !target || !element.contains(target)) state.richTransactionBlank = null;
   }
 
   async function onMarkdownPaste(event) {
@@ -1460,8 +3951,12 @@ flowchart TD
         placeCaretAtPointer(event);
       }
       const selection = window.getSelection?.();
-      if (selection?.rangeCount && els.rich.contains(selection.anchorNode)) {
-        return { mode: 'rich', range: selection.getRangeAt(0).cloneRange() };
+      if (selection?.rangeCount && els.rich.contains(selection.anchorNode) && els.rich.contains(selection.focusNode)) {
+        return {
+          mode: 'rich',
+          range: selection.getRangeAt(0).cloneRange(),
+          sourceRange: richInlineInsertRangeFromSelection(selection),
+        };
       }
     }
 
@@ -1478,6 +3973,7 @@ flowchart TD
       setStatus('PNG/JPEG/GIF/WebPのみ挿入できます');
       return false;
     }
+    if (guardUnsupportedImageInsertionContext(insertionContext, actionLabel)) return false;
 
     const ready = await ensureImageAssetWriteAccess(actionLabel || '画像挿入');
     if (!ready) return false;
@@ -1503,6 +3999,26 @@ flowchart TD
       return true;
     }
     return false;
+  }
+
+  function guardUnsupportedImageInsertionContext(context, actionLabel = '画像挿入') {
+    if (context?.mode !== 'rich' || !context.range) return false;
+    const range = context.range;
+    if (range.collapsed || !els.rich.contains(range.startContainer) || !els.rich.contains(range.endContainer)) return false;
+    const sourceBlocks = richSourceBlocksIntersectingRange(range);
+    if (!sourceBlocks.length) return false;
+    const sourceBlock = nodeClosest(range.startContainer, RICH_SOURCE_BLOCK_SELECTOR);
+    if (
+      sourceBlock
+      && sourceBlocks.length === 1
+      && sourceBlocks[0] === sourceBlock
+      && !richRangeExtendsOutsideSourceBlock(range, sourceBlock)
+    ) {
+      return false;
+    }
+    setStatus(`${actionLabel || '画像挿入'}: この選択では画像を挿入できません`);
+    suppressRichInlineActivation();
+    return true;
   }
 
   async function ensureImageAssetWriteAccess(actionLabel = '画像挿入') {
@@ -1639,11 +4155,13 @@ flowchart TD
 
   function insertMarkdownAtImageContext(markdown, context) {
     if (context?.mode === 'rich') {
+      if (insertRichImageMarkdownAtSourceContext(markdown, context)) return;
       restoreImageInsertionRange(context);
       insertRichMarkdownAtSelection(markdown);
       const selection = window.getSelection?.();
-      if (selection?.rangeCount && els.rich.contains(selection.anchorNode)) {
+      if (selection?.rangeCount && els.rich.contains(selection.anchorNode) && els.rich.contains(selection.focusNode)) {
         context.range = selection.getRangeAt(0).cloneRange();
+        context.sourceRange = richInlineInsertRangeFromSelection(selection);
       }
       return;
     }
@@ -1664,8 +4182,27 @@ flowchart TD
     scheduleAutosave();
   }
 
+  function insertRichImageMarkdownAtSourceContext(markdown, context) {
+    const sourceRange = context?.sourceRange;
+    if (!sourceRange || !Number.isFinite(sourceRange.from) || !Number.isFinite(sourceRange.to)) return false;
+    const source = stripRichCaretTokens(normalizeNewlines(markdown || ''));
+    if (!source || source.includes('\n')) return false;
+    const from = sourceRange.from;
+    const to = Math.max(from, sourceRange.to);
+    if (!insertInlineMarkdownAtCapturedContext({ mode: 'rich', range: { from, to } }, source, '画像参照を挿入しました')) {
+      return false;
+    }
+    const next = from + source.length;
+    context.sourceRange = { from: next, to: next };
+    return true;
+  }
+
   function restoreImageInsertionRange(context) {
-    if (!context?.range || !els.rich.contains(context.range.commonAncestorContainer)) {
+    if (
+      !context?.range
+      || !els.rich.contains(context.range.startContainer)
+      || !els.rich.contains(context.range.endContainer)
+    ) {
       getRichSelectionRange();
       return;
     }
@@ -1677,6 +4214,9 @@ flowchart TD
   }
 
   function onKeyDown(event) {
+    if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown', 'Escape'].includes(event.key)) {
+      state.richLineBreakInputOffset = null;
+    }
     const inlineSource = richInlineSourceFromEventContext(event);
     if (inlineSource) {
       if (isRichUndoShortcut(event) && restoreRichUndoSnapshot()) {
@@ -1715,11 +4255,29 @@ flowchart TD
       if ((event.key === 'ArrowRight' || event.key === 'ArrowLeft') && handleRichLineBoundaryArrow(event)) {
         return;
       }
+      if ((event.key === 'Home' || event.key === 'End') && handleRichHomeEndNavigation(event)) {
+        return;
+      }
       if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && handleRichListArrowNavigation(event)) {
         return;
       }
       if (event.key === 'Backspace' || event.key === 'Delete') {
         snapshotRichDeleteFromKeydown();
+      }
+      if ((event.key === 'Backspace' || event.key === 'Delete') && handleRichAtomicBlockBoundaryDelete(event)) {
+        return;
+      }
+      if ((event.key === 'Backspace' || event.key === 'Delete') && handleRichTableBlockBoundaryDelete(event)) {
+        return;
+      }
+      if ((event.key === 'Backspace' || event.key === 'Delete') && handleRichTextBlockBoundaryDelete(event)) {
+        return;
+      }
+      if ((event.key === 'Backspace' || event.key === 'Delete') && handleRichListItemBoundaryDelete(event)) {
+        return;
+      }
+      if ((event.key === 'Backspace' || event.key === 'Delete') && handleRichListBlockBoundaryDelete(event)) {
+        return;
       }
       if ((event.key === 'Backspace' || event.key === 'Delete') && handleRichTableLineBreakDelete(event)) {
         return;
@@ -1793,7 +4351,7 @@ flowchart TD
 
   function pushRichUndoSnapshot(label) {
     if (state.mode !== 'rich' || !els.rich) return;
-    const markdown = normalizeNewlines(serializeRichMarkdown(els.rich));
+    const markdown = stripRichCaretTokens(normalizeNewlines(state.markdown || els.source.value || serializeRichMarkdown(els.rich)));
     const bookmark = getRichCaretBookmark();
     const last = state.richUndoStack[state.richUndoStack.length - 1];
     if (last?.markdown === markdown && last?.bookmark?.start === bookmark?.start && last?.bookmark?.length === bookmark?.length) return;
@@ -1858,6 +4416,9 @@ flowchart TD
   }
 
   function handleRichInlineSourceListEnter(inlineSource, item, list) {
+    if (applyRichInlineSourceSplitTransaction(inlineSource, 'list-enter')) return true;
+    if (guardUnsupportedRichInlineSourceSplitFallback(inlineSource)) return true;
+
     const split = splitRichInlineSourceAtSelection(inlineSource);
     if (!split) return false;
     const marker = document.createTextNode('');
@@ -1879,10 +4440,18 @@ flowchart TD
   }
 
   function handleRichInlineSourceBlockEnter(inlineSource) {
+    const quote = inlineSource.closest?.('blockquote');
+    if (quote && els.rich.contains(quote) && applyRichInlineSourceSplitTransaction(inlineSource, 'quote-line-break')) {
+      return true;
+    }
+
     const block = nodeClosest(inlineSource, 'p, h1, h2, h3, h4, h5, h6, div');
     if (!block || !els.rich.contains(block) || block.closest('li, .rich-source-editor, .mermaid-diagram, pre.code-block, .math-display, .toc')) {
       return false;
     }
+
+    if (applyRichInlineSourceSplitTransaction(inlineSource, 'block-enter')) return true;
+    if (guardUnsupportedRichInlineSourceSplitFallback(inlineSource)) return true;
 
     const split = splitRichInlineSourceAtSelection(inlineSource);
     if (!split) return false;
@@ -1905,6 +4474,9 @@ flowchart TD
   }
 
   function handleRichInlineSourceLineBreak(inlineSource) {
+    if (applyRichInlineSourceSplitTransaction(inlineSource, 'line-break')) return true;
+    if (guardUnsupportedRichInlineSourceSplitFallback(inlineSource)) return true;
+
     const split = splitRichInlineSourceAtSelection(inlineSource);
     if (!split) return false;
     const marker = document.createTextNode('');
@@ -1923,29 +4495,239 @@ flowchart TD
     return true;
   }
 
+  function guardUnsupportedRichInlineSourceSplitFallback(inlineSource) {
+    const sourceBlock = nodeClosest(inlineSource, RICH_SOURCE_BLOCK_SELECTOR);
+    if (!sourceBlock || !els.rich.contains(sourceBlock)) return false;
+    setStatus('この位置ではインラインソースを分割できません');
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function applyRichInlineSourceSplitTransaction(inlineSource, kind) {
+    const sourceRange = richInlineSourceRange(inlineSource);
+    const split = splitRichInlineSourceAtSelection(inlineSource);
+    if (!sourceRange || !split) return false;
+    const separator = richInlineSourceSplitSeparator(inlineSource, kind);
+    if (!separator) return false;
+    const insert = `${split.before}${separator.text}${split.after}`;
+    const nextOffset = sourceRange.start + split.before.length + separator.text.length;
+    state.richInlineSource = null;
+    applySourceTransaction({
+      from: sourceRange.start,
+      to: sourceRange.end,
+      insert,
+      selectionAfter: {
+        anchor: nextOffset,
+        focus: nextOffset,
+        affinity: 'after',
+      },
+    }, `rich-inline-source-${kind}`);
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richInlineSourceRange(inlineSource) {
+    const start = Number(inlineSource?.dataset?.srcStart);
+    const end = Number(inlineSource?.dataset?.srcEnd);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+    return { start, end };
+  }
+
+  function richInlineSourceSplitSeparator(inlineSource, kind) {
+    if (kind === 'block-enter') return { text: '\n\n' };
+    if (kind === 'quote-line-break') return { text: '\n> ' };
+    if (kind === 'list-enter') {
+      const item = inlineSource.closest?.('li');
+      const list = item?.closest?.('ul, ol');
+      const prefix = item && list ? richInlineSourceNextListPrefix(inlineSource, item, list) : '';
+      return prefix ? { text: `\n${prefix}` } : null;
+    }
+    if (kind === 'line-break') {
+      const cell = inlineSource.closest?.('td, th');
+      if (cell && els.rich.contains(cell)) return { text: '<br>' };
+      const quote = inlineSource.closest?.('blockquote');
+      if (quote && els.rich.contains(quote)) return { text: '\n> ' };
+      const item = inlineSource.closest?.('li');
+      const list = item?.closest?.('ul, ol');
+      if (item && list && els.rich.contains(item)) {
+        const continuation = richInlineSourceListContinuationPrefix(inlineSource, item, list);
+        return { text: `  \n${continuation}` };
+      }
+      return { text: '  \n' };
+    }
+    return null;
+  }
+
+  function richInlineSourceNextListPrefix(inlineSource, item, list) {
+    const sourceItem = richInlineSourceListSourceItem(inlineSource, item, list);
+    return sourceItem?.parsed ? nextListSourcePrefix(sourceItem.parsed) : '';
+  }
+
+  function richInlineSourceListContinuationPrefix(inlineSource, item, list) {
+    const sourceItem = richInlineSourceListSourceItem(inlineSource, item, list);
+    return sourceItem?.parsed ? `${sourceItem.parsed.indent}  ` : '  ';
+  }
+
+  function richInlineSourceListSourceItem(inlineSource, item, list) {
+    if (!item || !list?.matches?.(RICH_SOURCE_BLOCK_SELECTOR) || item.parentElement !== list) return null;
+    const sourceRange = richInlineSourceRange(inlineSource);
+    if (!sourceRange) return null;
+    const blockStart = numericData(list, 'sourceStart');
+    const blockEnd = numericData(list, 'sourceEnd');
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return null;
+    const raw = stripRichCaretTokens(state.markdown || '').slice(blockStart, blockEnd);
+    const sourceItems = flatListSourceItems(raw);
+    const items = Array.from(list.children).filter((child) => child.tagName?.toLowerCase() === 'li');
+    const itemIndex = items.indexOf(item);
+    const sourceItem = sourceItems[itemIndex];
+    if (itemIndex < 0 || !sourceItem || sourceItems.length !== items.length) return null;
+    const localStart = sourceRange.start - blockStart;
+    return sourceItem.start <= localStart && localStart <= sourceItem.end ? sourceItem : null;
+  }
+
   function splitRichInlineSourceAtSelection(inlineSource) {
     const offset = richInlineSourceCaretOffset(inlineSource);
     if (!Number.isInteger(offset)) return null;
-    return splitRichInlineSourceAtOffset(normalizeNewlines(inlineSource.textContent || ''), offset);
+    return splitRichInlineSourceAtOffset(stripRichCaretTokens(normalizeNewlines(inlineSource.textContent || '')), offset);
+  }
+
+  function richInlineSourceSelectionRange(inlineSource) {
+    const selection = window.getSelection?.();
+    if (
+      !selection
+      || !selection.rangeCount
+      || !inlineSource.contains(selection.anchorNode)
+      || !inlineSource.contains(selection.focusNode)
+    ) {
+      return null;
+    }
+    const anchor = richInlineSourcePointOffset(inlineSource, selection.anchorNode, selection.anchorOffset);
+    const focus = richInlineSourcePointOffset(inlineSource, selection.focusNode, selection.focusOffset);
+    if (!Number.isInteger(anchor) || !Number.isInteger(focus)) return null;
+    return {
+      anchor,
+      focus,
+      from: Math.min(anchor, focus),
+      to: Math.max(anchor, focus),
+    };
   }
 
   function richInlineSourceCaretOffset(inlineSource) {
     const selection = window.getSelection?.();
     if (!selection || !selection.rangeCount || !selection.isCollapsed || !inlineSource.contains(selection.anchorNode)) return null;
-    const range = selection.getRangeAt(0);
-    const before = range.cloneRange();
+    return richInlineSourcePointOffset(inlineSource, selection.anchorNode, selection.anchorOffset);
+  }
+
+  function richInlineSourcePointOffset(inlineSource, container, offset) {
+    const before = document.createRange();
     before.selectNodeContents(inlineSource);
     try {
-      before.setEnd(range.startContainer, range.startOffset);
+      before.setEnd(container, offset);
     } catch (_) {
       return null;
     }
-    return normalizeNewlines(before.toString()).length;
+    return stripRichCaretTokens(normalizeNewlines(before.toString())).length;
+  }
+
+  function previousStringOffset(source, offset) {
+    const bounded = Math.max(0, Math.min(String(source || '').length, offset));
+    if (bounded <= 0) return 0;
+    const char = source.charCodeAt(bounded - 1);
+    if (char >= 0xdc00 && char <= 0xdfff && bounded > 1) {
+      const previous = source.charCodeAt(bounded - 2);
+      if (previous >= 0xd800 && previous <= 0xdbff) return bounded - 2;
+    }
+    return bounded - 1;
+  }
+
+  function nextStringOffset(source, offset) {
+    const text = String(source || '');
+    const bounded = Math.max(0, Math.min(text.length, offset));
+    if (bounded >= text.length) return text.length;
+    const char = text.charCodeAt(bounded);
+    if (char >= 0xd800 && char <= 0xdbff && bounded + 1 < text.length) {
+      const next = text.charCodeAt(bounded + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) return bounded + 2;
+    }
+    return bounded + 1;
   }
 
   function splitRichInlineSourceAtOffset(source, offset) {
     const index = Math.max(0, Math.min(source.length, offset));
     return { before: source.slice(0, index), after: source.slice(index) };
+  }
+
+  function applyActiveRichInlineSourceTransaction(inlineSource, transaction) {
+    const source = stripRichCaretTokens(normalizeNewlines(inlineSource.textContent || ''));
+    const from = Math.max(0, Math.min(source.length, Number(transaction.from)));
+    const to = Math.max(from, Math.min(source.length, Number(transaction.to)));
+    const insert = stripRichCaretTokens(normalizeNewlines(transaction.insert || ''));
+    const sourceRange = transaction.sourceRange || richInlineSourceRange(inlineSource);
+    if (!sourceRange) return false;
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    if (sourceRange.start < 0 || sourceRange.end > markdown.length || sourceRange.end < sourceRange.start) return false;
+    const nextSource = `${source.slice(0, from)}${insert}${source.slice(to)}`;
+    const nextEnd = sourceRange.start + nextSource.length;
+    const nextOffset = sourceRange.start + from + insert.length;
+
+    state.markdown = markdown.slice(0, sourceRange.start) + nextSource + markdown.slice(sourceRange.end);
+    els.source.value = state.markdown;
+    inlineSource.textContent = nextSource;
+    inlineSource.dataset.inlineSource = nextSource;
+    inlineSource.dataset.srcStart = String(sourceRange.start);
+    inlineSource.dataset.srcEnd = String(nextEnd);
+    state.richInlineSource = {
+      ...(state.richInlineSource || {}),
+      element: inlineSource,
+      undoCaptured: true,
+    };
+    placeCaretInInlineSource(inlineSource, nextOffset - sourceRange.start);
+    markDirty();
+    refreshRichSourceRangesFromMarkdown();
+    renderPreview();
+    renderOutline();
+    updateStatusBar();
+    scheduleAutosave();
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function syncActiveRichInlineSourceMarkdown(inlineSource, reason = 'rich-inline-source-input') {
+    const sourceRange = richInlineSourceRange(inlineSource);
+    if (!sourceRange) return false;
+    const selectionRange = richInlineSourceSelectionRange(inlineSource);
+    const selectionOffset = Number.isInteger(selectionRange?.focus) ? selectionRange.focus : null;
+    const rawSource = normalizeNewlines(inlineSource.textContent || '');
+    const source = stripRichCaretTokens(normalizeNewlines(inlineSource.textContent || ''));
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    if (sourceRange.start < 0 || sourceRange.end > markdown.length || sourceRange.end < sourceRange.start) return false;
+    const nextEnd = sourceRange.start + source.length;
+    const current = markdown.slice(sourceRange.start, sourceRange.end);
+    if (current !== source) {
+      state.markdown = markdown.slice(0, sourceRange.start) + source + markdown.slice(sourceRange.end);
+      els.source.value = state.markdown;
+      markDirty();
+      renderPreview();
+      renderOutline();
+      updateStatusBar();
+      scheduleAutosave();
+    }
+    if (rawSource !== source) {
+      inlineSource.textContent = source;
+      if (Number.isInteger(selectionOffset)) {
+        placeCaretInInlineSource(inlineSource, Math.max(0, Math.min(selectionOffset, source.length)));
+      }
+    }
+    inlineSource.dataset.inlineSource = source;
+    inlineSource.dataset.srcStart = String(sourceRange.start);
+    inlineSource.dataset.srcEnd = String(nextEnd);
+    state.richInlineSource = {
+      ...(state.richInlineSource || {}),
+      element: inlineSource,
+    };
+    refreshRichSourceRangesFromMarkdown();
+    if (reason) suppressRichInlineActivation();
+    return true;
   }
 
   function replaceInlineSourceWithFragment(inlineSource, source) {
@@ -2004,15 +4786,27 @@ flowchart TD
   }
 
   function commitRichInlineSourceAtBoundary(inlineSource, boundary) {
-    const marker = document.createTextNode('\u200b');
+    const start = Number(inlineSource?.dataset?.srcStart);
+    const source = stripRichCaretTokens(normalizeNewlines(inlineSource?.textContent || ''));
+    const offsetAfterCommit = Number.isFinite(start)
+      ? (boundary === 'before' ? start : start + source.length)
+      : null;
+    const caretToken = richCaretToken();
+    const marker = document.createTextNode(caretToken);
     if (boundary === 'before') {
       inlineSource.before(marker);
     } else {
       inlineSource.after(marker);
     }
-    const committed = commitRichInlineSource(inlineSource);
-    if (committed && marker.isConnected) {
-      placeCaretInTextNode(marker, boundary === 'before' ? 0 : marker.nodeValue.length);
+    const committed = commitRichInlineSource(inlineSource, { caretToken });
+    if (committed) {
+      if (Number.isFinite(offsetAfterCommit)) {
+        restoreRichCaretFromSourceSelection({
+          anchor: offsetAfterCommit,
+          focus: offsetAfterCommit,
+          affinity: boundary,
+        });
+      }
       suppressRichInlineActivation();
     }
     return committed;
@@ -2078,8 +4872,9 @@ flowchart TD
   function handleRichTableLineBreakDelete(event) {
     if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
     const selection = window.getSelection?.();
-    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return false;
-    const range = selection.getRangeAt(0);
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return false;
+    if (nodeClosest(range.startContainer, '.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
     const cell = nodeClosest(range.startContainer, 'td, th');
     if (!cell || !els.rich.contains(cell)) return false;
 
@@ -2087,6 +4882,19 @@ flowchart TD
       ? tableBackspaceBreakTarget(range)
       : tableDeleteBreakTarget(range);
     if (!target) return false;
+
+    const deletion = richTableLineBreakDeletionTransaction(cell, target.br, event.key === 'Backspace' ? 'before' : 'after');
+    if (deletion) {
+      event.preventDefault();
+      applySourceTransaction(deletion, 'rich-table-line-break-delete');
+      suppressRichInlineActivation();
+      return true;
+    }
+
+    if (guardFailedRichSourceControlTransaction(cell, 'rich-table-line-break-delete', 'テーブルセル改行を削除できませんでした')) {
+      event.preventDefault();
+      return true;
+    }
 
     event.preventDefault();
     target.br.remove();
@@ -2102,6 +4910,38 @@ flowchart TD
     }
     syncRichMarkdownFromDom('rich-input');
     return true;
+  }
+
+  function richTableLineBreakDeletionTransaction(cell, br, direction) {
+    if (!br?.isConnected) return null;
+    const cellRange = richTableCellSourceRange(cell);
+    if (!cellRange) return null;
+    const local = tableCellLocalSourceOffsetBeforeNode(cell, br);
+    if (!Number.isFinite(local)) return null;
+    const from = cellRange.contentStart + local;
+    const to = from + 4;
+    if (from < cellRange.contentStart || to > cellRange.contentEnd) return null;
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    if (markdown.slice(from, to).toLowerCase() !== '<br>') return null;
+    return {
+      from,
+      to,
+      insert: '',
+      selectionAfter: {
+        anchor: from,
+        focus: from,
+        affinity: direction === 'before' ? 'before' : 'after',
+      },
+    };
+  }
+
+  function tableCellLocalSourceOffsetBeforeNode(cell, targetNode) {
+    let cursor = 0;
+    for (const node of Array.from(cell.childNodes)) {
+      if (node === targetNode) return cursor;
+      cursor += serializeTableCellInlineNode(node).length;
+    }
+    return NaN;
   }
 
   function tableBackspaceBreakTarget(range) {
@@ -2171,13 +5011,29 @@ flowchart TD
   function handleRichEmptyListBackspace(event) {
     if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
     const selection = window.getSelection?.();
-    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return false;
-    const range = selection.getRangeAt(0);
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return false;
+    if (nodeClosest(range.startContainer, '.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
     const item = richListItemFromRange(range);
     if (!item || !isRichListItemEmpty(item)) return false;
     if (richListCaretTextOffset(item, range) !== 0) return false;
     const list = item.closest('ul, ol');
     if (!list) return false;
+
+    const sourceTransaction = richEmptyListItemBackspaceTransaction(item, list);
+    if (sourceTransaction) {
+      event.preventDefault();
+      applySourceTransaction(sourceTransaction, 'rich-empty-list-backspace');
+      suppressRichInlineActivation();
+      return true;
+    }
+
+    if (list.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) {
+      event.preventDefault();
+      setStatus('リスト項目を削除できませんでした');
+      suppressRichInlineActivation();
+      return true;
+    }
 
     event.preventDefault();
     const previousTarget = previousCaretTargetForListItem(item, list);
@@ -2186,6 +5042,62 @@ flowchart TD
     restoreCaretAfterEmptyListRemoval(previousTarget, list);
     syncRichMarkdownFromDom('rich-input');
     return true;
+  }
+
+  function richEmptyListItemBackspaceTransaction(item, list) {
+    if (!item || !list?.matches?.(RICH_SOURCE_BLOCK_SELECTOR) || item.parentElement !== list) return null;
+    if (!isRichListItemEmpty(item)) return null;
+    const blockStart = numericData(list, 'sourceStart');
+    const blockEnd = numericData(list, 'sourceEnd');
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return null;
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    const raw = markdown.slice(blockStart, blockEnd);
+    const sourceItems = flatListSourceItems(raw);
+    const items = Array.from(list.children).filter((child) => child.tagName?.toLowerCase() === 'li');
+    const itemIndex = items.indexOf(item);
+    if (itemIndex < 0 || sourceItems.length !== items.length) return null;
+    const sourceItem = sourceItems[itemIndex];
+    if (!sourceItem || sourceItem.lines.length !== 1) return null;
+    if (visibleTextFromListSourceItem(sourceItem).trim() !== '') return null;
+
+    if (sourceItems.length === 1) {
+      const afterSeparator = markdown.slice(blockEnd).match(/^\n{1,2}/)?.[0] || '';
+      return {
+        from: blockStart,
+        to: blockEnd + afterSeparator.length,
+        insert: '',
+        blankParagraphAt: blockStart,
+        selectionAfter: {
+          anchor: blockStart,
+          focus: blockStart,
+          affinity: 'after',
+        },
+      };
+    }
+
+    const line = sourceItem.lines[0];
+    const isLast = itemIndex === sourceItems.length - 1;
+    const fromLocal = isLast && line.start > 0 ? line.start - 1 : line.start;
+    const toLocal = line.end;
+    const previousItem = sourceItems[itemIndex - 1] || null;
+    const nextItem = sourceItems[itemIndex + 1] || null;
+    let selectionAfter = blockStart + fromLocal;
+    if (previousItem) {
+      selectionAfter = blockStart + sourceOffsetFromListItemTextOffset(previousItem, visibleTextFromListSourceItem(previousItem).length);
+    } else if (nextItem?.parsed) {
+      selectionAfter = blockStart + fromLocal + nextItem.parsed.prefix.length;
+    }
+
+    return {
+      from: blockStart + fromLocal,
+      to: blockStart + toLocal,
+      insert: '',
+      selectionAfter: {
+        anchor: selectionAfter,
+        focus: selectionAfter,
+        affinity: previousItem ? 'before' : 'after',
+      },
+    };
   }
 
   function previousCaretTargetForListItem(item, list) {
@@ -2242,22 +5154,134 @@ flowchart TD
   function handleRichTaskCheckboxDelete(event) {
     if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
     const selection = window.getSelection?.();
-    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return false;
-    const range = selection.getRangeAt(0);
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return false;
+    if (nodeClosest(range.startContainer, '.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
     const item = richListItemFromRange(range);
     if (!item) return false;
     const checkbox = directTaskCheckboxForItem(item);
     if (!checkbox) return false;
     if (richListCaretTextOffset(item, range) !== 0) return false;
 
+    const sourceTransaction = removeRichTaskCheckboxTransaction(checkbox, item);
+    if (sourceTransaction) {
+      event.preventDefault();
+      applySourceTransaction(sourceTransaction, 'rich-task-checkbox-delete');
+      setStatus('チェックリストを通常リストに戻しました');
+      suppressRichInlineActivation();
+      return true;
+    }
+
+    const list = item.closest('ul, ol');
+    if (list?.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) {
+      event.preventDefault();
+      setStatus('チェックリストを通常リストに戻せませんでした');
+      suppressRichInlineActivation();
+      return true;
+    }
+
     event.preventDefault();
     checkbox.remove();
     item.classList.remove('task-list-item');
-    const list = item.closest('ul, ol');
     if (list && !list.querySelector(':scope > li > .task-checkbox')) list.classList.remove('task-list');
     placeCaretAtListItemStart(item);
     syncRichMarkdownFromDom('rich-input');
     return true;
+  }
+
+  function handleRichAtomicBlockBoundaryDelete(event) {
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
+    if (event.target?.closest?.('.rich-source-editor, .code-language-input')) return false;
+    const selection = window.getSelection?.();
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return false;
+    if (nodeClosest(range.startContainer, '.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
+    const direction = event.key === 'Backspace' ? 'before' : event.key === 'Delete' ? 'after' : '';
+    if (!direction) return false;
+
+    const atomicBlock = richAtomicBlockDeleteCandidate(range, direction);
+    if (!atomicBlock) return false;
+    const deletion = richAtomicBlockDeleteTransaction(atomicBlock, direction);
+    if (!deletion) return false;
+
+    event.preventDefault();
+    applySourceTransaction(deletion, 'rich-atomic-block-delete');
+    suppressRichInlineActivation();
+    setStatus('ブロックを削除しました');
+    return true;
+  }
+
+  function richAtomicBlockDeleteCandidate(range, direction) {
+    const direct = nodeClosest(range.startContainer, RICH_ATOMIC_SOURCE_BLOCK_SELECTOR);
+    if (direct && els.rich.contains(direct) && !direct.closest('.is-editing-source')) return direct;
+
+    if (range.startContainer.nodeType === Node.ELEMENT_NODE) {
+      const sibling = direction === 'before'
+        ? range.startContainer.childNodes?.[range.startOffset - 1]
+        : range.startContainer.childNodes?.[range.startOffset];
+      const atomic = nodeElement(sibling)?.closest?.(RICH_ATOMIC_SOURCE_BLOCK_SELECTOR);
+      if (atomic && els.rich.contains(atomic) && !atomic.closest('.is-editing-source')) return atomic;
+    }
+
+    const block = richCaretBlockFromRange(range);
+    if (!block) return null;
+    const offset = richCaretBlockTextOffset(block, range);
+    const length = richCaretBlockTextLength(block);
+    if (direction === 'before' && offset <= 0) return adjacentRichAtomicBlock(block, 'previous');
+    if (direction === 'after' && offset >= length) return adjacentRichAtomicBlock(block, 'next');
+    return null;
+  }
+
+  function adjacentRichAtomicBlock(block, direction) {
+    const siblingProperty = direction === 'previous' ? 'previousElementSibling' : 'nextElementSibling';
+    let sibling = block?.[siblingProperty] || null;
+    while (sibling) {
+      if (sibling.matches?.(RICH_ATOMIC_SOURCE_BLOCK_SELECTOR) && !sibling.closest('.is-editing-source')) return sibling;
+      if (!isIgnorableRichBoundaryElement(sibling)) return null;
+      sibling = sibling[siblingProperty];
+    }
+    return null;
+  }
+
+  function isIgnorableRichBoundaryElement(element) {
+    return Boolean(element?.matches?.('p[data-rich-trailing="true"]') && isEmptyRichParagraph(element));
+  }
+
+  function richAtomicBlockDeleteTransaction(block, direction) {
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    const start = numericData(block, 'sourceStart');
+    const end = numericData(block, 'sourceEnd');
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || end > markdown.length) return null;
+    const deletion = sourceBlockDeletionRange(markdown, start, end, direction);
+    return {
+      from: deletion.from,
+      to: deletion.to,
+      insert: '',
+      selectionAfter: {
+        anchor: deletion.from,
+        focus: deletion.from,
+        affinity: direction === 'before' ? 'before' : 'after',
+      },
+    };
+  }
+
+  function sourceBlockDeletionRange(markdown, start, end, direction) {
+    let from = start;
+    let to = end;
+    const after = markdown.slice(to);
+    const afterSeparator = after.match(/^\n{1,2}/)?.[0] || '';
+    if (direction === 'after' && afterSeparator) {
+      to += afterSeparator.length;
+      return { from, to };
+    }
+    const before = markdown.slice(0, from);
+    const beforeSeparator = before.match(/\n{1,2}$/)?.[0] || '';
+    if (beforeSeparator) {
+      from -= beforeSeparator.length;
+      return { from, to };
+    }
+    if (afterSeparator) to += afterSeparator.length;
+    return { from, to };
   }
 
   function directTaskCheckboxForItem(item) {
@@ -2267,14 +5291,31 @@ flowchart TD
   function handleRichDeleteToEmptyBlock(event) {
     if (event.ctrlKey || event.metaKey || event.altKey) return false;
     const selection = window.getSelection?.();
-    if (!selection || !selection.rangeCount || !selection.isCollapsed || !els.rich.contains(selection.anchorNode)) return false;
-    const block = nodeClosest(selection.anchorNode, RICH_INLINE_EDIT_BLOCK_SELECTOR);
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return false;
+    if (nodeClosest(range.startContainer, '.rich-inline-source, .rich-source-editor, .code-language-input')) return false;
+    const block = nodeClosest(range.startContainer, RICH_INLINE_EDIT_BLOCK_SELECTOR);
     if (!block || block.closest('li')) return false;
     const text = normalizeRichText(block.textContent || '');
     if (text.length !== 1) return false;
     const caretOffset = getCaretCharacterOffsetWithin(block, selection);
     if (event.key === 'Backspace' && caretOffset !== text.length) return false;
     if (event.key === 'Delete' && caretOffset !== 0) return false;
+
+    const sourceTransaction = richDeleteToEmptyBlockTransaction(block, range, event.key);
+    if (sourceTransaction) {
+      event.preventDefault();
+      state.richSelectionLock = true;
+      applySourceTransaction(sourceTransaction, 'rich-delete-to-empty-block');
+      state.richSelectionLock = false;
+      suppressRichInlineActivation();
+      return true;
+    }
+
+    if (guardFailedRichSourceControlTransaction(block, 'rich-delete-to-empty-block', 'ブロックを空にできませんでした')) {
+      event.preventDefault();
+      return true;
+    }
 
     event.preventDefault();
     state.richSelectionLock = true;
@@ -2286,6 +5327,39 @@ flowchart TD
     return true;
   }
 
+  function richDeleteToEmptyBlockTransaction(block, range, key) {
+    if (!block || !range?.collapsed || !isSourceTransactionTextRange(range)) return null;
+    const point = richPlainTextSourcePointFromRange(range);
+    if (!point || !Number.isFinite(point.offset)) return null;
+    const backward = key === 'Backspace';
+    const deletionRange = richPlainTextDeletionRange(point, backward);
+    if (!deletionRange) return null;
+    const { from, to } = deletionRange;
+    if (from < point.contentStart || to > point.contentEnd || from < 0 || to <= from) return null;
+
+    const sourceBlock = nodeClosest(block, RICH_SOURCE_BLOCK_SELECTOR);
+    const isParagraph = sourceBlock?.dataset?.blockType === 'paragraph';
+    const blockStart = numericData(sourceBlock, 'sourceStart');
+    const blockEnd = numericData(sourceBlock, 'sourceEnd');
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    const raw = Number.isFinite(blockStart) && Number.isFinite(blockEnd)
+      ? markdown.slice(blockStart, blockEnd)
+      : '';
+    const becomesEmptyParagraph = isParagraph && raw.length === to - from;
+
+    return {
+      from,
+      to,
+      insert: '',
+      selectionAfter: {
+        anchor: from,
+        focus: from,
+        affinity: backward ? 'before' : 'after',
+      },
+      blankParagraphAt: becomesEmptyParagraph ? from : undefined,
+    };
+  }
+
   function handleRichEnter(event) {
     event.preventDefault();
     window.clearTimeout(state.richReparseTimer);
@@ -2295,18 +5369,39 @@ flowchart TD
     if (!range || !els.rich.contains(range.startContainer)) return;
     pushRichUndoSnapshot('line-break');
 
-    if (event.shiftKey) {
-      insertRichLineBreakAtRange(range);
-      syncRichMarkdownFromDom('rich-input');
+    if (!event.shiftKey && handleRichSelectionEnterTransaction(selection)) {
       return;
     }
 
+    if (!event.shiftKey && (
+      parsePendingRichMathShortcutInBlock(richPendingMathShortcutBlockFromRange(range))
+      || activatePendingMathShortcutFromSelection()
+    )) {
+      return;
+    }
+
+    if (event.shiftKey) {
+      const tableCell = nodeClosest(range.startContainer, 'td, th');
+      if (tableCell && els.rich.contains(tableCell) && handleRichTableCellLineBreakTransaction(tableCell, range)) return;
+      const quote = nodeClosest(range.startContainer, 'blockquote');
+      if (quote && els.rich.contains(quote) && handleRichQuoteEnterTransaction(quote, range)) return;
+      if (handleRichLineBreakTransaction({ pushUndo: false })) return;
+      if (insertRichLineBreakAtRange(range)) syncRichMarkdownFromDom('rich-input');
+      return;
+    }
+
+    if (!range.collapsed && guardUnsupportedRichSelectionEnterFallback(range)) return;
     if (!range.collapsed) range.deleteContents();
 
     const tableCell = nodeClosest(range.startContainer, 'td, th');
     if (tableCell && els.rich.contains(tableCell)) {
-      insertRichLineBreakAtRange(range);
-      syncRichMarkdownFromDom('rich-input');
+      if (handleRichTableCellLineBreakTransaction(tableCell, range)) return;
+      if (insertRichLineBreakAtRange(range)) syncRichMarkdownFromDom('rich-input');
+      return;
+    }
+
+    const quote = nodeClosest(range.startContainer, 'blockquote');
+    if (quote && els.rich.contains(quote) && handleRichQuoteEnterTransaction(quote, range)) {
       return;
     }
 
@@ -2318,6 +5413,8 @@ flowchart TD
 
     const textBlock = richTextBlockFromRange(range);
     if (textBlock) {
+      if (handleRichTextBlockEnterTransaction(textBlock, range)) return;
+      if (guardUnsupportedRichTextBlockEnterFallback(textBlock, range)) return;
       splitRichTextBlockAtRange(textBlock, range);
       return;
     }
@@ -2339,19 +5436,113 @@ flowchart TD
     syncRichMarkdownFromDom('rich-input');
   }
 
+  function handleRichSelectionEnterTransaction(selection) {
+    if (!selection || selection.isCollapsed) return false;
+    const tableRange = richTableTextReplacementRangeFromSelection(selection);
+    const quoteRange = tableRange ? null : richQuoteTextReplacementRangeFromSelection(selection);
+    const rawRange = tableRange || quoteRange || richPlainTextTransactionRangeFromSelection(selection);
+    const replacementRange = rawRange?.from !== rawRange?.to
+      ? expandSourceRangeToIntersectingInlineAtoms(rawRange)
+      : rawRange;
+    if (!replacementRange || replacementRange.from === replacementRange.to) return false;
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    const replacement = tableRange || quoteRange
+      ? {
+        from: replacementRange.from,
+        to: replacementRange.to,
+        insert: tableRange ? '<br>' : '\n> ',
+      }
+      : sourceParagraphBreakReplacement(markdown, replacementRange.from, replacementRange.to);
+    applySourceTransaction({
+      from: replacement.from,
+      to: replacement.to,
+      insert: replacement.insert,
+      selectionAfter: {
+        anchor: replacement.from + replacement.insert.length,
+        focus: replacement.from + replacement.insert.length,
+        affinity: 'after',
+      },
+    }, 'rich-selection-enter');
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function guardUnsupportedRichSelectionEnterFallback(range) {
+    if (!range || range.collapsed || !els.rich.contains(range.startContainer) || !els.rich.contains(range.endContainer)) return false;
+    if (!richRangeTouchesSourceBlock(range)) return false;
+    setStatus('この選択では段落を分割できません');
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function sourceParagraphBreakReplacement(markdown, from, to) {
+    const source = String(markdown || '');
+    let start = Math.max(0, Math.min(source.length, Number(from)));
+    let end = Math.max(start, Math.min(source.length, Number(to)));
+    const beforeHasBlockBreak = source.slice(0, start).endsWith('\n\n');
+    const afterBreak = source.slice(end).match(/^\n{1,2}/)?.[0] || '';
+    if (afterBreak) end += afterBreak.length;
+    return {
+      from: start,
+      to: end,
+      insert: beforeHasBlockBreak ? '' : '\n\n',
+    };
+  }
+
+  function handleRichTextBlockEnterTransaction(textBlock, range) {
+    if (!textBlock || textBlock === els.rich || !range?.collapsed) return false;
+    if (!textBlock.matches?.('p, h1, h2, h3, h4, h5, h6')) return false;
+    if (!textBlock.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) return false;
+    const sourcePoint = domPointToSourceOffset(range.startContainer, range.startOffset);
+    if (!sourcePoint || !Number.isFinite(sourcePoint.offset)) return false;
+    const blockStart = numericData(textBlock, 'sourceStart');
+    const blockEnd = numericData(textBlock, 'sourceEnd');
+    if (sourcePoint.offset < blockStart || sourcePoint.offset > blockEnd) return false;
+    return applySourceTransaction({
+      from: sourcePoint.offset,
+      to: sourcePoint.offset,
+      insert: '\n\n',
+      selectionAfter: {
+        anchor: sourcePoint.offset + 2,
+        focus: sourcePoint.offset + 2,
+        affinity: 'after',
+      },
+    }, 'rich-enter-text-block');
+  }
+
+  function guardUnsupportedRichTextBlockEnterFallback(block, range) {
+    if (!block || !range || !els.rich.contains(block)) return false;
+    const sourceBlock = nodeClosest(block, RICH_SOURCE_BLOCK_SELECTOR) || nodeClosest(range.startContainer, RICH_SOURCE_BLOCK_SELECTOR);
+    if (!sourceBlock) return false;
+    setStatus('この位置では段落を分割できません');
+    suppressRichInlineActivation();
+    return true;
+  }
+
   function richInputRangeFromEvent(event) {
     const ranges = event.getTargetRanges?.();
     const inputRange = ranges && ranges[0];
-    if (!inputRange || !els.rich.contains(inputRange.startContainer)) return null;
+    if (!inputRange || !els.rich.contains(inputRange.startContainer) || !els.rich.contains(inputRange.endContainer)) return null;
     const range = document.createRange();
-    range.setStart(inputRange.startContainer, inputRange.startOffset);
-    range.setEnd(inputRange.endContainer, inputRange.endOffset);
+    try {
+      range.setStart(inputRange.startContainer, inputRange.startOffset);
+      range.setEnd(inputRange.endContainer, inputRange.endOffset);
+    } catch (_) {
+      return null;
+    }
     return range;
   }
 
   function richSelectionRange(selection) {
-    if (!selection || !selection.rangeCount || !els.rich.contains(selection.anchorNode)) return null;
-    return selection.getRangeAt(0);
+    if (!selection || !selection.rangeCount || !els.rich.contains(selection.anchorNode) || !els.rich.contains(selection.focusNode)) return null;
+    let range = null;
+    try {
+      range = selection.getRangeAt(0);
+    } catch (_) {
+      return null;
+    }
+    if (!els.rich.contains(range.startContainer) || !els.rich.contains(range.endContainer)) return null;
+    return range;
   }
 
   function richTextBlockFromRange(range) {
@@ -2680,7 +5871,39 @@ flowchart TD
     } catch (_) {
       return 0;
     }
-    return normalizeRichText(before.toString()).length;
+    return listFragmentVisibleText(before.cloneContents()).length;
+  }
+
+  function richListCaretSourceContentOffset(item, range) {
+    const before = range.cloneRange();
+    before.selectNodeContents(item);
+    try {
+      before.setEnd(range.startContainer, range.startOffset);
+    } catch (_) {
+      return 0;
+    }
+    return stripRichCaretTokens(serializeInlineNodes(Array.from(before.cloneContents().childNodes))).length;
+  }
+
+  function listFragmentVisibleText(fragment) {
+    let text = '';
+    const visit = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const raw = normalizeRichText(node.nodeValue || '');
+        const beforeHardBreak = node.nextSibling?.nodeType === Node.ELEMENT_NODE
+          && node.nextSibling.tagName?.toLowerCase() === 'br';
+        text += beforeHardBreak ? raw.replace(/[ \t]{2}$/, '') : raw;
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      if (node.tagName?.toLowerCase() === 'br') {
+        text += '\n';
+        return;
+      }
+      Array.from(node.childNodes).forEach(visit);
+    };
+    Array.from(fragment.childNodes || []).forEach(visit);
+    return text;
   }
 
   function placeCaretInListItemAtTextOffset(item, targetOffset) {
@@ -2725,6 +5948,9 @@ flowchart TD
     const list = item.closest('ul, ol');
     if (!list) return;
 
+    if (handleRichListEnterTransaction(item, range, list)) return;
+    if (guardFailedRichSourceControlTransaction(list, 'rich-list-enter', 'リスト項目を分割できませんでした')) return;
+
     if (isRichListItemEmpty(item)) {
       exitRichListItem(item, list);
       syncRichMarkdownFromDom('rich-input');
@@ -2738,6 +5964,186 @@ flowchart TD
     item.after(nextItem);
     placeCaretAtListItemStart(nextItem);
     syncRichMarkdownFromDom('rich-input');
+  }
+
+  function handleRichListEnterTransaction(item, range, list) {
+    if (!range?.collapsed || !list?.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) return false;
+    if (item.parentElement !== list) return false;
+    if (item.querySelector('.rich-inline-source')) return false;
+    const blockStart = numericData(list, 'sourceStart');
+    const blockEnd = numericData(list, 'sourceEnd');
+    const raw = stripRichCaretTokens(state.markdown || '').slice(blockStart, blockEnd);
+    const sourceItems = flatListSourceItems(raw);
+    const items = Array.from(list.children).filter((child) => child.tagName?.toLowerCase() === 'li');
+    const itemIndex = items.indexOf(item);
+    if (itemIndex < 0 || sourceItems.length !== items.length) return false;
+    const sourceItem = sourceItems[itemIndex];
+    const parsed = sourceItem?.parsed;
+    if (!sourceItem || !parsed) return false;
+    const content = visibleTextFromListSourceItem(sourceItem);
+    const serialized = visibleListItemText(item);
+    if (content !== serialized) return false;
+
+    if (isRichListItemEmpty(item)) {
+      const from = blockStart + sourceItem.start;
+      const to = blockStart + sourceItem.end;
+      return applySourceTransaction({
+        from,
+        to,
+        insert: '\n',
+        blankParagraphAt: from + 1,
+        selectionAfter: {
+          anchor: from + 1,
+          focus: from + 1,
+          affinity: 'after',
+        },
+      }, 'rich-list-exit');
+    }
+
+    const caretOffset = Math.max(0, Math.min(content.length, richListCaretSourceContentOffset(item, range)));
+    const currentSource = listItemSourceFromText(parsed.prefix, parsed, content.slice(0, caretOffset));
+    const nextPrefix = nextListSourcePrefix(parsed);
+    const nextSource = listItemSourceFromText(nextPrefix, parsed, content.slice(caretOffset));
+    const from = blockStart + sourceItem.start;
+    const to = blockStart + listSourceItemTextEnd(sourceItem);
+    const insert = `${currentSource}\n${nextSource}`;
+    const nextCaret = caretOffset === 0
+      ? from + parsed.prefix.length
+      : from + currentSource.length + 1 + nextPrefix.length;
+    return applySourceTransaction({
+      from,
+      to,
+      insert,
+      selectionAfter: {
+        anchor: nextCaret,
+        focus: nextCaret,
+        affinity: 'after',
+      },
+    }, 'rich-list-enter');
+  }
+
+  function listItemSourceFromText(firstPrefix, parsed, text) {
+    const lines = String(text || '').split('\n');
+    const continuationPrefix = `${parsed?.indent || ''}  `;
+    return lines.map((line, index) => `${index === 0 ? firstPrefix : continuationPrefix}${line}`).join('\n');
+  }
+
+  function listSourceItemTextEnd(sourceItem) {
+    const lastLine = sourceItem?.lines?.[sourceItem.lines.length - 1];
+    if (!lastLine) return sourceItem?.end || 0;
+    return lastLine.start + String(lastLine.text || '').length;
+  }
+
+  function parseFlatListSourceLine(line) {
+    const match = String(line || '').match(/^(\s*)([-+*]|\d+\.)(\s+)(?:\[([ xX])\](\s+))?/);
+    if (!match) return null;
+    const marker = match[2];
+    const ordered = /^\d+\.$/.test(marker);
+    const number = ordered ? Number.parseInt(marker, 10) : null;
+    return {
+      indent: match[1] || '',
+      marker,
+      ordered,
+      number,
+      task: match[4] !== undefined,
+      prefix: match[0],
+    };
+  }
+
+  function flatListSourceItems(raw) {
+    const sourceItems = [];
+    let current = null;
+    for (const line of getLines(raw).filter((item) => item.text.trim() !== '')) {
+      const parsed = parseFlatListSourceLine(line.text);
+      if (parsed) {
+        current = {
+          start: line.start,
+          end: line.end,
+          parsed,
+          lines: [line],
+        };
+        sourceItems.push(current);
+        continue;
+      }
+      if (!current) continue;
+      current.lines.push(line);
+      current.end = line.end;
+    }
+    return sourceItems;
+  }
+
+  function visibleTextFromListSourceItem(sourceItem) {
+    if (!sourceItem?.lines?.length) return '';
+    return sourceItem.lines.map((line, index) => {
+      const prefixLength = index === 0
+        ? sourceItem.parsed.prefix.length
+        : listContinuationPrefixLength(line.text, sourceItem.parsed);
+      return line.text.slice(prefixLength).replace(/[ \t]{2}$/, '');
+    }).join('\n');
+  }
+
+  function listContinuationPrefixLength(line, parsed) {
+    const expected = `${parsed?.indent || ''}  `;
+    if (String(line || '').startsWith(expected)) return expected.length;
+    const match = String(line || '').match(/^\s*/);
+    return match ? match[0].length : 0;
+  }
+
+  function sourceOffsetFromListItemTextOffset(sourceItem, textOffset) {
+    const target = Math.max(0, Number(textOffset) || 0);
+    let consumed = 0;
+    for (let index = 0; index < sourceItem.lines.length; index += 1) {
+      const line = sourceItem.lines[index];
+      const prefixLength = index === 0
+        ? sourceItem.parsed.prefix.length
+        : listContinuationPrefixLength(line.text, sourceItem.parsed);
+      const visible = line.text.slice(prefixLength).replace(/[ \t]{2}$/, '');
+      if (target <= consumed + visible.length) {
+        return line.start + prefixLength + (target - consumed);
+      }
+      consumed += visible.length;
+      if (index < sourceItem.lines.length - 1) {
+        if (target <= consumed + 1) {
+          const nextLine = sourceItem.lines[index + 1];
+          return nextLine.start + listContinuationPrefixLength(nextLine.text, sourceItem.parsed);
+        }
+        consumed += 1;
+      }
+    }
+    const lastLine = sourceItem.lines[sourceItem.lines.length - 1];
+    const lastPrefix = sourceItem.lines.length === 1
+      ? sourceItem.parsed.prefix.length
+      : listContinuationPrefixLength(lastLine.text, sourceItem.parsed);
+    return lastLine.start + lastPrefix + lastLine.text.slice(lastPrefix).length;
+  }
+
+  function textOffsetFromListItemSourceOffset(sourceItem, localOffset) {
+    const target = Math.max(sourceItem.start, Math.min(sourceItem.end, Number(localOffset) || 0));
+    let consumed = 0;
+    for (let index = 0; index < sourceItem.lines.length; index += 1) {
+      const line = sourceItem.lines[index];
+      const prefixLength = index === 0
+        ? sourceItem.parsed.prefix.length
+        : listContinuationPrefixLength(line.text, sourceItem.parsed);
+      const visible = line.text.slice(prefixLength).replace(/[ \t]{2}$/, '');
+      const contentStart = line.start + prefixLength;
+      const contentEnd = contentStart + visible.length;
+      if (target <= contentStart) return consumed;
+      if (target <= contentEnd) return consumed + (target - contentStart);
+      consumed += visible.length;
+      if (index < sourceItem.lines.length - 1) consumed += 1;
+    }
+    return consumed;
+  }
+
+  function nextListSourcePrefix(parsed) {
+    const marker = parsed.ordered ? `${(parsed.number || 1) + 1}.` : parsed.marker;
+    const base = `${parsed.indent}${marker} `;
+    return parsed.task ? `${base}[ ] ` : base;
+  }
+
+  function visibleListItemText(item) {
+    return normalizeRichText(serializeInlineNodes(listItemEditableContentNodes(item))).replace(/[ \t]{2}\n/g, '\n');
   }
 
   function createEmptyListItemLike(item, list) {
@@ -2831,6 +6237,12 @@ flowchart TD
     if (node.nodeType === Node.TEXT_NODE) return normalizeRichText(node.nodeValue || '').replace(/\s+/g, '') !== '';
     if (node.nodeType !== Node.ELEMENT_NODE) return false;
     const element = node;
+    if (element.classList.contains('rich-list-caret-anchor')) {
+      return normalizeRichText(element.textContent || '').replace(/\u200b/g, '').replace(/\s+/g, '') !== '';
+    }
+    if (element.classList.contains('rich-line-break-caret-anchor')) {
+      return normalizeRichText(element.textContent || '').replace(/\u200b/g, '').replace(/\s+/g, '') !== '';
+    }
     if (element.classList.contains('task-checkbox') || element.classList.contains('code-language-input')) return false;
     const tag = element.tagName.toLowerCase();
     if (tag === 'br') return false;
@@ -2888,14 +6300,106 @@ flowchart TD
 
   function insertRichLineBreak() {
     const selection = window.getSelection?.();
-    if (!selection || !selection.rangeCount || !els.rich.contains(selection.anchorNode)) return;
-    const range = selection.getRangeAt(0);
-    insertRichLineBreakAtRange(range);
+    const range = richSelectionRange(selection);
+    if (!range) return false;
+    return insertRichLineBreakAtRange(range);
+  }
+
+  function handleRichLineBreakTransaction(options = {}) {
+    const selection = window.getSelection?.();
+    const replacementRange = richLineBreakTransactionRangeFromSelection(selection);
+    if (!replacementRange) return false;
+    if (options.pushUndo) pushRichUndoSnapshot('line-break');
+    const insert = richLineBreakInsertForSelection(selection);
+    const nextOffset = replacementRange.from + insert.length;
+    applySourceTransaction({
+      from: replacementRange.from,
+      to: replacementRange.to,
+      insert,
+      selectionAfter: {
+        anchor: nextOffset,
+        focus: nextOffset,
+        affinity: 'after',
+      },
+    }, 'rich-line-break');
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richLineBreakTransactionRangeFromSelection(selection) {
+    const tableRange = richTableTextReplacementRangeFromSelection(selection);
+    const quoteRange = tableRange ? null : richQuoteTextReplacementRangeFromSelection(selection);
+    const rawRange = tableRange || quoteRange || richPlainTextTransactionRangeFromSelection(selection);
+    if (!rawRange) return null;
+    const range = rawRange.from !== rawRange.to
+      ? expandSourceRangeToIntersectingInlineAtoms(rawRange)
+      : rawRange;
+    if (!Number.isFinite(range.from) || !Number.isFinite(range.to) || range.to < range.from) return null;
+    return range;
+  }
+
+  function richLineBreakInsertForSelection(selection) {
+    const cell = nodeClosest(selection?.anchorNode, 'td, th');
+    const focusCell = nodeClosest(selection?.focusNode, 'td, th');
+    if (cell && cell === focusCell && els.rich.contains(cell)) return '<br>';
+
+    const quote = nodeClosest(selection?.anchorNode, 'blockquote');
+    const focusQuote = nodeClosest(selection?.focusNode, 'blockquote');
+    if (quote && quote === focusQuote && els.rich.contains(quote)) return '\n> ';
+
+    const item = nodeClosest(selection?.anchorNode, 'li');
+    const focusItem = nodeClosest(selection?.focusNode, 'li');
+    if (!item || item !== focusItem || !els.rich.contains(item)) return '  \n';
+    const list = item.closest('ul, ol');
+    if (!list?.matches?.(RICH_SOURCE_BLOCK_SELECTOR) || item.parentElement !== list) return '  \n';
+    const blockStart = numericData(list, 'sourceStart');
+    const blockEnd = numericData(list, 'sourceEnd');
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return '  \n';
+    const raw = stripRichCaretTokens(state.markdown || '').slice(blockStart, blockEnd);
+    const sourceItems = flatListSourceItems(raw);
+    const items = Array.from(list.children).filter((child) => child.tagName?.toLowerCase() === 'li');
+    const sourceItem = sourceItems[items.indexOf(item)];
+    return sourceItem?.parsed ? `  \n${sourceItem.parsed.indent}  ` : '  \n';
+  }
+
+  function handleRichTableCellLineBreakTransaction(cell, range) {
+    if (!range?.collapsed || !cell?.matches?.('td, th')) return false;
+    const point = richTableSourcePointFromRange(cell, range);
+    if (!point) return false;
+    const insert = '<br>';
+    return applySourceTransaction({
+      from: point.offset,
+      to: point.offset,
+      insert,
+      selectionAfter: {
+        anchor: point.offset + insert.length,
+        focus: point.offset + insert.length,
+        affinity: 'after',
+      },
+    }, 'rich-table-cell-line-break');
+  }
+
+  function handleRichQuoteEnterTransaction(blockquote, range) {
+    if (!range?.collapsed || !blockquote?.matches?.('blockquote')) return false;
+    const point = richQuoteSourcePointFromRange(blockquote, range);
+    if (!point) return false;
+    const insert = '\n> ';
+    return applySourceTransaction({
+      from: point.offset,
+      to: point.offset,
+      insert,
+      selectionAfter: {
+        anchor: point.offset + insert.length,
+        focus: point.offset + insert.length,
+        affinity: 'after',
+      },
+    }, 'rich-quote-enter');
   }
 
   function insertRichLineBreakAtRange(range) {
     const selection = window.getSelection?.();
-    if (!selection || !range || !els.rich.contains(range.startContainer)) return;
+    if (!selection || !range || !els.rich.contains(range.startContainer) || !els.rich.contains(range.endContainer)) return false;
+    if (guardUnsupportedRichLineBreakFallback(range)) return false;
     range.deleteContents();
     const br = document.createElement('br');
     range.insertNode(br);
@@ -2905,6 +6409,15 @@ flowchart TD
     range.collapse(true);
     selection.removeAllRanges();
     selection.addRange(range);
+    return true;
+  }
+
+  function guardUnsupportedRichLineBreakFallback(range) {
+    if (!range || !els.rich.contains(range.startContainer)) return false;
+    if (!richRangeTouchesSourceBlock(range)) return false;
+    setStatus('この位置では改行できません');
+    suppressRichInlineActivation();
+    return true;
   }
 
   function placeCaretAtStart(element) {
@@ -2949,7 +6462,8 @@ flowchart TD
   async function openMarkdownFile() {
     if (window.showOpenFilePicker) {
       try {
-        const [fileHandle] = await window.showOpenFilePicker({
+        const [fileHandle] = await showOpenFilePickerFromRecentDirectory({
+          id: 'pme-open-md',
           multiple: false,
           types: [{
             description: 'Markdown',
@@ -2970,6 +6484,63 @@ flowchart TD
     }
 
     els.fileInput.click();
+  }
+
+  async function showOpenFilePickerFromRecentDirectory(options = {}) {
+    const pickerOptions = await pickerOptionsWithStartDirectory(options, { preferMarkdownDirectory: true });
+    try {
+      return await window.showOpenFilePicker(pickerOptions);
+    } catch (error) {
+      if (pickerOptions.startIn && isPickerStartInError(error)) {
+        const { startIn, ...fallbackOptions } = pickerOptions;
+        return window.showOpenFilePicker(fallbackOptions);
+      }
+      throw error;
+    }
+  }
+
+  async function showDirectoryPickerFromRecentDirectory(options = {}, picker = {}) {
+    const pickerOptions = await pickerOptionsWithStartDirectory(options, { preferMarkdownDirectory: true, ...picker });
+    try {
+      return await window.showDirectoryPicker(pickerOptions);
+    } catch (error) {
+      if (pickerOptions.startIn && isPickerStartInError(error)) {
+        if (picker.startInHandle) {
+          const recentOptions = await pickerOptionsWithStartDirectory(options, { preferMarkdownDirectory: true });
+          if (recentOptions.startIn && recentOptions.startIn !== pickerOptions.startIn) {
+            try {
+              return await window.showDirectoryPicker(recentOptions);
+            } catch (recentError) {
+              if (!isPickerStartInError(recentError)) throw recentError;
+            }
+          }
+        }
+        const { startIn, ...fallbackOptions } = pickerOptions;
+        return window.showDirectoryPicker(fallbackOptions);
+      }
+      throw error;
+    }
+  }
+
+  async function pickerOptionsWithStartDirectory(options = {}, picker = {}) {
+    const pickerOptions = { ...options };
+    const startIn = picker.startInHandle || await preferredPickerStartDirectory(Boolean(picker.preferMarkdownDirectory));
+    if (startIn) pickerOptions.startIn = startIn;
+    return pickerOptions;
+  }
+
+  async function preferredPickerStartDirectory(preferMarkdownDirectory) {
+    if (preferMarkdownDirectory && state.directoryHandle && state.markdownRelativePath) {
+      try {
+        return await markdownDirectoryHandle();
+      } catch (_) {}
+    }
+    if (state.directoryHandle) return state.directoryHandle;
+    return readPickerStartDirectoryHandle();
+  }
+
+  function isPickerStartInError(error) {
+    return error instanceof TypeError || error?.name === 'TypeError' || /startIn/i.test(String(error?.message || ''));
   }
 
   async function onFileChosen(event) {
@@ -3023,7 +6594,10 @@ flowchart TD
     }
 
     try {
-      const directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+      const directoryHandle = await showDirectoryPickerFromRecentDirectory(
+        { id: 'pme-md-folder', mode: 'readwrite' },
+        { startInHandle: fileHandle || null }
+      );
       return await attachDirectoryToOpenedMarkdown(file, fileHandle, directoryHandle);
     } catch (error) {
       if (error?.name !== 'AbortError') setStatus('フォルダの読み込みに失敗しました');
@@ -3032,23 +6606,27 @@ flowchart TD
   }
 
   async function attachDirectoryToOpenedMarkdown(file, fileHandle, directoryHandle) {
-    const entries = await collectDirectoryEntries(directoryHandle);
+    const entries = await collectLimitedDirectoryEntries(directoryHandle);
     const chosen = await findOpenedMarkdownEntry(entries, file, fileHandle);
     if (!chosen) {
-      setStatus(`${state.fileName} を開きました。選択フォルダ内に同じMarkdownファイルが見つかりませんでした`);
+      setStatus(`${state.fileName} を開きました。選択フォルダ内に同じMarkdownファイルが見つかりませんでした${folderScanStatusSuffix()}`);
+      warnFolderScanLimitIfNeeded();
       return false;
     }
 
     state.markdownRelativePath = normalizeAssetPath(chosen.relativePath || chosen.file.name || state.fileName);
     state.directoryHandle = directoryHandle;
+    state.pickerStartDirectoryHandle = directoryHandle;
     state.directoryName = directoryHandle.name || '';
     state.fileHandle = chosen.handle || state.fileHandle || null;
     clearAssetUrls();
     buildFolderAssetUrls(entries, dirnamePath(state.markdownRelativePath));
     await persistDirectoryHandle(directoryHandle);
+    await rememberPickerStartDirectory(directoryHandle);
     renderAll('open-file-folder');
     persistDraft();
-    setStatus(`${state.fileName} を開きました。フォルダ参照を許可済み (${state.directoryName || 'selected folder'})。画像候補: ${state.assetUrls.size}`);
+    setStatus(`${state.fileName} を開きました。フォルダ参照を許可済み (${state.directoryName || 'selected folder'})。画像候補: ${state.assetUrls.size}${folderScanStatusSuffix()}`);
+    warnFolderScanLimitIfNeeded();
     return true;
   }
 
@@ -3075,8 +6653,8 @@ flowchart TD
   async function openFolder() {
     if (window.showDirectoryPicker) {
       try {
-        const directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-        const entries = await collectDirectoryEntries(directoryHandle);
+        const directoryHandle = await showDirectoryPickerFromRecentDirectory({ id: 'pme-open-folder', mode: 'readwrite' });
+        const entries = await collectLimitedDirectoryEntries(directoryHandle);
         await openFolderEntries(entries, directoryHandle.name || 'selected folder', directoryHandle);
         return;
       } catch (error) {
@@ -3097,8 +6675,8 @@ flowchart TD
 
     if (window.showDirectoryPicker) {
       try {
-        const directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-        const entries = await collectDirectoryEntries(directoryHandle);
+        const directoryHandle = await showDirectoryPickerFromRecentDirectory({ id: 'pme-grant-folder', mode: 'readwrite' });
+        const entries = await collectLimitedDirectoryEntries(directoryHandle);
         await grantFolderEntriesForCurrentDocument(entries, directoryHandle.name || 'selected folder', directoryHandle);
         return;
       } catch (error) {
@@ -3115,7 +6693,8 @@ flowchart TD
     if (!entries.length) return;
     const chosen = await findCurrentMarkdownEntry(entries);
     if (!chosen) {
-      setStatus(`${state.fileName} が選択フォルダ内に見つかりませんでした。編集中内容は変更していません`);
+      setStatus(`${state.fileName} が選択フォルダ内に見つかりませんでした。編集中内容は変更していません${folderScanStatusSuffix()}`);
+      warnFolderScanLimitIfNeeded();
       return;
     }
 
@@ -3126,12 +6705,14 @@ flowchart TD
 
     state.markdownRelativePath = normalizeAssetPath(chosen.relativePath || chosen.file.name || state.fileName);
     state.directoryHandle = directoryHandle;
+    state.pickerStartDirectoryHandle = directoryHandle || state.pickerStartDirectoryHandle;
     state.directoryName = directoryHandle?.name || folderName || '';
     state.fileHandle = chosen.handle || state.fileHandle || null;
     clearAssetUrls();
     buildFolderAssetUrls(entries, dirnamePath(state.markdownRelativePath));
     if (directoryHandle) {
       await persistDirectoryHandle(directoryHandle);
+      await rememberPickerStartDirectory(directoryHandle);
     } else {
       await clearPersistedDirectoryHandle();
     }
@@ -3142,7 +6723,8 @@ flowchart TD
     state.dirty = previousDirty;
     updateStatusBar();
     const access = directoryHandle ? 'File System Access API' : 'フォルダ入力';
-    setStatus(`${state.fileName} の編集中内容を維持したままフォルダを許可しました (${access})。画像候補: ${state.assetUrls.size}`);
+    setStatus(`${state.fileName} の編集中内容を維持したままフォルダを許可しました (${access})。画像候補: ${state.assetUrls.size}${folderScanStatusSuffix()}`);
+    warnFolderScanLimitIfNeeded();
   }
 
   async function findCurrentMarkdownEntry(entries) {
@@ -3214,7 +6796,9 @@ flowchart TD
     event.target.value = '';
     if (!files.length) return;
 
-    const entries = files.map((file) => fileEntry(file));
+    const context = createFolderScanContext();
+    const entries = folderInputEntriesWithinLimits(files, context);
+    state.folderScanLimitMessage = folderScanLimitMessage(context);
     const mode = state.folderInputMode;
     state.folderInputMode = 'open';
     if (mode === 'grant-current') {
@@ -3224,21 +6808,83 @@ flowchart TD
     openFolderEntries(entries, '', null);
   }
 
-  async function collectDirectoryEntries(directoryHandle, prefix = '') {
+  async function collectLimitedDirectoryEntries(directoryHandle) {
+    const context = createFolderScanContext();
+    const entries = await collectDirectoryEntries(directoryHandle, '', context, 0);
+    state.folderScanLimitMessage = folderScanLimitMessage(context);
+    return entries;
+  }
+
+  async function collectDirectoryEntries(directoryHandle, prefix = '', context = createFolderScanContext(), depth = 0) {
     const entries = [];
     const iterator = directoryHandle.entries ? directoryHandle.entries() : directoryHandle.values();
     for await (const item of iterator) {
+      if (context.files >= MAX_FOLDER_SCAN_FILES) {
+        context.fileLimitHit = true;
+        break;
+      }
       const handle = Array.isArray(item) ? item[1] : item;
       const name = Array.isArray(item) ? item[0] : handle.name;
       const relativePath = normalizeAssetPath(`${prefix}${name || handle.name || ''}`);
       if (handle.kind === 'file') {
         const file = await handle.getFile();
         entries.push(fileEntry(file, relativePath, handle));
+        context.files += 1;
       } else if (handle.kind === 'directory') {
-        entries.push(...await collectDirectoryEntries(handle, `${relativePath}/`));
+        if (depth >= MAX_FOLDER_SCAN_DEPTH) {
+          context.depthLimitHit = true;
+          continue;
+        }
+        entries.push(...await collectDirectoryEntries(handle, `${relativePath}/`, context, depth + 1));
       }
     }
     return entries;
+  }
+
+  function folderInputEntriesWithinLimits(files, context = createFolderScanContext()) {
+    const entries = [];
+    for (const file of files) {
+      if (context.files >= MAX_FOLDER_SCAN_FILES) {
+        context.fileLimitHit = true;
+        break;
+      }
+      const relativePath = normalizeAssetPath(file.webkitRelativePath || file.name || '');
+      const depth = Math.max(0, relativePath.split('/').filter(Boolean).length - 1);
+      if (depth > MAX_FOLDER_SCAN_DEPTH) {
+        context.depthLimitHit = true;
+        continue;
+      }
+      entries.push(fileEntry(file));
+      context.files += 1;
+    }
+    return entries;
+  }
+
+  function createFolderScanContext() {
+    return { files: 0, fileLimitHit: false, depthLimitHit: false };
+  }
+
+  function folderScanLimitMessage(context) {
+    if (!context?.fileLimitHit && !context?.depthLimitHit) return '';
+    const limits = [];
+    if (context.fileLimitHit) limits.push(`最大${MAX_FOLDER_SCAN_FILES.toLocaleString()}ファイル`);
+    if (context.depthLimitHit) limits.push(`最大${MAX_FOLDER_SCAN_DEPTH}階層`);
+    return `フォルダ走査上限（${limits.join('、')}）に達したため一部を読み飛ばしました`;
+  }
+
+  function folderScanStatusSuffix() {
+    return state.folderScanLimitMessage ? `。${state.folderScanLimitMessage}` : '';
+  }
+
+  function warnFolderScanLimitIfNeeded() {
+    if (!state.folderScanLimitMessage) return;
+    const message = `${state.folderScanLimitMessage}。読み飛ばした範囲内のMarkdownファイルや画像は候補・表示対象になりません。必要なファイルに近いフォルダを選び直すと改善します。`;
+    if (els.folderScanWarningDialog && els.folderScanWarningMessage && typeof els.folderScanWarningDialog.showModal === 'function') {
+      els.folderScanWarningMessage.textContent = message;
+      if (!els.folderScanWarningDialog.open) els.folderScanWarningDialog.showModal();
+      return;
+    }
+    alert(`警告: ${message}`);
   }
 
   async function openFolderEntries(entries, folderName, directoryHandle = null) {
@@ -3246,7 +6892,8 @@ flowchart TD
 
     const markdownEntries = entries.filter((entry) => isMarkdownFile(entry.file));
     if (!markdownEntries.length) {
-      setStatus('フォルダ内にMarkdownファイルがありません');
+      setStatus(`フォルダ内にMarkdownファイルがありません${folderScanStatusSuffix()}`);
+      warnFolderScanLimitIfNeeded();
       return;
     }
 
@@ -3264,11 +6911,13 @@ flowchart TD
       state.fileName = safeFileName(chosen.file.name || 'untitled.md');
       state.markdownRelativePath = normalizeAssetPath(chosen.relativePath || chosen.file.name || '');
       state.directoryHandle = directoryHandle;
+      state.pickerStartDirectoryHandle = directoryHandle || state.pickerStartDirectoryHandle;
       state.directoryName = directoryHandle?.name || folderName || '';
       state.fileHandle = chosen.handle || null;
       buildFolderAssetUrls(entries, dirnamePath(state.markdownRelativePath));
       if (directoryHandle) {
         await persistDirectoryHandle(directoryHandle);
+        await rememberPickerStartDirectory(directoryHandle);
       } else {
         await clearPersistedDirectoryHandle();
       }
@@ -3280,7 +6929,8 @@ flowchart TD
       const suffix = folderName ? ` (${folderName})` : '';
       const access = directoryHandle ? 'File System Access API' : 'フォルダ入力';
       const assetsHint = directoryHandle ? '。貼り付け/ドロップ画像はassetsフォルダに保存できます' : '';
-      setStatus(`${state.fileName} をフォルダ基準で開きました${suffix} (${access})。画像候補: ${count}${assetsHint}`);
+      setStatus(`${state.fileName} をフォルダ基準で開きました${suffix} (${access})。画像候補: ${count}${assetsHint}${folderScanStatusSuffix()}`);
+      warnFolderScanLimitIfNeeded();
     };
     reader.onerror = () => setStatus('ファイルの読み込みに失敗しました');
     reader.readAsText(chosen.file, 'utf-8');
@@ -3298,6 +6948,10 @@ flowchart TD
 
   function beginImageInsertion(event) {
     state.pendingImageInsertionContext = createImageInsertionContext(event);
+    if (guardUnsupportedImageInsertionContext(state.pendingImageInsertionContext, '画像挿入')) {
+      state.pendingImageInsertionContext = null;
+      return;
+    }
     if (!hasImageAssetFolderContext('画像挿入')) {
       state.pendingImageInsertionContext = null;
       return;
@@ -3471,15 +7125,19 @@ flowchart TD
   function applyRichFormat(format) {
     switch (format) {
       case 'h1':
+        if (applyRichBlockFormatTransaction('h1')) return true;
         replaceRichCurrentBlockWithHeading(1);
         return true;
       case 'h2':
+        if (applyRichBlockFormatTransaction('h2')) return true;
         replaceRichCurrentBlockWithHeading(2);
         return true;
       case 'bold':
+        if (applyRichInlineFormatTransaction('bold')) return true;
         insertRichInlineElement('strong', '太字');
         return true;
       case 'italic':
+        if (applyRichInlineFormatTransaction('italic')) return true;
         insertRichInlineElement('em', '斜体');
         return true;
       case 'code': {
@@ -3487,14 +7145,17 @@ flowchart TD
         if (selected.includes('\n')) {
           insertRichMarkdownBlock(`\`\`\`\n${selected || 'code'}\n\`\`\``, 'コードブロックを挿入しました');
         } else {
+          if (applyRichInlineFormatTransaction('code')) return true;
           insertRichInlineElement('code', 'code');
         }
         return true;
       }
       case 'quote':
+        if (applyRichBlockFormatTransaction('quote')) return true;
         replaceRichCurrentBlockWithQuote();
         return true;
       case 'list':
+        if (applyRichBlockFormatTransaction('list')) return true;
         replaceRichCurrentBlockWithList();
         return true;
       case 'table':
@@ -3508,18 +7169,285 @@ flowchart TD
     }
   }
 
+  function applyRichBlockFormatTransaction(format) {
+    const selection = window.getSelection?.();
+    const range = richSelectionRange(selection);
+    if (!range) return false;
+    if (nodeClosest(selection.anchorNode, '.rich-inline-source, .rich-source-editor, .code-language-input')) {
+      return guardUnsupportedRichBlockFormatContext(range);
+    }
+    const sourceBlock = richTextSourceBlockForFormat(range);
+    if (!sourceBlock && applyRichListItemBlockFormatTransaction(format, range, selection)) return true;
+    if (!sourceBlock && applyRichTrailingBlockFormatTransaction(format, range, selection)) return true;
+    if (!sourceBlock && guardUnsupportedRichBlockFormatContext(range)) return true;
+    if (!sourceBlock) return false;
+    if (!selection.isCollapsed && richRangeExtendsOutsideSourceBlock(range, sourceBlock)) {
+      setStatus('この選択はMarkdownソースへ変換できません');
+      suppressRichInlineActivation();
+      return true;
+    }
+    const start = numericData(sourceBlock, 'sourceStart');
+    const end = numericData(sourceBlock, 'sourceEnd');
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return false;
+    const raw = stripRichCaretTokens(state.markdown || '').slice(start, end);
+    const selected = selection.isCollapsed ? '' : normalizeNewlines(selection.toString()).trim();
+    const content = selected || richBlockSourceContentForFormat(raw, sourceBlock.dataset.blockType);
+    const replacement = richBlockFormatReplacement(format, content);
+    if (!replacement) return false;
+    applySourceTransaction({
+      from: start,
+      to: end,
+      insert: replacement,
+      selectionAfter: {
+        anchor: start + replacement.length,
+        focus: start + replacement.length,
+        affinity: 'after',
+      },
+    }, `rich-block-format-${format}`);
+    setStatus(`${richBlockFormatLabel(format)}に変換しました`);
+    return true;
+  }
+
+  function guardUnsupportedRichBlockFormatContext(range) {
+    if (!range || !els.rich.contains(range.startContainer) || !els.rich.contains(range.endContainer)) return false;
+    const blockedSelector = [
+      'td',
+      'th',
+      'table',
+      'pre.code-block',
+      '.mermaid-diagram',
+      '.math-display',
+      '.toc',
+      '.rich-inline-source',
+      '.rich-source-editor',
+      '.code-language-input',
+    ].join(', ');
+    const rangeNodes = [range.startContainer, range.endContainer, range.commonAncestorContainer].filter(Boolean);
+    if (rangeNodes.some((node) => nodeClosest(node, blockedSelector)) || richRangeTouchesSourceBlock(range)) {
+      setStatus('この位置ではブロック変換できません');
+      suppressRichInlineActivation();
+      return true;
+    }
+    return false;
+  }
+
+  function applyRichListItemBlockFormatTransaction(format, range, selection) {
+    if (!['h1', 'h2', 'quote', 'list'].includes(format)) return false;
+    const item = richListItemFromRange(range);
+    if (!item || !els.rich.contains(item)) return false;
+    if (!selection?.isCollapsed && nodeClosest(selection.focusNode, 'li') !== item) return false;
+    const list = item.closest('ul, ol');
+    if (!list?.matches?.(RICH_SOURCE_BLOCK_SELECTOR) || item.parentElement !== list) return false;
+    const blockStart = numericData(list, 'sourceStart');
+    const blockEnd = numericData(list, 'sourceEnd');
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return false;
+    const raw = stripRichCaretTokens(state.markdown || '').slice(blockStart, blockEnd);
+    const sourceItems = flatListSourceItems(raw);
+    const items = Array.from(list.children).filter((child) => child.tagName?.toLowerCase() === 'li');
+    const itemIndex = items.indexOf(item);
+    if (itemIndex < 0 || sourceItems.length !== items.length) return false;
+    const sourceItem = sourceItems[itemIndex];
+    if (!sourceItem?.parsed) return false;
+    const sourceContent = visibleTextFromListSourceItem(sourceItem);
+    if (sourceContent !== visibleListItemText(item)) return false;
+    if (format === 'list') {
+      setStatus('リスト項目です');
+      suppressRichInlineActivation();
+      return true;
+    }
+
+    const selected = selection?.isCollapsed ? '' : normalizeNewlines(selection.toString()).trim();
+    const content = selected || sourceContent.trim() || '本文';
+    const replacement = richBlockFormatReplacement(format, content);
+    if (!replacement) return false;
+
+    const hasPrevious = itemIndex > 0;
+    const hasNext = itemIndex < sourceItems.length - 1;
+    const insert = `${hasPrevious ? '\n' : ''}${replacement}${hasNext ? '\n\n' : ''}`;
+    const from = blockStart + sourceItem.start;
+    const to = blockStart + sourceItem.end;
+    const selectionOffset = from + (hasPrevious ? 1 : 0) + replacement.length;
+    applySourceTransaction({
+      from,
+      to,
+      insert,
+      selectionAfter: {
+        anchor: selectionOffset,
+        focus: selectionOffset,
+        affinity: 'after',
+      },
+    }, `rich-list-item-block-format-${format}`);
+    setStatus(`${richBlockFormatLabel(format)}に変換しました`);
+    return true;
+  }
+
+  function applyRichTrailingBlockFormatTransaction(format, range, selection) {
+    const trailing = nodeClosest(range?.startContainer, 'p[data-rich-trailing="true"]');
+    if (!trailing || !els.rich.contains(trailing)) return false;
+    const selected = selection?.isCollapsed ? '' : normalizeNewlines(selection.toString()).trim();
+    const content = selected || normalizeRichText(trailing.textContent || '').trim();
+    const replacement = richBlockFormatReplacement(format, content);
+    if (!replacement) return false;
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    const prefix = markdown.length ? '\n\n' : '';
+    const insert = `${prefix}${replacement}`;
+    const nextOffset = markdown.length + insert.length;
+    applySourceTransaction({
+      from: markdown.length,
+      to: markdown.length,
+      insert,
+      selectionAfter: {
+        anchor: nextOffset,
+        focus: nextOffset,
+        affinity: 'after',
+      },
+    }, `rich-trailing-block-format-${format}`);
+    setStatus(`${richBlockFormatLabel(format)}に変換しました`);
+    return true;
+  }
+
+  function richTextSourceBlockForFormat(range) {
+    const block = nodeClosest(range.startContainer, RICH_SOURCE_BLOCK_SELECTOR);
+    if (!block || !els.rich.contains(block)) return null;
+    if (!['paragraph', 'heading', 'quote'].includes(block.dataset.blockType || '')) return null;
+    if (!block.matches?.('p, h1, h2, h3, h4, h5, h6, blockquote')) return null;
+    return block;
+  }
+
+  function richBlockSourceContentForFormat(raw, type) {
+    const value = normalizeNewlines(raw || '').trim();
+    if (type === 'heading') {
+      return value.replace(/^\s*#{1,6}\s+/, '').replace(/\s+#*\s*$/, '').trim() || '見出し';
+    }
+    if (type === 'quote') {
+      return value.split('\n')
+        .map((line) => line.replace(/^\s*>\s?/, ''))
+        .join('\n')
+        .trim() || '引用文';
+    }
+    return value || '本文';
+  }
+
+  function richBlockFormatReplacement(format, content) {
+    const lines = normalizeNewlines(content || '').split('\n');
+    if (format === 'h1') return `# ${stripBlockMarkerMarkdown(lines.join(' ')) || '見出し'}`;
+    if (format === 'h2') return `## ${stripBlockMarkerMarkdown(lines.join(' ')) || '見出し'}`;
+    if (format === 'quote') {
+      const body = lines.length ? lines : ['引用文'];
+      return body.map((line) => `> ${line.trimEnd() || '引用文'}`).join('\n');
+    }
+    if (format === 'list') {
+      const body = lines.length ? lines : ['項目'];
+      return body.map((line) => `- ${line.trim() || '項目'}`).join('\n');
+    }
+    return '';
+  }
+
+  function stripBlockMarkerMarkdown(value) {
+    return String(value || '')
+      .replace(/^\s*>\s?/, '')
+      .replace(/^\s*(?:[-+*]|\d+\.)\s+/, '')
+      .trim();
+  }
+
+  function richBlockFormatLabel(format) {
+    if (format === 'h1') return '見出し1';
+    if (format === 'h2') return '見出し2';
+    if (format === 'quote') return '引用';
+    if (format === 'list') return '箇条書き';
+    return 'ブロック';
+  }
+
+  function applyRichInlineFormatTransaction(format) {
+    const selection = window.getSelection?.();
+    const replacementRange = richInlineTransactionRangeFromSelection(selection);
+    if (!replacementRange) return false;
+    const spec = richInlineFormatSpec(format, state.markdown.slice(replacementRange.from, replacementRange.to));
+    if (!spec) return false;
+    const selected = state.markdown.slice(replacementRange.from, replacementRange.to);
+    if (selected.includes('\n')) return false;
+    const content = selected || spec.placeholder;
+    const trailingPrefix = replacementRange.trailingParagraph && (state.markdown || '').length ? '\n\n' : '';
+    const insert = `${trailingPrefix}${spec.open}${content}${spec.close}`;
+    const sourceStart = replacementRange.from + trailingPrefix.length;
+    const contentStart = sourceStart + spec.open.length;
+    const contentEnd = contentStart + content.length;
+    const activateInlineSource = replacementRange.from === replacementRange.to;
+    applySourceTransaction({
+      from: replacementRange.from,
+      to: replacementRange.to,
+      insert,
+      selectionAfter: {
+        anchor: activateInlineSource ? replacementRange.from + insert.length : contentEnd,
+        focus: activateInlineSource ? replacementRange.from + insert.length : contentEnd,
+        affinity: 'after',
+      },
+    }, `rich-format-${format}`);
+    if (activateInlineSource) {
+      activateInsertedInlineSource(sourceStart, replacementRange.from + insert.length, contentStart - sourceStart, contentEnd - sourceStart);
+    }
+    setStatus(`${spec.label}を挿入しました`);
+    return true;
+  }
+
+  function richInlineFormatSpec(format, selected = '') {
+    if (format === 'bold') {
+      return { open: '**', close: '**', placeholder: '太字', label: '太字' };
+    }
+    if (format === 'italic') {
+      return { open: '*', close: '*', placeholder: '斜体', label: '斜体' };
+    }
+    if (format === 'code') {
+      if (String(selected || '').includes('`')) return null;
+      return { open: '`', close: '`', placeholder: 'code', label: 'インラインコード' };
+    }
+    return null;
+  }
+
+  function richRangeExtendsOutsideSourceBlock(range, sourceBlock) {
+    if (!range || !sourceBlock || !els.rich.contains(sourceBlock)) return false;
+    if (!sourceBlock.contains(range.startContainer) || !sourceBlock.contains(range.endContainer)) return true;
+    return richSourceBlocksIntersectingRange(range).some((block) => block !== sourceBlock);
+  }
+
+  function activateInsertedInlineSource(sourceStart, sourceEnd, selectionStart, selectionEnd) {
+    const atom = Array.from(els.rich.querySelectorAll('.rich-inline-atom[data-src-start][data-src-end]'))
+      .find((element) => Number(element.dataset.srcStart) === sourceStart && Number(element.dataset.srcEnd) === sourceEnd);
+    if (!atom) return false;
+    activateRichInlineSource(atom, selectionStart);
+    const sourceElement = state.richInlineSource?.element;
+    if (!sourceElement?.classList?.contains('rich-inline-source')) return false;
+    selectInlineSourceRange(sourceElement, selectionStart, selectionEnd);
+    return true;
+  }
+
+  function selectInlineSourceRange(element, start, end) {
+    const text = element.firstChild || element.appendChild(document.createTextNode(''));
+    const max = text.nodeValue.length;
+    const rangeStart = Math.max(0, Math.min(max, Number(start) || 0));
+    const rangeEnd = Math.max(rangeStart, Math.min(max, Number(end) || rangeStart));
+    const range = document.createRange();
+    range.setStart(text, rangeStart);
+    range.setEnd(text, rangeEnd);
+    const selection = window.getSelection?.();
+    if (!selection) return false;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    element.focus();
+    return true;
+  }
+
   function getRichSelectionRange() {
     const selection = window.getSelection?.();
-    if (selection?.rangeCount && els.rich.contains(selection.anchorNode)) {
-      return selection.getRangeAt(0);
-    }
+    const range = richSelectionRange(selection);
+    if (range) return range;
     els.rich.focus();
-    const range = document.createRange();
-    range.selectNodeContents(els.rich);
-    range.collapse(false);
+    const fallbackRange = document.createRange();
+    fallbackRange.selectNodeContents(els.rich);
+    fallbackRange.collapse(false);
     selection?.removeAllRanges();
-    selection?.addRange(range);
-    return range;
+    selection?.addRange(fallbackRange);
+    return fallbackRange;
   }
 
   function richSelectedText() {
@@ -3530,6 +7458,7 @@ flowchart TD
   function insertRichInlineElement(tagName, placeholder, attrs = {}) {
     const range = getRichSelectionRange();
     if (!range) return;
+    if (guardUnsupportedRichInlineInsertContext(range)) return;
     const selected = range.toString();
     const element = document.createElement(tagName);
     Object.entries(attrs).forEach(([name, value]) => element.setAttribute(name, value));
@@ -3545,9 +7474,46 @@ flowchart TD
     syncRichMarkdownFromDom('rich-input');
   }
 
+  function guardUnsupportedRichInlineInsertContext(range) {
+    if (!range || !els.rich.contains(range.startContainer)) return false;
+    const blockedSelector = [
+      'td',
+      'th',
+      'table',
+      'pre.code-block',
+      '.mermaid-diagram',
+      '.math-display',
+      '.toc',
+      '.rich-inline-source',
+      '.rich-source-editor',
+      '.code-language-input',
+    ].join(', ');
+    const rangeNodes = [range.startContainer, range.endContainer, range.commonAncestorContainer].filter(Boolean);
+    if (rangeNodes.some((node) => nodeClosest(node, blockedSelector))) {
+      setStatus('この位置ではインライン挿入できません');
+      suppressRichInlineActivation();
+      return true;
+    }
+    const selected = normalizeNewlines(range.toString() || '');
+    const startBlock = richInlineEditBlockForRange(range);
+    const endBlock = nodeClosest(range.endContainer, RICH_INLINE_EDIT_BLOCK_SELECTOR);
+    if (selected.includes('\n') || (startBlock && endBlock && startBlock !== endBlock)) {
+      setStatus('複数行にはインライン挿入できません');
+      suppressRichInlineActivation();
+      return true;
+    }
+    if (richRangeTouchesSourceBlock(range)) {
+      setStatus('この選択はMarkdownソースへ変換できません');
+      suppressRichInlineActivation();
+      return true;
+    }
+    return false;
+  }
+
   function replaceRichCurrentBlockWithHeading(level) {
     const range = getRichSelectionRange();
     if (!range) return;
+    if (guardUnsupportedRichBlockReplacementContext(range)) return;
     const block = richCurrentEditableBlock(range);
     const sourceText = range.toString() || block?.textContent?.trim() || '見出し';
     const heading = document.createElement(`h${level}`);
@@ -3560,6 +7526,7 @@ flowchart TD
   function replaceRichCurrentBlockWithQuote() {
     const range = getRichSelectionRange();
     if (!range) return;
+    if (guardUnsupportedRichBlockReplacementContext(range)) return;
     const block = richCurrentEditableBlock(range);
     const text = range.toString() || block?.textContent?.trim() || '引用文';
     const quote = document.createElement('blockquote');
@@ -3574,6 +7541,7 @@ flowchart TD
   function replaceRichCurrentBlockWithList() {
     const range = getRichSelectionRange();
     if (!range) return;
+    if (guardUnsupportedRichBlockReplacementContext(range)) return;
     const block = richCurrentEditableBlock(range);
     const text = range.toString() || block?.textContent?.trim() || '項目';
     const list = document.createElement('ul');
@@ -3583,6 +7551,17 @@ flowchart TD
     replaceOrInsertRichBlock(block, list);
     selectElementContents(item);
     syncRichMarkdownFromDom('rich-input');
+  }
+
+  function guardUnsupportedRichBlockReplacementContext(range) {
+    if (guardUnsupportedRichBlockFormatContext(range)) return true;
+    const block = richCurrentEditableBlock(range);
+    if (block && richTopLevelBlock(block)?.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) {
+      setStatus('この選択はMarkdownソースへ変換できません');
+      suppressRichInlineActivation();
+      return true;
+    }
+    return false;
   }
 
   function richCurrentEditableBlock(range) {
@@ -3615,6 +7594,14 @@ flowchart TD
   }
 
   function insertRichMarkdownBlock(markdown, status = '挿入しました') {
+    if (guardUnsupportedRichBlockInsertionSelection()) return;
+    const sourceTransaction = richMarkdownBlockInsertionTransaction(markdown);
+    if (sourceTransaction) {
+      applySourceTransaction(sourceTransaction, 'rich-block-insert');
+      setStatus(status);
+      return;
+    }
+
     const fragment = richFragmentFromMarkdown(markdown);
     if (!fragment.childNodes.length) return;
     const range = getRichSelectionRange();
@@ -3629,6 +7616,68 @@ flowchart TD
     placeCaretInInsertedRichBlock(inserted[0]);
     syncRichMarkdownFromDom('rich-input');
     setStatus(status);
+  }
+
+  function guardUnsupportedRichBlockInsertionSelection() {
+    const selection = window.getSelection?.();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return false;
+    const range = richSelectionRange(selection);
+    if (!range) return false;
+    const sourceBlocks = richSourceBlocksIntersectingRange(range);
+    if (!sourceBlocks.length) return false;
+    const sourceBlock = nodeClosest(range.startContainer, RICH_SOURCE_BLOCK_SELECTOR);
+    if (
+      sourceBlock
+      && sourceBlocks.length === 1
+      && sourceBlocks[0] === sourceBlock
+      && !richRangeExtendsOutsideSourceBlock(range, sourceBlock)
+    ) {
+      return false;
+    }
+    setStatus('この選択ではブロックを挿入できません');
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function richMarkdownBlockInsertionTransaction(markdown) {
+    const blockSource = normalizeNewlines(markdown || '').trim();
+    if (!blockSource) return null;
+    const current = stripRichCaretTokens(state.markdown || els.source.value || '');
+    const insertAt = richMarkdownBlockInsertionOffset();
+    if (!Number.isFinite(insertAt) || insertAt < 0 || insertAt > current.length) return null;
+    const prefix = current.length && insertAt > 0 ? '\n\n' : '';
+    const suffix = current.slice(insertAt).length && !current.slice(insertAt).startsWith('\n\n') ? '\n\n' : '';
+    const insert = `${prefix}${blockSource}${suffix}`;
+    const blockEnd = insertAt + prefix.length + blockSource.length;
+    return {
+      from: insertAt,
+      to: insertAt,
+      insert,
+      selectionAfter: {
+        anchor: blockEnd,
+        focus: blockEnd,
+        affinity: 'after',
+      },
+    };
+  }
+
+  function richMarkdownBlockInsertionOffset() {
+    const selection = window.getSelection?.();
+    const range = richSelectionRange(selection);
+    if (!range) {
+      return stripRichCaretTokens(state.markdown || els.source.value || '').length;
+    }
+    const topLevel = richTopLevelBlock(nodeElement(range.startContainer));
+    if (topLevel?.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) {
+      const end = numericData(topLevel, 'sourceEnd');
+      if (Number.isFinite(end)) return end;
+    }
+    const sourceBlock = nodeClosest(range.startContainer, RICH_SOURCE_BLOCK_SELECTOR);
+    if (sourceBlock) {
+      const end = numericData(sourceBlock, 'sourceEnd');
+      if (Number.isFinite(end)) return end;
+    }
+    return stripRichCaretTokens(state.markdown || els.source.value || '').length;
   }
 
   function richFragmentFromMarkdown(markdown) {
@@ -3658,27 +7707,27 @@ flowchart TD
   }
 
   function insertLink() {
-    if (state.mode === 'rich') {
-      insertRichLink();
-      return;
-    }
-
-    focusMarkdownInput();
-    const label = getSelectedText() || 'リンク';
-    const rawUrl = prompt('URLを入力してください。危険なURLはプレビュー時にブロックされます。', './README.md');
-    if (!rawUrl) return;
-    replaceSelection(`[${label}](${rawUrl.trim()})`);
+    openInlineInsertDialog('link');
   }
 
   function insertRichLink() {
-    const label = richSelectedText() || 'リンク';
-    const rawUrl = prompt('URLを入力してください。危険なURLはプレビュー時にブロックされます。', './README.md');
-    if (!rawUrl) return;
-    const href = rawUrl.trim();
+    openInlineInsertDialog('link');
+  }
+
+  function insertLinkFromParts(label, href, context = null) {
     const safe = sanitizeLinkUrl(href);
     if (!safe) {
       setStatus('許可されていないリンクです');
-      return;
+      return false;
+    }
+    const escapedLabel = escapeMarkdownLabel(label || 'リンク');
+    const markdown = `[${escapedLabel}](${formatMarkdownTarget(href)})`;
+    if (insertInlineMarkdownAtCapturedContext(context, markdown, 'リンクを挿入しました', {
+      activateWhenCollapsed: true,
+      selectionStart: 1,
+      selectionEnd: 1 + escapedLabel.length,
+    })) {
+      return true;
     }
     insertRichInlineElement('a', label, {
       href: safe,
@@ -3686,32 +7735,131 @@ flowchart TD
       rel: 'noopener noreferrer',
       target: '_blank',
     });
+    return true;
   }
 
   function insertImageReference() {
-    if (state.mode === 'rich') {
-      insertRichImageReference();
-      return;
-    }
-
-    focusMarkdownInput();
-    const label = sanitizeMarkdownLabel(getSelectedText() || '画像');
-    const rawPath = prompt('画像パスを入力してください。フォルダ許可済みMarkdown基準の相対パスだけ表示します。例: ./images/pic.png', './images/example.png');
-    if (!rawPath) return;
-    const path = rawPath.trim();
-    if (!sanitizeImageUrl(path)) {
-      setStatus('画像参照はフォルダ許可済みMarkdown基準のPNG/JPEG/GIF/WebP相対パスのみ表示できます');
-      return;
-    }
-    replaceSelection(`![${label}](${formatMarkdownTarget(path)})`);
-    setStatus('相対画像参照を挿入しました');
+    openInlineInsertDialog('image');
   }
 
   function insertRichImageReference() {
-    const label = sanitizeMarkdownLabel(richSelectedText() || '画像');
-    const rawPath = prompt('画像パスを入力してください。フォルダ許可済みMarkdown基準の相対パスだけ表示します。例: ./images/pic.png', './images/example.png');
-    if (!rawPath) return;
-    insertRichImageElement(label, rawPath.trim());
+    openInlineInsertDialog('image');
+  }
+
+  function openInlineInsertDialog(kind) {
+    const context = createInlineInsertContext(kind);
+    if (!context) return;
+    state.pendingInlineInsertContext = context;
+    const isImage = kind === 'image';
+    els.inlineInsertTitle.textContent = isImage ? '画像参照を挿入' : 'リンクを挿入';
+    els.inlineInsertDescription.textContent = isImage
+      ? 'Markdownファイル基準の相対画像パスを指定します。フォルダ未許可の相対画像はプレースホルダー表示になります。'
+      : '許可ドメイン制は維持されます。許可されていない外部リンクや危険なURLは挿入しません。';
+    els.inlineInsertLabel.value = context.label;
+    els.inlineInsertTargetLabel.textContent = isImage ? '画像パス' : 'URL';
+    els.inlineInsertTarget.placeholder = isImage ? './images/example.png' : './README.md';
+    els.inlineInsertTarget.value = context.target;
+    els.inlineInsertDialog.returnValue = '';
+    if (typeof els.inlineInsertDialog.showModal === 'function') {
+      els.inlineInsertDialog.showModal();
+      window.setTimeout(() => {
+        els.inlineInsertTarget.focus();
+        els.inlineInsertTarget.select();
+      }, 0);
+    } else {
+      setStatus('このブラウザでは入力ダイアログを開けません');
+    }
+  }
+
+  function createInlineInsertContext(kind) {
+    const isImage = kind === 'image';
+    if (state.mode === 'rich') {
+      const selection = window.getSelection?.();
+      const range = richInlineInsertRangeFromSelection(selection);
+      if (!range) {
+        setStatus('リッチ編集内の挿入位置を選んでください');
+        return null;
+      }
+      const selected = richSelectedText();
+      return {
+        kind,
+        mode: 'rich',
+        range,
+        label: isImage ? sanitizeMarkdownLabel(selected || '画像') : (selected || 'リンク'),
+        target: isImage ? './images/example.png' : './README.md',
+      };
+    }
+
+    focusMarkdownInput();
+    const selected = getSelectedText();
+    return {
+      kind,
+      mode: state.mode,
+      range: {
+        from: els.source.selectionStart,
+        to: els.source.selectionEnd,
+      },
+      label: isImage ? sanitizeMarkdownLabel(selected || '画像') : (selected || 'リンク'),
+      target: isImage ? './images/example.png' : './README.md',
+    };
+  }
+
+  function richInlineInsertRangeFromSelection(selection) {
+    const range = richPlainTextTransactionRangeFromSelection(selection);
+    if (range) return range;
+    const sourceSelection = domSelectionToSourceSelection(selection);
+    if (!sourceSelection || sourceSelection.anchor !== sourceSelection.focus || !Number.isFinite(sourceSelection.focus)) return null;
+    return { from: sourceSelection.focus, to: sourceSelection.focus };
+  }
+
+  function confirmInlineInsertDialog() {
+    const context = state.pendingInlineInsertContext;
+    if (!context) return;
+    const label = els.inlineInsertLabel.value.trim() || (context.kind === 'image' ? '画像' : 'リンク');
+    const target = els.inlineInsertTarget.value.trim();
+    if (!target) {
+      setStatus(context.kind === 'image' ? '画像パスを入力してください' : 'URLを入力してください');
+      els.inlineInsertTarget.focus();
+      return;
+    }
+    const inserted = context.kind === 'image'
+      ? insertImageReferenceFromParts(label, target, context)
+      : insertLinkFromParts(label, target, context);
+    if (!inserted) return;
+    state.pendingInlineInsertContext = null;
+    els.inlineInsertDialog.returnValue = 'inserted';
+    els.inlineInsertDialog.close('inserted');
+  }
+
+  function cancelInlineInsertDialog() {
+    state.pendingInlineInsertContext = null;
+    els.inlineInsertDialog.close('cancel');
+  }
+
+  function insertImageReferenceFromParts(label, target, context = null) {
+    if (!isAllowedMarkdownImageReference(target)) {
+      setStatus('画像参照はMarkdown基準の安全なPNG/JPEG/GIF/WebP相対パスのみ挿入できます');
+      return false;
+    }
+    const escapedLabel = escapeMarkdownLabel(sanitizeMarkdownLabel(label));
+    const markdown = `![${escapedLabel}](${formatMarkdownTarget(target)})`;
+    if (insertInlineMarkdownAtCapturedContext(context, markdown, '画像参照を挿入しました', {
+      activateWhenCollapsed: true,
+      selectionStart: 2,
+      selectionEnd: 2 + escapedLabel.length,
+    })) {
+      return true;
+    }
+    insertRichImageElement(label, target);
+    return true;
+  }
+
+  function isAllowedMarkdownImageReference(target) {
+    const decoded = decodeLocalImagePath(cleanupUrl(target, { keepSpaces: true }));
+    if (!isRelativeImageReference(decoded)) return false;
+    const normalized = normalizeAssetPath(decoded);
+    if (isUnsafeRelativePath(normalized)) return false;
+    return hasRasterImageExtension(normalized);
   }
 
   function insertCodeBlock() {
@@ -3797,8 +7945,18 @@ flowchart TD
       setStatus('PNG/JPEG/GIF/WebPのローカル画像パスのみ参照できます');
       return;
     }
+    const escapedLabel = escapeMarkdownLabel(sanitizeMarkdownLabel(label));
+    const markdown = `![${escapedLabel}](${formatMarkdownTarget(target)})`;
+    if (insertRichInlineMarkdownSource(markdown, '画像参照を挿入しました', {
+      activateWhenCollapsed: true,
+      selectionStart: 2,
+      selectionEnd: 2 + escapedLabel.length,
+    })) {
+      return;
+    }
     const range = getRichSelectionRange();
     if (!range) return;
+    if (guardUnsupportedRichInlineInsertContext(range)) return;
     const image = document.createElement('img');
     image.alt = sanitizeMarkdownLabel(label);
     image.src = safe;
@@ -3808,6 +7966,112 @@ flowchart TD
     placeCaretAfterNode(image);
     syncRichMarkdownFromDom('rich-input');
     setStatus('画像参照を挿入しました');
+  }
+
+  function insertRichInlineMarkdownSource(markdown, status, options = {}) {
+    const replacementRange = richInlineTransactionRangeFromSelection(window.getSelection?.());
+    if (!replacementRange) return false;
+    const source = stripRichCaretTokens(normalizeNewlines(markdown || ''));
+    if (!source || source.includes('\n')) return false;
+    const trailingPrefix = replacementRange.trailingParagraph && (state.markdown || '').length ? '\n\n' : '';
+    const insert = `${trailingPrefix}${source}`;
+    const collapsed = replacementRange.from === replacementRange.to;
+    const nextOffset = replacementRange.from + insert.length;
+    const sourceStart = replacementRange.from + trailingPrefix.length;
+    applySourceTransaction({
+      from: replacementRange.from,
+      to: replacementRange.to,
+      insert,
+      selectionAfter: {
+        anchor: nextOffset,
+        focus: nextOffset,
+        affinity: 'after',
+      },
+    }, 'rich-inline-insert');
+    if (collapsed && options.activateWhenCollapsed) {
+      activateInsertedInlineSource(
+        sourceStart,
+        replacementRange.from + insert.length,
+        Number(options.selectionStart) || 0,
+        Number(options.selectionEnd) || 0
+      );
+    }
+    suppressRichInlineActivation();
+    setStatus(status);
+    return true;
+  }
+
+  function richInlineTransactionRangeFromSelection(selection) {
+    const tableRange = richTableTextReplacementRangeFromSelection(selection);
+    const quoteRange = tableRange ? null : richQuoteTextReplacementRangeFromSelection(selection);
+    const rawRange = tableRange || quoteRange || richPlainTextTransactionRangeFromSelection(selection);
+    if (!rawRange) return null;
+    const range = rawRange.from !== rawRange.to
+      ? expandSourceRangeToIntersectingInlineAtoms(rawRange)
+      : rawRange;
+    if (!Number.isFinite(range.from) || !Number.isFinite(range.to) || range.to < range.from) return null;
+    return {
+      ...range,
+      tableCell: Boolean(tableRange),
+      quoteBlock: Boolean(quoteRange),
+    };
+  }
+
+  function insertInlineMarkdownAtCapturedContext(context, markdown, status, options = {}) {
+    if (!context) {
+      if (state.mode === 'rich') return insertRichInlineMarkdownSource(markdown, status, options);
+      return false;
+    }
+    const range = context.range;
+    const insert = stripRichCaretTokens(normalizeNewlines(markdown || ''));
+    if (!range || !insert || insert.includes('\n')) return false;
+    const current = stripRichCaretTokens(state.markdown || els.source.value || '');
+    const from = Math.max(0, Math.min(current.length, Number(range.from)));
+    const to = Math.max(from, Math.min(current.length, Number(range.to)));
+    const collapsed = from === to;
+    const nextOffset = from + insert.length;
+
+    if (context.mode === 'rich') {
+      applySourceTransaction({
+        from,
+        to,
+        insert,
+        selectionAfter: {
+          anchor: nextOffset,
+          focus: nextOffset,
+          affinity: 'after',
+        },
+      }, 'rich-inline-insert');
+      if (collapsed && options.activateWhenCollapsed) {
+        activateInsertedInlineSource(
+          from,
+          from + insert.length,
+          Number(options.selectionStart) || 0,
+          Number(options.selectionEnd) || 0
+        );
+      }
+      suppressRichInlineActivation();
+      setStatus(status);
+      return true;
+    }
+
+    state.markdown = current.slice(0, from) + insert + current.slice(to);
+    els.source.value = state.markdown;
+    const selectionStart = from + (Number.isFinite(Number(options.selectionStart)) ? Number(options.selectionStart) : insert.length);
+    const selectionEnd = from + (Number.isFinite(Number(options.selectionEnd)) ? Number(options.selectionEnd) : selectionStart);
+    markDirty();
+    renderAll('inline-insert');
+    if (state.mode === 'source' || state.mode === 'split') {
+      els.source.focus();
+      els.source.setSelectionRange(selectionStart, selectionEnd);
+      window.setTimeout(() => {
+        els.source.focus();
+        els.source.setSelectionRange(selectionStart, selectionEnd);
+      }, 0);
+    }
+    scheduleAutosave();
+    setStatus(status);
+    return true;
   }
 
   function replaceSelection(replacement, selectionStart, selectionEnd) {
@@ -3835,8 +8099,12 @@ flowchart TD
     return els.source;
   }
 
-  function applyMode(mode) {
+  function applyMode(mode, options = {}) {
     if (!['rich', 'split', 'source', 'preview', 'focus'].includes(mode)) mode = 'split';
+    const preserveScroll = options.preserveScroll !== false;
+    const shouldPersist = options.persist !== false;
+    const scrollAnchor = preserveScroll ? captureCurrentScrollAnchor() : null;
+    if (preserveScroll && state.mode !== mode) captureCurrentMarkdownFromEditor();
     state.mode = mode;
     document.body.dataset.mode = mode;
     document.querySelectorAll('[data-action="mode"]').forEach((button) => {
@@ -3844,9 +8112,10 @@ flowchart TD
       button.classList.toggle('is-active', active);
       button.setAttribute('aria-pressed', String(active));
     });
-    persistSettings();
-    if (mode === 'preview') renderPreview();
+    if (shouldPersist) persistSettings();
+    if (mode === 'split' || mode === 'preview') renderPreview();
     if (mode === 'rich') renderRich();
+    if (scrollAnchor) restoreCurrentModeScrollSoon(scrollAnchor);
     setStatus(`表示モード: ${mode}`);
   }
 
@@ -4018,6 +8287,92 @@ flowchart TD
     }
   }
 
+  function clearDraftData(options = {}) {
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch (_) {}
+    resetDocumentState();
+    if (options.status !== false) setStatus('下書きを削除し、文書を初期状態に戻しました');
+  }
+
+  function resetDocumentState() {
+    window.clearTimeout(state.saveTimer);
+    window.clearTimeout(state.renderTimer);
+    window.clearTimeout(state.richReparseTimer);
+    clearAssetUrls();
+    state.markdown = DEFAULT_MARKDOWN;
+    state.fileName = 'untitled.md';
+    state.markdownRelativePath = '';
+    state.directoryHandle = null;
+    state.directoryName = '';
+    state.fileHandle = null;
+    state.folderScanLimitMessage = '';
+    state.dirty = false;
+    state.lastAutoSaved = null;
+    state.richUndoStack = [];
+    els.source.value = state.markdown;
+    renderAll('local-data-reset');
+  }
+
+  function resetSettingsData(options = {}) {
+    try {
+      localStorage.removeItem(SETTINGS_KEY);
+    } catch (_) {}
+    state.theme = defaultTheme();
+    state.mode = 'rich';
+    state.outlineCollapsed = false;
+    state.allowedLinkDomains = [];
+    if (els.allowedDomainsInput) els.allowedDomainsInput.value = '';
+    applyTheme();
+    initializeVendorLibraries();
+    document.body.classList.remove('outline-collapsed');
+    applyMode(state.mode, { preserveScroll: false, persist: false });
+    renderAll('settings-reset');
+    if (options.status !== false) setStatus('設定をリセットしました');
+  }
+
+  function clearAllowedDomainsData(options = {}) {
+    state.allowedLinkDomains = [];
+    if (els.allowedDomainsInput) els.allowedDomainsInput.value = '';
+    persistSettings();
+    renderAll('link-settings');
+    if (options.status !== false) setStatus('外部リンク許可ドメインを削除しました');
+  }
+
+  async function clearFolderPermissionRecords(options = {}) {
+    await deleteFsaDatabase();
+    clearFolderPermissionState();
+    renderAll('folder-permission-clear');
+    if (options.status !== false) setStatus('フォルダ権限の記録を削除しました。保存済みファイルやassets画像は削除していません');
+  }
+
+  function clearFolderPermissionState() {
+    clearAssetUrls();
+    state.directoryHandle = null;
+    state.pickerStartDirectoryHandle = null;
+    state.settingsDirectoryHandle = null;
+    state.settingsDirectoryName = '';
+    state.directoryName = '';
+    state.markdownRelativePath = '';
+    state.fileHandle = null;
+    state.folderScanLimitMessage = '';
+  }
+
+  async function clearAllLocalData() {
+    if (!confirm('この操作はブラウザ内の下書き・設定・許可ドメイン・フォルダ権限の記録を削除します。保存済みMarkdownファイルや assets フォルダ内の画像は削除しません。続行しますか？')) return;
+    clearDraftData({ status: false });
+    resetSettingsData({ status: false });
+    await clearFolderPermissionRecords({ status: false });
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(SETTINGS_KEY);
+    } catch (_) {}
+    state.allowedLinkDomains = [];
+    if (els.allowedDomainsInput) els.allowedDomainsInput.value = '';
+    renderAll('local-data-clear');
+    setStatus('すべてのローカルデータを削除しました。保存済みMarkdownファイルやassets画像は削除していません');
+  }
+
   function showLinkDomainDialog() {
     if (!els.linkDomainDialog || !els.allowedDomainsInput) return;
     els.allowedDomainsInput.value = state.allowedLinkDomains.join('\n');
@@ -4032,6 +8387,141 @@ flowchart TD
     renderAll('link-settings');
     if (els.linkDomainDialog?.open) els.linkDomainDialog.close();
     setStatus(`外部リンク許可ドメイン: ${state.allowedLinkDomains.length}件`);
+  }
+
+  function openSettingsFile() {
+    if (!els.settingsInput) {
+      setStatus('設定ファイルの読み込みに対応していない環境です');
+      return;
+    }
+    els.settingsInput.click();
+  }
+
+  async function onSettingsFileChosen(event) {
+    const [file] = event.target.files || [];
+    event.target.value = '';
+    if (!file) return;
+    if (file.size > 256 * 1024) {
+      setStatus('設定ファイルは256KB以下にしてください');
+      return;
+    }
+
+    try {
+      const domains = parseAllowedDomainsSettings(await readTextFile(file));
+      state.allowedLinkDomains = domains;
+      persistSettings();
+      if (els.allowedDomainsInput) els.allowedDomainsInput.value = state.allowedLinkDomains.join('\n');
+      renderAll('link-settings');
+      setStatus(`設定ファイルから外部リンク許可ドメインを読み込みました: ${state.allowedLinkDomains.length}件`);
+    } catch (_) {
+      setStatus('設定ファイルを読み込めませんでした。JSON形式とallowedLinkDomainsを確認してください');
+    }
+  }
+
+  function exportSettingsFile() {
+    downloadBlob(CONFIG_SETTINGS_FILE_NAME, settingsFileText(), 'application/json;charset=utf-8');
+    setStatus(`外部リンク許可ドメイン設定を書き出しました: ${state.allowedLinkDomains.length}件`);
+  }
+
+  async function grantSettingsDirectory() {
+    const directoryHandle = await chooseSettingsDirectory();
+    if (!directoryHandle) return false;
+    const loaded = await loadSettingsFromConfigDirectory(directoryHandle, { missingOk: true });
+    if (loaded) {
+      setStatus(`設定フォルダを許可し、${CONFIG_SETTINGS_FILE_NAME} から読み込みました: ${state.allowedLinkDomains.length}件`);
+    } else {
+      await writeSettingsFileToConfigDirectory(directoryHandle);
+      setStatus(`設定フォルダを許可し、現在の許可ドメイン設定を ${CONFIG_SETTINGS_FILE_NAME} に保存しました`);
+    }
+    return true;
+  }
+
+  async function saveSettingsToConfigDirectory() {
+    let directoryHandle = state.settingsDirectoryHandle;
+    if (!directoryHandle) {
+      directoryHandle = await chooseSettingsDirectory();
+      if (!directoryHandle) return false;
+    }
+    if (!await ensureDirectoryPermission(directoryHandle, 'readwrite')) {
+      setStatus('設定ファイルの上書きには設定フォルダの書き込み権限が必要です');
+      return false;
+    }
+    try {
+      await writeSettingsFileToConfigDirectory(directoryHandle);
+      setStatus(`${CONFIG_SETTINGS_FILE_NAME} に外部リンク許可ドメイン設定を保存しました: ${state.allowedLinkDomains.length}件`);
+      return true;
+    } catch (_) {
+      setStatus('設定ファイルの保存に失敗しました');
+      return false;
+    }
+  }
+
+  async function chooseSettingsDirectory() {
+    if (!window.showDirectoryPicker) {
+      setStatus('設定フォルダの許可には File System Access API 対応ブラウザが必要です');
+      return null;
+    }
+    try {
+      const directoryHandle = await showDirectoryPickerFromRecentDirectory(
+        { id: 'pme-settings-folder', mode: 'readwrite' },
+        { startInHandle: state.settingsDirectoryHandle || null },
+      );
+      if (!await ensureDirectoryPermission(directoryHandle, 'readwrite')) {
+        setStatus('設定フォルダの書き込み権限が許可されませんでした');
+        return null;
+      }
+      state.settingsDirectoryHandle = directoryHandle;
+      state.settingsDirectoryName = directoryHandle.name || '';
+      await persistSettingsDirectoryHandle(directoryHandle);
+      return directoryHandle;
+    } catch (error) {
+      if (error?.name !== 'AbortError') setStatus('設定フォルダを許可できませんでした');
+      return null;
+    }
+  }
+
+  async function loadSettingsFromConfigDirectory(directoryHandle, options = {}) {
+    try {
+      const fileHandle = await directoryHandle.getFileHandle(CONFIG_SETTINGS_FILE_NAME);
+      const file = await fileHandle.getFile();
+      if (file.size > 256 * 1024) throw new Error('settings file too large');
+      const domains = parseAllowedDomainsSettings(await readTextFile(file));
+      state.allowedLinkDomains = domains;
+      persistSettings();
+      if (els.allowedDomainsInput) els.allowedDomainsInput.value = state.allowedLinkDomains.join('\n');
+      renderAll('link-settings');
+      return true;
+    } catch (error) {
+      if (options.missingOk && error?.name === 'NotFoundError') return false;
+      throw error;
+    }
+  }
+
+  async function writeSettingsFileToConfigDirectory(directoryHandle) {
+    const fileHandle = await directoryHandle.getFileHandle(CONFIG_SETTINGS_FILE_NAME, { create: true });
+    const writable = await fileHandle.createWritable();
+    try {
+      await writable.write(settingsFileText());
+    } finally {
+      await writable.close();
+    }
+  }
+
+  function settingsFileText() {
+    return `${JSON.stringify({
+      app: 'Portable Markdown Editor',
+      version: 1,
+      allowedLinkDomains: normalizeDomainList(state.allowedLinkDomains),
+    }, null, 2)}\n`;
+  }
+
+  function parseAllowedDomainsSettings(text) {
+    const parsed = JSON.parse(String(text || ''));
+    const values = Array.isArray(parsed)
+      ? parsed
+      : parsed?.allowedLinkDomains;
+    if (!Array.isArray(values)) throw new Error('allowedLinkDomains must be an array');
+    return normalizeDomainList(values);
   }
 
   function markDirty() {
@@ -4061,6 +8551,7 @@ flowchart TD
   }
 
   function persistDraft() {
+    state.markdown = stripRichCaretTokens(state.markdown);
     const ok = writeJson(STORAGE_KEY, {
       markdown: state.markdown,
       fileName: state.fileName,
@@ -4085,7 +8576,9 @@ flowchart TD
   }
 
   function renderAll(reason) {
-    if (reason !== 'init' && reason !== 'rich-input') state.markdown = normalizeNewlines(els.source.value);
+    if (reason !== 'init' && reason !== 'rich-input') state.markdown = stripRichCaretTokens(normalizeNewlines(els.source.value));
+    else state.markdown = stripRichCaretTokens(state.markdown);
+    if (els.source.value !== state.markdown) els.source.value = state.markdown;
     renderPreview();
     if (reason !== 'rich-input') renderRich();
     renderOutline();
@@ -4101,12 +8594,22 @@ flowchart TD
   function renderRich() {
     state.richInlineSource = null;
     const html = renderMarkdownHtml(state.markdown);
-    safeSetHtml(els.rich, html || '<p><br></p>');
+    safeSetHtml(els.rich, html || renderEmptyRichSourceParagraph());
     ensureRichTrailingEditableParagraph();
     configureRichEditableSurface();
   }
 
+  function renderEmptyRichSourceParagraph() {
+    return annotateRenderedBlockHtml('<p><br></p>', {
+      id: `b0-${hashString('0:0:paragraph:')}`,
+      type: 'paragraph',
+      start: 0,
+      end: 0,
+    });
+  }
+
   function ensureRichTrailingEditableParagraph() {
+    removeRichTrailingEditableParagraphs();
     const last = lastRichEditorElement();
     if (!last || isEmptyRichParagraph(last)) return;
     if (!last.matches?.(RICH_TRAILING_BLOCK_SELECTOR)) return;
@@ -4115,6 +8618,12 @@ flowchart TD
     paragraph.dataset.richTrailing = 'true';
     paragraph.appendChild(document.createElement('br'));
     els.rich.appendChild(paragraph);
+  }
+
+  function removeRichTrailingEditableParagraphs() {
+    Array.from(els.rich?.children || []).forEach((child) => {
+      if (child.matches?.('p[data-rich-trailing="true"]') && isEmptyRichParagraph(child)) child.remove();
+    });
   }
 
   function richTrailingEditableParagraph() {
@@ -4139,7 +8648,7 @@ flowchart TD
 
   function configureRichEditableSurface() {
     els.rich.setAttribute('contenteditable', 'true');
-    els.rich.querySelectorAll('.toc, .mermaid-diagram, pre.code-block, .math-inline, .math-display').forEach((node) => {
+    els.rich.querySelectorAll('.toc, .mermaid-diagram, pre.code-block, .rich-inline-atom, .math-inline, .math-display, hr').forEach((node) => {
       node.setAttribute('contenteditable', 'false');
     });
     els.rich.querySelectorAll('.task-checkbox, .code-language-input').forEach((node) => {
@@ -4151,10 +8660,12 @@ flowchart TD
     const selection = window.getSelection?.();
     if (!selection || !selection.rangeCount || !els.rich.contains(selection.anchorNode)) return null;
     const range = selection.getRangeAt(0);
+    const sourceSelection = domSelectionToSourceSelection(selection);
     const inlineSource = nodeClosest(range.startContainer, '.rich-inline-source');
     if (inlineSource && els.rich.contains(inlineSource)) {
       return {
         kind: 'inline-source',
+        sourceSelection,
         inlineIndex: richInlineSourceElementIndex(inlineSource),
         source: normalizeNewlines(inlineSource.textContent || ''),
         sourceOffset: richInlineSourceCaretOffset(inlineSource) || 0,
@@ -4166,6 +8677,7 @@ flowchart TD
     before.setEnd(range.startContainer, range.startOffset);
     const selected = range.cloneRange();
     return {
+      sourceSelection,
       start: before.toString().length,
       length: selected.toString().length,
     };
@@ -4185,10 +8697,20 @@ flowchart TD
   function restoreRichCaret(bookmark) {
     if (!bookmark) return;
     if (bookmark.kind === 'inline-source' && restoreRichInlineSourceCaret(bookmark)) return;
+    if (restoreRichCaretFromSourceSelection(bookmark.sourceSelection)) return;
     const start = findTextPosition(els.rich, bookmark.start);
     const end = findTextPosition(els.rich, bookmark.start + bookmark.length);
     if (!start) {
       els.rich.focus();
+      return;
+    }
+    const startAtom = nodeClosest(start.node, '.rich-inline-atom');
+    if (startAtom && els.rich.contains(startAtom)) {
+      const offsetRange = document.createRange();
+      offsetRange.selectNodeContents(startAtom);
+      offsetRange.setEnd(start.node, start.offset);
+      const boundary = offsetRange.toString().length <= (startAtom.textContent || '').length / 2 ? 'before' : 'after';
+      placeCaretAtInlineBoundary(startAtom, boundary);
       return;
     }
     const range = document.createRange();
@@ -4203,6 +8725,787 @@ flowchart TD
     selection.removeAllRanges();
     selection.addRange(range);
     els.rich.focus();
+  }
+
+  function restoreRichCaretFromSourceSelection(sourceSelection) {
+    const range = sourceSelectionToDomRange(sourceSelection);
+    if (!range) return false;
+    const selection = window.getSelection?.();
+    if (!selection) return false;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    els.rich.focus();
+    return true;
+  }
+
+  function domSelectionToSourceSelection(selection) {
+    if (!selection || !selection.rangeCount || !els.rich.contains(selection.anchorNode) || !els.rich.contains(selection.focusNode)) return null;
+    let anchor = domPointToSourceOffset(selection.anchorNode, selection.anchorOffset);
+    let focus = domPointToSourceOffset(selection.focusNode, selection.focusOffset);
+    if (!anchor || !focus) return null;
+    if (!selection.isCollapsed) {
+      const anchorAtomic = atomicSourceRangeForDomPoint(selection.anchorNode);
+      const focusAtomic = atomicSourceRangeForDomPoint(selection.focusNode);
+      if (anchorAtomic && focusAtomic && anchorAtomic.block === focusAtomic.block) {
+        anchor = { offset: anchorAtomic.start, affinity: 'before' };
+        focus = { offset: focusAtomic.end, affinity: 'after' };
+      } else {
+        if (anchorAtomic) anchor = sourceBoundaryForAtomicSelectionEndpoint(anchorAtomic, focus.offset);
+        if (focusAtomic) focus = sourceBoundaryForAtomicSelectionEndpoint(focusAtomic, anchor.offset);
+      }
+    }
+    return {
+      anchor: anchor.offset,
+      focus: focus.offset,
+      affinity: selection.isCollapsed ? anchor.affinity : undefined,
+    };
+  }
+
+  function domPointToSourceOffset(container, offset) {
+    const atomicBlock = nodeClosest(container, RICH_ATOMIC_SOURCE_BLOCK_SELECTOR);
+    if (atomicBlock && els.rich.contains(atomicBlock)) {
+      const sourceBoundary = sourceBoundaryForAtomicBlockDomPoint(atomicBlock, container, offset);
+      if (sourceBoundary) return sourceBoundary;
+    }
+
+    const atom = nodeClosest(container, '.rich-inline-atom');
+    if (atom && els.rich.contains(atom)) {
+      const start = Number(atom.dataset.srcStart);
+      const end = Number(atom.dataset.srcEnd);
+      if (Number.isFinite(start) && Number.isFinite(end)) {
+        const textOffset = textOffsetWithinElement(atom, container, offset);
+        const midpoint = (atom.textContent || '').length / 2;
+        return textOffset <= midpoint
+          ? { offset: start, affinity: 'before' }
+          : { offset: end, affinity: 'after' };
+      }
+    }
+
+    if (container?.nodeType === Node.ELEMENT_NODE) {
+      const beforeNode = container.childNodes?.[offset - 1];
+      const afterNode = container.childNodes?.[offset];
+      const beforeAtomic = nodeElement(beforeNode)?.closest?.(RICH_ATOMIC_SOURCE_BLOCK_SELECTOR);
+      if (beforeAtomic && els.rich.contains(beforeAtomic) && Number.isFinite(Number(beforeAtomic.dataset.sourceEnd))) {
+        return { offset: Number(beforeAtomic.dataset.sourceEnd), affinity: 'after' };
+      }
+      const afterAtomic = nodeElement(afterNode)?.closest?.(RICH_ATOMIC_SOURCE_BLOCK_SELECTOR);
+      if (afterAtomic && els.rich.contains(afterAtomic) && Number.isFinite(Number(afterAtomic.dataset.sourceStart))) {
+        return { offset: Number(afterAtomic.dataset.sourceStart), affinity: 'before' };
+      }
+      const beforeAtom = beforeNode?.nodeType === Node.ELEMENT_NODE ? beforeNode.closest?.('.rich-inline-atom') : null;
+      if (beforeAtom && els.rich.contains(beforeAtom) && Number.isFinite(Number(beforeAtom.dataset.srcEnd))) {
+        return { offset: Number(beforeAtom.dataset.srcEnd), affinity: 'after' };
+      }
+      const afterAtom = afterNode?.nodeType === Node.ELEMENT_NODE ? afterNode.closest?.('.rich-inline-atom') : null;
+      if (afterAtom && els.rich.contains(afterAtom) && Number.isFinite(Number(afterAtom.dataset.srcStart))) {
+        return { offset: Number(afterAtom.dataset.srcStart), affinity: 'before' };
+      }
+    }
+
+    const tableCell = nodeClosest(container, 'td, th');
+    if (tableCell && els.rich.contains(tableCell)) {
+      const tableRange = document.createRange();
+      try {
+        tableRange.setStart(container, offset);
+        tableRange.collapse(true);
+      } catch (_) {
+        return null;
+      }
+      const tablePoint = richTableSourcePointFromRange(tableCell, tableRange);
+      if (tablePoint) return { offset: tablePoint.offset, affinity: 'after' };
+    }
+
+    const quote = nodeClosest(container, 'blockquote');
+    if (quote && els.rich.contains(quote)) {
+      const quoteRange = document.createRange();
+      try {
+        quoteRange.setStart(container, offset);
+        quoteRange.collapse(true);
+      } catch (_) {
+        return null;
+      }
+      const quotePoint = richQuoteSourcePointFromRange(quote, quoteRange);
+      if (quotePoint) return { offset: quotePoint.offset, affinity: 'after' };
+    }
+
+    const editBlock = richInlineEditBlockForRange({ startContainer: container });
+    if (editBlock?.tagName?.toLowerCase() === 'li') {
+      const listRange = document.createRange();
+      try {
+        listRange.setStart(container, offset);
+        listRange.collapse(true);
+      } catch (_) {
+        return null;
+      }
+      const listPoint = richListSourcePointFromRange(editBlock, listRange);
+      if (listPoint) return { offset: listPoint.offset, affinity: 'after' };
+    }
+    const sourceBlock = nodeClosest(container, RICH_SOURCE_BLOCK_SELECTOR);
+    if (!editBlock || !sourceBlock) return null;
+    const blockStart = numericData(sourceBlock, 'sourceStart');
+    const baseOffset = sourceContentBaseOffset(sourceBlock);
+    const before = document.createRange();
+    before.selectNodeContents(editBlock);
+    try {
+      before.setEnd(container, offset);
+    } catch (_) {
+      return null;
+    }
+    const fragment = before.cloneContents();
+    const localSource = stripRichCaretTokens(serializeInlineNodes(Array.from(fragment.childNodes)));
+    return { offset: blockStart + baseOffset + localSource.length, affinity: 'after' };
+  }
+
+  function sourceBoundaryForAtomicBlockDomPoint(block, container, offset) {
+    const start = numericData(block, 'sourceStart');
+    const end = numericData(block, 'sourceEnd');
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+    if (container === block && container.nodeType === Node.ELEMENT_NODE) {
+      if (offset <= 0) return { offset: start, affinity: 'before' };
+      if (offset >= block.childNodes.length) return { offset: end, affinity: 'after' };
+    }
+    const textOffset = textOffsetWithinElement(block, container, offset);
+    const midpoint = Math.max(1, (block.textContent || '').length) / 2;
+    return textOffset <= midpoint
+      ? { offset: start, affinity: 'before' }
+      : { offset: end, affinity: 'after' };
+  }
+
+  function atomicSourceRangeForDomPoint(container) {
+    const block = nodeClosest(container, RICH_ATOMIC_SOURCE_BLOCK_SELECTOR);
+    if (!block || !els.rich.contains(block)) return null;
+    const start = numericData(block, 'sourceStart');
+    const end = numericData(block, 'sourceEnd');
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+    return { block, start, end };
+  }
+
+  function sourceBoundaryForAtomicSelectionEndpoint(range, otherOffset) {
+    if (!range) return null;
+    if (Number.isFinite(otherOffset) && otherOffset <= range.start) {
+      return { offset: range.end, affinity: 'after' };
+    }
+    return { offset: range.start, affinity: 'before' };
+  }
+
+  function sourceSelectionToDomRange(sourceSelection) {
+    if (!sourceSelection || !Number.isFinite(sourceSelection.focus)) return null;
+    const focus = Number(sourceSelection.focus);
+    const anchor = Number.isFinite(sourceSelection.anchor) ? Number(sourceSelection.anchor) : focus;
+    if (anchor === focus) {
+      return sourceOffsetToCollapsedDomRange(focus, sourceSelection.affinity);
+    }
+
+    const start = Math.min(anchor, focus);
+    const end = Math.max(anchor, focus);
+    const startRange = sourceOffsetToCollapsedDomRange(start, 'before');
+    const endRange = sourceOffsetToCollapsedDomRange(end, 'after');
+    if (!startRange || !endRange) return null;
+
+    const range = document.createRange();
+    try {
+      range.setStart(startRange.startContainer, startRange.startOffset);
+      range.setEnd(endRange.startContainer, endRange.startOffset);
+    } catch (_) {
+      return null;
+    }
+    return range;
+  }
+
+  function sourceOffsetToCollapsedDomRange(offset, affinity = 'after') {
+    if (!Number.isFinite(offset)) return null;
+    const atom = inlineAtomForSourceOffset(offset, affinity);
+    if (atom) {
+      const range = document.createRange();
+      if (affinity === 'before' || offset <= Number(atom.dataset.srcStart)) {
+        range.setStartBefore(atom);
+      } else {
+        range.setStartAfter(atom);
+      }
+      range.collapse(true);
+      return range;
+    }
+
+    const block = renderedBlockForSourceOffset(els.rich, offset);
+    if (!block) return null;
+    if (block.matches?.('table')) {
+      const tableRange = sourceOffsetToTableDomRange(block, offset);
+      if (tableRange) return tableRange;
+    }
+    if (block.matches?.('blockquote')) {
+      const quoteRange = sourceOffsetToQuoteDomRange(block, offset);
+      if (quoteRange) return quoteRange;
+    }
+    if (block.matches?.('ul, ol')) {
+      const listRange = sourceOffsetToListDomRange(block, offset);
+      if (listRange) return listRange;
+    }
+    const inlineRange = sourceOffsetToInlineDomRange(block, offset);
+    if (inlineRange) return inlineRange;
+    const localOffset = Math.max(0, offset - numericData(block, 'sourceStart') - sourceContentBaseOffset(block));
+    const position = findTextPosition(block, localOffset);
+    if (!position) return null;
+    const range = document.createRange();
+    range.setStart(position.node, Math.max(0, Math.min(position.offset, position.node.nodeValue?.length || 0)));
+    range.collapse(true);
+    return range;
+  }
+
+  function sourceOffsetToInlineDomRange(block, offset) {
+    if (!block || block.matches?.('ul, ol')) return null;
+    const blockStart = numericData(block, 'sourceStart');
+    if (!Number.isFinite(blockStart)) return null;
+    const range = document.createRange();
+    const nodes = block.tagName?.toLowerCase() === 'li'
+      ? richInlineEditBlockContentNodes(block)
+      : Array.from(block.childNodes);
+    let cursor = blockStart + sourceContentBaseOffset(block);
+    let lastNode = null;
+    let lastText = null;
+
+    for (const node of nodes) {
+      if (node.nodeType === Node.ELEMENT_NODE && node.classList.contains('task-checkbox')) continue;
+      if (node.nodeType === Node.ELEMENT_NODE && node.classList.contains('rich-inline-atom')) {
+        const start = Number(node.dataset.srcStart);
+        const end = Number(node.dataset.srcEnd);
+        if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+          if (offset <= start) {
+            range.setStartBefore(node);
+            range.collapse(true);
+            return range;
+          }
+          if (offset < end) {
+            if (offset - start <= (end - start) / 2) range.setStartBefore(node);
+            else range.setStartAfter(node);
+            range.collapse(true);
+            return range;
+          }
+          cursor = Math.max(cursor, end);
+          lastNode = node;
+          continue;
+        }
+      }
+
+      if (node.nodeType === Node.ELEMENT_NODE && node.tagName?.toLowerCase() === 'br') {
+        if (offset <= cursor) {
+          range.setStartBefore(node);
+          range.collapse(true);
+          return range;
+        }
+        if (offset <= cursor + 1) {
+          const anchor = node.nextSibling?.nodeType === Node.ELEMENT_NODE && node.nextSibling.classList?.contains('rich-line-break-caret-anchor')
+            ? node.nextSibling
+            : null;
+          if (anchor?.firstChild?.nodeType === Node.TEXT_NODE) {
+            range.setStart(anchor.firstChild, Math.min(1, anchor.firstChild.nodeValue.length));
+            state.richLineBreakInputOffset = offset;
+          } else {
+            range.setStartAfter(node);
+          }
+          range.collapse(true);
+          return range;
+        }
+        cursor += 1;
+        lastNode = node;
+        continue;
+      }
+
+      if (node.nodeType === Node.TEXT_NODE) {
+        const length = normalizeRichText(node.nodeValue || '').length;
+        if (offset <= cursor + length) {
+          range.setStart(node, Math.max(0, Math.min(node.nodeValue?.length || 0, offset - cursor)));
+          range.collapse(true);
+          return range;
+        }
+        cursor += length;
+        lastText = node;
+        lastNode = node;
+        continue;
+      }
+
+      const length = stripRichCaretTokens(serializeInlineNode(node)).length;
+      if (offset <= cursor + length) {
+        const position = findTextPosition(node, offset - cursor);
+        if (position) {
+          range.setStart(position.node, Math.max(0, Math.min(position.offset, position.node.nodeValue?.length || 0)));
+        } else {
+          range.setStartBefore(node);
+        }
+        range.collapse(true);
+        return range;
+      }
+      cursor += length;
+      lastNode = node;
+    }
+
+    if (lastText?.isConnected) range.setStart(lastText, lastText.nodeValue?.length || 0);
+    else if (lastNode?.isConnected) range.setStartAfter(lastNode);
+    else range.setStart(block, 0);
+    range.collapse(true);
+    return range;
+  }
+
+  function sourceOffsetToTableDomRange(table, offset) {
+    const blockStart = numericData(table, 'sourceStart');
+    const blockEnd = numericData(table, 'sourceEnd');
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return null;
+    const raw = stripRichCaretTokens(state.markdown || '').slice(blockStart, blockEnd);
+    const model = parseMarkdownTableSource(raw);
+    if (!model) return null;
+    const local = Math.max(0, Math.min(raw.length, offset - blockStart));
+    let target = null;
+    for (let lineIndex = 0; lineIndex < model.rows.length; lineIndex += 1) {
+      if (lineIndex === 1) continue;
+      const row = model.rows[lineIndex];
+      for (let cellIndex = 0; cellIndex < row.cells.length; cellIndex += 1) {
+        const cell = row.cells[cellIndex];
+        const start = row.line.start + cell.contentStart;
+        const end = row.line.start + cell.contentEnd;
+        if (start <= local && local <= end) {
+          target = { lineIndex, cellIndex, cell, localOffset: local - start };
+          break;
+        }
+      }
+      if (target) break;
+    }
+    if (!target) return null;
+    const domCell = tableDomCellAtSourceLocation(table, target.lineIndex, target.cellIndex);
+    return domCell ? tableCellSourceOffsetRange(domCell, target.localOffset) : null;
+  }
+
+  function tableDomCellAtSourceLocation(table, lineIndex, cellIndex) {
+    if (lineIndex === 0) {
+      return table.querySelectorAll('thead > tr > th')[cellIndex] || null;
+    }
+    if (lineIndex < 2) return null;
+    const row = table.querySelectorAll('tbody > tr')[lineIndex - 2] || null;
+    return row?.children?.[cellIndex] || null;
+  }
+
+  function tableCellSourceOffsetRange(cell, targetOffset) {
+    const range = document.createRange();
+    const target = Math.max(0, Number(targetOffset) || 0);
+    let cursor = 0;
+    let lastNode = null;
+    let lastText = null;
+
+    for (const node of Array.from(cell.childNodes)) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const source = serializeTableCellInlineNode(node);
+        const length = source.length;
+        if (target <= cursor + length) {
+          range.setStart(node, Math.max(0, Math.min(node.nodeValue?.length || 0, target - cursor)));
+          range.collapse(true);
+          return range;
+        }
+        cursor += length;
+        lastText = node;
+        lastNode = node;
+        continue;
+      }
+
+      if (node.nodeType !== Node.ELEMENT_NODE) continue;
+      if (node.classList.contains('rich-inline-atom')) {
+        const source = stripRichCaretTokens(node.dataset.inlineSource || serializeInlineChildren(node));
+        const end = cursor + source.length;
+        if (target <= cursor) {
+          range.setStartBefore(node);
+          range.collapse(true);
+          return range;
+        }
+        if (target < end) {
+          if (target - cursor <= source.length / 2) range.setStartBefore(node);
+          else range.setStartAfter(node);
+          range.collapse(true);
+          return range;
+        }
+        if (target === end) {
+          range.setStartAfter(node);
+          range.collapse(true);
+          return range;
+        }
+        cursor = end;
+        lastNode = node;
+        continue;
+      }
+
+      if (node.tagName?.toLowerCase() === 'br') {
+        const length = 4;
+        if (target <= cursor) {
+          range.setStartBefore(node);
+          range.collapse(true);
+          return range;
+        }
+        if (target <= cursor + length) {
+          range.setStartAfter(node);
+          range.collapse(true);
+          return range;
+        }
+        cursor += length;
+        lastNode = node;
+        continue;
+      }
+
+      const source = stripRichCaretTokens(serializeTableCellInlineNode(node));
+      const length = source.length;
+      if (target <= cursor + length) {
+        const position = findTextPosition(node, target - cursor);
+        if (position) range.setStart(position.node, Math.max(0, Math.min(position.offset, position.node.nodeValue?.length || 0)));
+        else range.setStartBefore(node);
+        range.collapse(true);
+        return range;
+      }
+      cursor += length;
+      lastNode = node;
+    }
+
+    if (lastText?.isConnected) range.setStart(lastText, lastText.nodeValue?.length || 0);
+    else if (lastNode?.isConnected) range.setStartAfter(lastNode);
+    else range.setStart(cell, 0);
+    range.collapse(true);
+    return range;
+  }
+
+  function sourceOffsetToQuoteDomRange(blockquote, offset) {
+    const blockStart = numericData(blockquote, 'sourceStart');
+    const blockEnd = numericData(blockquote, 'sourceEnd');
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return null;
+    const raw = stripRichCaretTokens(state.markdown || '').slice(blockStart, blockEnd);
+    const model = parseMarkdownQuoteSource(raw);
+    if (!model?.lines?.length) return null;
+    const local = Math.max(0, Math.min(raw.length, offset - blockStart));
+    let renderedOffset = 0;
+    const lines = model.lines;
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (local <= line.line.start + line.contentStart) {
+        renderedOffset = line.renderedStart;
+        break;
+      }
+      if (local <= line.line.start + line.contentEnd) {
+        renderedOffset = line.renderedStart + (local - line.line.start - line.contentStart);
+        break;
+      }
+      renderedOffset = line.renderedEnd + (index < lines.length - 1 ? 1 : 0);
+    }
+    return quoteRenderedOffsetRange(blockquote, renderedOffset);
+  }
+
+  function quoteRenderedOffsetRange(blockquote, targetOffset) {
+    const range = document.createRange();
+    const target = Math.max(0, Number(targetOffset) || 0);
+    let cursor = 0;
+    let lastNode = null;
+    let lastText = null;
+
+    for (const node of Array.from(blockquote.childNodes)) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const source = normalizeRichText(node.nodeValue || '');
+        const length = source.length;
+        if (target <= cursor + length) {
+          range.setStart(node, Math.max(0, Math.min(node.nodeValue?.length || 0, target - cursor)));
+          range.collapse(true);
+          return range;
+        }
+        cursor += length;
+        lastText = node;
+        lastNode = node;
+        continue;
+      }
+
+      if (node.nodeType !== Node.ELEMENT_NODE) continue;
+      if (node.classList.contains('rich-inline-atom')) {
+        const source = stripRichCaretTokens(node.dataset.inlineSource || serializeInlineChildren(node));
+        const end = cursor + source.length;
+        if (target <= cursor) {
+          range.setStartBefore(node);
+          range.collapse(true);
+          return range;
+        }
+        if (target < end) {
+          if (target - cursor <= source.length / 2) range.setStartBefore(node);
+          else range.setStartAfter(node);
+          range.collapse(true);
+          return range;
+        }
+        if (target === end) {
+          range.setStartAfter(node);
+          range.collapse(true);
+          return range;
+        }
+        cursor = end;
+        lastNode = node;
+        continue;
+      }
+
+      if (node.tagName?.toLowerCase() === 'br') {
+        if (target <= cursor) {
+          range.setStartBefore(node);
+          range.collapse(true);
+          return range;
+        }
+        if (target <= cursor + 1) {
+          range.setStartAfter(node);
+          range.collapse(true);
+          return range;
+        }
+        cursor += 1;
+        lastNode = node;
+        continue;
+      }
+
+      const source = stripRichCaretTokens(serializeInlineNode(node));
+      const length = source.length;
+      if (target <= cursor + length) {
+        const position = findTextPosition(node, target - cursor);
+        if (position) range.setStart(position.node, Math.max(0, Math.min(position.offset, position.node.nodeValue?.length || 0)));
+        else range.setStartBefore(node);
+        range.collapse(true);
+        return range;
+      }
+      cursor += length;
+      lastNode = node;
+    }
+
+    if (lastText?.isConnected) range.setStart(lastText, lastText.nodeValue?.length || 0);
+    else if (lastNode?.isConnected) range.setStartAfter(lastNode);
+    else range.setStart(blockquote, 0);
+    range.collapse(true);
+    return range;
+  }
+
+  function sourceOffsetToListDomRange(list, offset) {
+    const blockStart = numericData(list, 'sourceStart');
+    const blockEnd = numericData(list, 'sourceEnd');
+    const raw = stripRichCaretTokens(state.markdown || '').slice(blockStart, blockEnd);
+    const sourceItems = flatListSourceItems(raw);
+    const items = Array.from(list.children).filter((child) => child.tagName?.toLowerCase() === 'li');
+    if (!sourceItems.length || sourceItems.length !== items.length) return null;
+    const local = Math.max(0, Math.min(raw.length, offset - blockStart));
+    let itemIndex = sourceItems.findIndex((sourceItem) => sourceItem.start <= local && local <= sourceItem.end);
+    if (itemIndex === -1) {
+      itemIndex = sourceItems.findIndex((sourceItem) => local < sourceItem.start);
+      if (itemIndex === -1) itemIndex = sourceItems.length - 1;
+    }
+    const sourceItem = sourceItems[itemIndex];
+    const item = items[itemIndex];
+    if (!item || !sourceItem?.parsed) return null;
+    const contentOffset = Math.max(0, Math.min(visibleTextFromListSourceItem(sourceItem).length, textOffsetFromListItemSourceOffset(sourceItem, local)));
+    if (visibleTextFromListSourceItem(sourceItem) === visibleListItemText(item)) {
+      const sourceRange = listItemSourceContentOffsetRange(item, contentOffset);
+      if (sourceRange) return sourceRange;
+    }
+    return listItemTextOffsetRange(item, contentOffset);
+  }
+
+  function listItemSourceContentOffsetRange(item, targetOffset) {
+    if (!item) return null;
+    const range = document.createRange();
+    const target = Math.max(0, Number(targetOffset) || 0);
+    let cursor = 0;
+    let lastNode = null;
+    let lastText = null;
+
+    for (const node of listItemEditableContentNodes(item)) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const source = serializeInlineNode(node);
+        const length = source.length;
+        if (target <= cursor + length) {
+          range.setStart(node, Math.max(0, Math.min(node.nodeValue?.length || 0, target - cursor)));
+          range.collapse(true);
+          return range;
+        }
+        cursor += length;
+        lastText = node;
+        lastNode = node;
+        continue;
+      }
+
+      if (node.nodeType !== Node.ELEMENT_NODE) continue;
+      if (node.classList.contains('task-checkbox')) continue;
+      if (node.classList.contains('rich-inline-atom')) {
+        const source = stripRichCaretTokens(node.dataset.inlineSource || serializeInlineChildren(node));
+        const end = cursor + source.length;
+        if (target <= cursor) {
+          range.setStartBefore(node);
+          range.collapse(true);
+          return range;
+        }
+        if (target < end) {
+          if (target - cursor <= source.length / 2) range.setStartBefore(node);
+          else range.setStartAfter(node);
+          range.collapse(true);
+          return range;
+        }
+        if (target === end) {
+          range.setStartAfter(node);
+          range.collapse(true);
+          return range;
+        }
+        cursor = end;
+        lastNode = node;
+        continue;
+      }
+
+      const tag = node.tagName?.toLowerCase();
+      if (tag === 'br') {
+        if (target <= cursor + 1) {
+          range.setStartAfter(node);
+          range.collapse(true);
+          return range;
+        }
+        cursor += 1;
+        lastNode = node;
+        continue;
+      }
+
+      const source = stripRichCaretTokens(serializeInlineNode(node));
+      const length = source.length;
+      if (target <= cursor + length) {
+        const position = findTextPosition(node, target - cursor);
+        if (position) range.setStart(position.node, Math.max(0, Math.min(position.offset, position.node.nodeValue?.length || 0)));
+        else range.setStartBefore(node);
+        range.collapse(true);
+        return range;
+      }
+      cursor += length;
+      lastNode = node;
+    }
+
+    if (lastText?.isConnected) range.setStart(lastText, lastText.nodeValue?.length || 0);
+    else if (lastNode?.isConnected) range.setStartAfter(lastNode);
+    else range.setStart(item, item.childNodes.length);
+    range.collapse(true);
+    return range;
+  }
+
+  function listItemTextOffsetRange(item, targetOffset) {
+    const range = document.createRange();
+    const anchor = item.querySelector(':scope > .rich-list-caret-anchor');
+    if (anchor?.firstChild?.nodeType === Node.TEXT_NODE) {
+      range.setStart(anchor.firstChild, anchor.firstChild.nodeValue.length);
+      range.collapse(true);
+      return range;
+    }
+    const position = findListItemVisibleTextPosition(item, targetOffset) || findListItemTextPosition(item, targetOffset);
+    if (position) {
+      if (position.beforeNode) range.setStartBefore(position.beforeNode);
+      else if (position.afterNode) range.setStartAfter(position.afterNode);
+      else range.setStart(position.node, position.offset);
+      range.collapse(true);
+      return range;
+    }
+    const textNode = document.createTextNode('\u200b');
+    const children = Array.from(item.childNodes);
+    const firstEditableIndex = children.findIndex((child) => !(child.nodeType === 1 && child.classList.contains('task-checkbox')));
+    if (firstEditableIndex >= 0) {
+      item.insertBefore(textNode, children[firstEditableIndex]);
+    } else {
+      item.appendChild(textNode);
+    }
+    range.setStart(textNode, 1);
+    range.collapse(true);
+    return range;
+  }
+
+  function findListItemVisibleTextPosition(item, targetOffset) {
+    const segments = [];
+    const visit = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const raw = normalizeRichText(node.nodeValue || '');
+        const beforeHardBreak = node.nextSibling?.nodeType === Node.ELEMENT_NODE
+          && node.nextSibling.tagName?.toLowerCase() === 'br';
+        const visibleLength = beforeHardBreak ? raw.replace(/[ \t]{2}$/, '').length : raw.length;
+        segments.push({ type: 'text', node, length: visibleLength });
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      if (nodeClosest(node, 'li') !== item) return;
+      if (node.classList.contains('task-checkbox')) return;
+      if (node.parentElement?.closest('.rich-source-editor, .code-language-input')) return;
+      const tag = node.tagName?.toLowerCase();
+      if (tag === 'ul' || tag === 'ol') return;
+      if (tag === 'br') {
+        segments.push({ type: 'break', node, length: 1 });
+        return;
+      }
+      Array.from(node.childNodes).forEach(visit);
+    };
+    listItemEditableContentNodes(item).forEach(visit);
+
+    let consumed = 0;
+    let lastText = null;
+    const target = Math.max(0, Number(targetOffset) || 0);
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index];
+      if (segment.type === 'text') {
+        lastText = segment;
+        if (target <= consumed + segment.length) {
+          return { node: segment.node, offset: Math.max(0, Math.min(segment.node.nodeValue.length, target - consumed)) };
+        }
+        consumed += segment.length;
+        continue;
+      }
+      if (target <= consumed + 1) {
+        const nextText = segments.slice(index + 1).find((itemSegment) => itemSegment.type === 'text');
+        if (nextText) return { node: nextText.node, offset: 0 };
+        return { afterNode: segment.node };
+      }
+      consumed += 1;
+    }
+    return lastText ? { node: lastText.node, offset: Math.min(lastText.node.nodeValue.length, lastText.length) } : null;
+  }
+
+  function inlineAtomForSourceOffset(offset, affinity) {
+    const atoms = Array.from(els.rich.querySelectorAll('.rich-inline-atom[data-src-start][data-src-end]'));
+    return atoms.find((atom) => {
+      const start = Number(atom.dataset.srcStart);
+      const end = Number(atom.dataset.srcEnd);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return false;
+      if (affinity === 'before') return offset === start;
+      if (affinity === 'after') return offset === end;
+      return start <= offset && offset <= end;
+    }) || null;
+  }
+
+  function renderedBlockForSourceOffset(container, offset) {
+    const blocks = Array.from(container.querySelectorAll(RICH_SOURCE_BLOCK_SELECTOR));
+    const direct = blocks.find((block) => {
+      const start = numericData(block, 'sourceStart');
+      const end = numericData(block, 'sourceEnd');
+      return start <= offset && offset <= end;
+    });
+    if (direct) return direct;
+    const markdown = stripRichCaretTokens(state.markdown || els.source?.value || '');
+    return blocks.find((block) => {
+      const start = numericData(block, 'sourceStart');
+      const end = numericData(block, 'sourceEnd');
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return false;
+      if (offset !== end + 1 || markdown[end] !== '\n') return false;
+      return /[ \t]{2}$/.test(markdown.slice(start, end));
+    }) || null;
+  }
+
+  function textOffsetWithinElement(element, container, offset) {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    try {
+      range.setEnd(container, offset);
+      return range.toString().length;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  function sourceContentBaseOffset(sourceBlock) {
+    const blockStart = numericData(sourceBlock, 'sourceStart');
+    const blockEnd = numericData(sourceBlock, 'sourceEnd');
+    const raw = stripRichCaretTokens(state.markdown || '').slice(blockStart, blockEnd);
+    if (sourceBlock.tagName?.toLowerCase()?.match(/^h[1-6]$/)) {
+      const match = raw.match(/^(\s*#{1,6}\s+)/);
+      return match ? match[1].length : 0;
+    }
+    return 0;
   }
 
   function restoreRichInlineSourceCaret(bookmark) {
@@ -4240,7 +9543,14 @@ flowchart TD
 
   function updateTaskCheckbox(input) {
     if (els.rich.contains(input)) {
-      syncRichMarkdownFromDom('task-toggle');
+      const sourceTransaction = taskCheckboxToggleTransaction(input, input.closest?.('li'));
+      if (sourceTransaction) {
+        applySourceTransaction(sourceTransaction, 'task-toggle');
+      } else if (guardFailedRichSourceControlTransaction(input, 'task-toggle', 'チェックリストの位置を特定できませんでした')) {
+        return;
+      } else {
+        syncRichMarkdownFromDom('task-toggle');
+      }
       setStatus(input.checked ? 'チェックを付けました' : 'チェックを外しました');
       return;
     }
@@ -4268,7 +9578,15 @@ flowchart TD
         setStatus(language ? `コード言語: ${language}` : 'コード言語を未指定にしました');
         return;
       }
-      syncRichMarkdownFromDom('code-language', { refreshRich: true });
+      const sourceTransaction = codeBlockLanguageTransaction(input);
+      if (sourceTransaction) {
+        applySourceTransaction(sourceTransaction, 'code-language');
+        refocusCodeLanguageInput(sourceTransaction.codeStart, language);
+      } else if (guardFailedRichSourceControlTransaction(input, 'code-language', 'コードブロックの言語行を更新できませんでした')) {
+        return;
+      } else {
+        syncRichMarkdownFromDom('code-language', { refreshRich: true });
+      }
       setStatus(language ? `コード言語: ${language}` : 'コード言語を未指定にしました');
       return;
     }
@@ -4296,6 +9614,137 @@ flowchart TD
     setStatus(language ? `コード言語: ${language}` : 'コード言語を未指定にしました');
   }
 
+  function guardFailedRichSourceControlTransaction(control, reason, status) {
+    const sourceBlock = nodeClosest(control, RICH_SOURCE_BLOCK_SELECTOR);
+    if (!sourceBlock || !els.rich.contains(sourceBlock)) return false;
+    renderAll(`${reason}-revert`);
+    setStatus(status);
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function codeBlockLanguageTransaction(input) {
+    const sourceRange = codeBlockLanguageSourceRange(input);
+    const start = sourceRange?.start;
+    const end = sourceRange?.end;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start) return null;
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    if (start >= markdown.length || end > markdown.length) return null;
+    const lineEnd = markdown.indexOf('\n', start);
+    const fenceEnd = lineEnd === -1 || lineEnd > end ? end : lineEnd;
+    const fenceLine = markdown.slice(start, fenceEnd);
+    const match = fenceLine.match(/^(\s*```)\s*([A-Za-z0-9_+.-]*)\s*$/);
+    if (!match) return null;
+    const language = safeCodeLanguage(input.value || '');
+    const replacement = `${match[1]}${language}`;
+    return {
+      from: start,
+      to: fenceEnd,
+      insert: replacement,
+      codeStart: start,
+      selectionAfter: {
+        anchor: start + replacement.length,
+        focus: start + replacement.length,
+        affinity: 'after',
+      },
+    };
+  }
+
+  function codeBlockLanguageSourceRange(input) {
+    const dataStart = Number(input?.dataset?.codeStart);
+    const dataEnd = Number(input?.dataset?.codeEnd);
+    if (Number.isInteger(dataStart) && Number.isInteger(dataEnd) && dataStart >= 0 && dataEnd > dataStart) {
+      return { start: dataStart, end: dataEnd };
+    }
+    const pre = input?.closest?.('pre.code-block');
+    if (!pre?.matches?.(RICH_SOURCE_BLOCK_SELECTOR) || !els.rich.contains(pre)) return null;
+    const start = numericData(pre, 'sourceStart');
+    const end = numericData(pre, 'sourceEnd');
+    return Number.isInteger(start) && Number.isInteger(end) && start >= 0 && end > start
+      ? { start, end }
+      : null;
+  }
+
+  function refocusCodeLanguageInput(codeStart, language) {
+    if (state.mode !== 'rich' || !els.rich) return;
+    const nextInput = Array.from(els.rich.querySelectorAll('.code-language-input'))
+      .find((element) => Number(element.dataset.codeStart) === codeStart);
+    if (!nextInput) return;
+    nextInput.focus({ preventScroll: true });
+    const offset = String(language || '').length;
+    try {
+      nextInput.setSelectionRange(offset, offset);
+    } catch (_) {}
+  }
+
+  function taskCheckboxToggleTransaction(input, item = null) {
+    const datasetPosition = Number(input?.dataset?.taskPos);
+    const markerRange = Number.isInteger(datasetPosition)
+      ? null
+      : richTaskCheckboxMarkerRangeFromItem(item || input?.closest?.('li'));
+    const position = Number.isInteger(datasetPosition) ? datasetPosition : (markerRange?.from ?? NaN) + 1;
+    if (!Number.isInteger(position) || !/^[ xX]$/.test(state.markdown[position] || '')) return null;
+    return {
+      from: position,
+      to: position + 1,
+      insert: input.checked ? 'x' : ' ',
+      selectionAfter: {
+        anchor: position + 1,
+        focus: position + 1,
+        affinity: 'after',
+      },
+    };
+  }
+
+  function removeRichTaskCheckboxTransaction(input, item = null) {
+    const position = Number(input?.dataset?.taskPos);
+    let markerStart = NaN;
+    let markerEnd = NaN;
+    if (Number.isInteger(position)) {
+      markerStart = position - 1;
+      markerEnd = position + 3;
+    } else {
+      const markerRange = richTaskCheckboxMarkerRangeFromItem(item || input?.closest?.('li'));
+      markerStart = markerRange?.from ?? NaN;
+      markerEnd = markerRange?.to ?? NaN;
+    }
+    if (markerStart < 0 || markerEnd > state.markdown.length || markerEnd <= markerStart) return null;
+    if (!/^\[[ xX]\]\s/.test(state.markdown.slice(markerStart, markerEnd))) return null;
+    return {
+      from: markerStart,
+      to: markerEnd,
+      insert: '',
+      selectionAfter: {
+        anchor: markerStart,
+        focus: markerStart,
+        affinity: 'after',
+      },
+    };
+  }
+
+  function richTaskCheckboxMarkerRangeFromItem(item) {
+    if (!item || !els.rich.contains(item)) return null;
+    const list = item.closest('ul, ol');
+    if (!list?.matches?.(RICH_SOURCE_BLOCK_SELECTOR) || item.parentElement !== list) return null;
+    const blockStart = numericData(list, 'sourceStart');
+    const blockEnd = numericData(list, 'sourceEnd');
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return null;
+    const raw = stripRichCaretTokens(state.markdown || '').slice(blockStart, blockEnd);
+    const sourceItems = flatListSourceItems(raw);
+    const items = Array.from(list.children).filter((child) => child.tagName?.toLowerCase() === 'li');
+    const itemIndex = items.indexOf(item);
+    if (itemIndex < 0 || sourceItems.length !== items.length) return null;
+    const sourceItem = sourceItems[itemIndex];
+    const firstLine = sourceItem?.lines?.[0];
+    if (!sourceItem?.parsed?.task || !firstLine) return null;
+    const marker = String(firstLine.text || '').match(/^(\s*(?:[-+*]|\d+\.)\s+)(\[[ xX]\]\s+)/);
+    if (!marker) return null;
+    return {
+      from: blockStart + firstLine.start + marker[1].length,
+      to: blockStart + firstLine.start + marker[1].length + marker[2].length,
+    };
+  }
+
   function activateRichInlineSource(element, position = 'end') {
     if (!element || element.classList.contains('rich-inline-source')) return;
     const active = state.richInlineSource?.element;
@@ -4304,40 +9753,90 @@ flowchart TD
       return;
     }
 
-    const source = richInlineSourceFromElement(element);
+    const source = stripRichCaretTokens(richInlineSourceFromElement(element));
     if (!source) return;
     const span = document.createElement('span');
     span.className = 'rich-inline-source';
     span.contentEditable = 'true';
     span.spellcheck = false;
     span.dataset.inlineSource = source;
+    if (element.classList?.contains('rich-inline-atom')) {
+      if (element.dataset.srcStart) span.dataset.srcStart = element.dataset.srcStart;
+      if (element.dataset.srcEnd) span.dataset.srcEnd = element.dataset.srcEnd;
+    }
     span.setAttribute('role', 'textbox');
     span.setAttribute('aria-label', 'インラインMarkdownソース');
     span.textContent = source;
 
     state.richSelectionLock = true;
     element.replaceWith(span);
-    state.richInlineSource = { element: span };
+    state.richInlineSource = { element: span, undoCaptured: false };
     placeCaretInInlineSource(span, position);
     state.richSelectionLock = false;
   }
 
-  function commitRichInlineSource(sourceElement = state.richInlineSource?.element) {
+  function commitRichInlineSource(sourceElement = state.richInlineSource?.element, options = {}) {
     if (!sourceElement) return false;
     if (!sourceElement.isConnected) {
       if (state.richInlineSource?.element === sourceElement) state.richInlineSource = null;
       return false;
     }
 
-    const source = normalizeNewlines(sourceElement.textContent || '');
+    const block = nodeClosest(sourceElement, RICH_INLINE_EDIT_BLOCK_SELECTOR);
+    const source = stripRichCaretTokens(normalizeNewlines(sourceElement.textContent || ''));
+    const alreadySynced = isRichInlineSourceAlreadySynced();
+    const sourceTransaction = !options.caretToken && !alreadySynced
+      ? richInlineSourceCommitTransaction(sourceElement, source)
+      : null;
+    if (sourceTransaction) {
+      if (state.richInlineSource?.element === sourceElement) state.richInlineSource = null;
+      applySourceTransaction(sourceTransaction, 'rich-inline-source-commit');
+      return true;
+    }
     const fragment = renderRichInlineSourceFragment(source);
     state.richSelectionLock = true;
     if (state.richInlineSource?.element === sourceElement) state.richInlineSource = null;
     sourceElement.replaceWith(fragment);
+    if (block && els.rich.contains(block)) {
+      reparseRichInlineEditBlockContent(block, { caretToken: options.caretToken || '' });
+    }
     configureRichEditableSurface();
-    syncRichMarkdownFromDom('rich-input');
+    finalizeRichProjectionChange('rich-input');
     state.richSelectionLock = false;
     return true;
+  }
+
+  function isRichInlineSourceAlreadySynced() {
+    return stripRichCaretTokens(serializeRichMarkdown(els.rich)) === stripRichCaretTokens(state.markdown || '');
+  }
+
+  function finalizeRichProjectionChange(reason = 'rich-input') {
+    sanitizeRichCaretTokensInDom(els.rich);
+    if (stripRichCaretTokens(serializeRichMarkdown(els.rich)) === stripRichCaretTokens(state.markdown || '')) {
+      refreshRichSourceRangesFromMarkdown();
+      scheduleRender(reason);
+      return true;
+    }
+    syncRichMarkdownFromDom(reason);
+    return false;
+  }
+
+  function richInlineSourceCommitTransaction(sourceElement, source) {
+    const start = Number(sourceElement?.dataset?.srcStart);
+    const end = Number(sourceElement?.dataset?.srcEnd);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+    const insert = stripRichCaretTokens(source || '');
+    const nextOffset = start + insert.length;
+    return {
+      from: start,
+      to: end,
+      insert,
+      selectionAfter: {
+        anchor: nextOffset,
+        focus: nextOffset,
+        affinity: 'after',
+      },
+    };
   }
 
   function placeCaretInInlineSource(element, position) {
@@ -4356,14 +9855,305 @@ flowchart TD
   }
 
   function renderRichInlineSourceFragment(source) {
+    const normalized = stripRichCaretTokens(normalizeNewlines(source || ''));
+    if (richInlineSourceShouldStayLiteral(normalized)) {
+      const fragment = document.createDocumentFragment();
+      if (normalized) fragment.appendChild(document.createTextNode(normalized));
+      return fragment;
+    }
+
     const template = document.createElement('template');
-    template.innerHTML = renderInlineMarkdown(source);
+    template.innerHTML = renderInlineMarkdown(normalized);
     enhanceRenderedHtml(template.content);
     return template.content;
   }
 
+  function reparseRichInlineEditBlockContent(block, options = {}) {
+    if (!block || !els.rich.contains(block)) return false;
+    let marker = null;
+    const caretToken = options.caretToken || (options.range ? richCaretToken() : '');
+    if (options.range) {
+      marker = document.createTextNode(caretToken);
+      insertRichInlineReparseMarker(block, options.range, marker);
+    }
+
+    const markdownWithCaret = caretToken
+      ? serializeRichInlineEditBlockContentPreservingCaret(block)
+      : serializeRichInlineEditBlockContent(block);
+    const tokenSelection = caretToken
+      ? sourceSelectionFromRichInlineContentIndex(block, markdownWithCaret.indexOf(caretToken))
+      : null;
+    const markdown = stripRichCaretTokens(markdownWithCaret);
+    const fragment = renderRichInlineSourceFragment(markdown);
+    replaceRichInlineEditBlockContent(block, fragment);
+    wrapRenderedInlineAtoms(block);
+    stabilizeReparsedRichInlineBlock(block);
+    configureRichEditableSurface();
+
+    if (caretToken) {
+      if (
+        !(tokenSelection && restoreRichCaretFromSourceSelection(tokenSelection))
+        && !(options.sourceSelection && restoreRichCaretFromSourceSelection(options.sourceSelection))
+      ) {
+        restoreCaretFromTextToken(block, caretToken);
+      }
+    } else if (marker?.isConnected) {
+      marker.remove();
+    }
+    sanitizeRichCaretTokensInDom(block);
+    suppressRichInlineActivation();
+    return true;
+  }
+
+  function sourceSelectionFromRichInlineContentIndex(block, index) {
+    if (!Number.isFinite(index) || index < 0) return null;
+    let offset = null;
+    if (block?.tagName?.toLowerCase() === 'li') {
+      const listPoint = richListSourcePointFromContentIndex(block, index);
+      offset = listPoint?.offset ?? null;
+    } else {
+      const sourceBlock = nodeClosest(block, RICH_SOURCE_BLOCK_SELECTOR);
+      if (!sourceBlock) return null;
+      const start = numericData(sourceBlock, 'sourceStart');
+      if (!Number.isFinite(start)) return null;
+      offset = start + sourceContentBaseOffset(sourceBlock) + index;
+    }
+    if (!Number.isFinite(offset)) return null;
+    return {
+      anchor: offset,
+      focus: offset,
+      affinity: 'after',
+    };
+  }
+
+  function richListSourcePointFromContentIndex(item, index) {
+    const list = item.closest('ul, ol');
+    if (!list?.matches?.(RICH_SOURCE_BLOCK_SELECTOR) || item.parentElement !== list) return null;
+    const blockStart = numericData(list, 'sourceStart');
+    const blockEnd = numericData(list, 'sourceEnd');
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return null;
+    const raw = stripRichCaretTokens(state.markdown || '').slice(blockStart, blockEnd);
+    const sourceItems = flatListSourceItems(raw);
+    const items = Array.from(list.children).filter((child) => child.tagName?.toLowerCase() === 'li');
+    const itemIndex = items.indexOf(item);
+    if (itemIndex < 0 || sourceItems.length !== items.length) return null;
+    const sourceItem = sourceItems[itemIndex];
+    if (!sourceItem?.parsed) return null;
+    const content = visibleTextFromListSourceItem(sourceItem);
+    if (content !== visibleListItemText(item)) return null;
+    const bounded = Math.max(0, Math.min(index, content.length));
+    return {
+      offset: blockStart + sourceOffsetFromListItemTextOffset(sourceItem, bounded),
+    };
+  }
+
+  function stabilizeReparsedRichInlineBlock(block) {
+    if (!block || !els.rich.contains(block)) return false;
+    const changed = parsePendingRichInlineMarkdownInBlock(block);
+    wrapRenderedInlineAtoms(block);
+    return changed;
+  }
+
+  function insertRichInlineReparseMarker(block, range, marker) {
+    const inlineElement = validRichInlineSourceElement(nodeElement(range.startContainer)?.closest?.(RICH_INLINE_SOURCE_SELECTOR));
+    if (inlineElement && isSameRichInlineEditBlock(inlineElement, block)) {
+      const offset = richInlineElementTextOffsetForRange(inlineElement, range);
+      const length = normalizeRichText(inlineElement.textContent || '').length;
+      if (offset <= 0) {
+        inlineElement.before(marker);
+        return;
+      }
+      if (offset >= length) {
+        inlineElement.after(marker);
+        return;
+      }
+    }
+    range.insertNode(marker);
+  }
+
+  function richCaretToken() {
+    return `@PME_CARET_${Math.random().toString(36).slice(2)}_${Date.now()}@`;
+  }
+
+  function serializeRichInlineEditBlockContent(block) {
+    return serializeInlineNodes(richInlineEditBlockContentNodes(block));
+  }
+
+  function serializeRichInlineEditBlockContentPreservingCaret(block) {
+    return serializeInlineNodesPreservingCaret(richInlineEditBlockContentNodes(block));
+  }
+
+  function serializeInlineNodesPreservingCaret(nodes) {
+    return nodes.map((node) => serializeInlineNodePreservingCaret(node)).join('').replace(/[ \t]+\n/g, '\n');
+  }
+
+  function serializeInlineNodePreservingCaret(node) {
+    if (node.nodeType === Node.TEXT_NODE) return String(node.nodeValue || '').replace(/\u00a0/g, ' ').replace(/\u200b/g, '');
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+    const element = node;
+    if (element.classList.contains('rich-inline-source')) return normalizeNewlines(element.textContent || '');
+    if (element.classList.contains('rich-inline-atom')) return stripRichCaretTokens(element.dataset.inlineSource || serializeInlineChildren(element));
+    if (element.classList.contains('rich-list-caret-anchor')) return String(element.textContent || '').replace(/\u200b/g, '');
+    if (element.classList.contains('rich-line-break-caret-anchor')) return String(element.textContent || '').replace(/\u200b/g, '');
+    if (element.classList.contains('code-language-input') || element.classList.contains('task-checkbox')) return '';
+    const tag = element.tagName.toLowerCase();
+    if (tag === 'br') return '\n';
+    if (tag === 'strong' || tag === 'b') return `**${serializeInlineNodesPreservingCaret(Array.from(element.childNodes)).trim()}**`;
+    if (tag === 'em' || tag === 'i') return `*${serializeInlineNodesPreservingCaret(Array.from(element.childNodes)).trim()}*`;
+    if (tag === 'del' || tag === 's') return `~~${serializeInlineNodesPreservingCaret(Array.from(element.childNodes)).trim()}~~`;
+    if (tag === 'code' && !element.closest('pre')) return markdownCodeSpan(element.textContent || '');
+    return serializeInlineNodesPreservingCaret(Array.from(element.childNodes));
+  }
+
+  function richInlineEditBlockContentNodes(block) {
+    if (!block) return [];
+    if (block.tagName?.toLowerCase() !== 'li') return Array.from(block.childNodes);
+    return Array.from(block.childNodes).filter((child) => {
+      if (child.nodeType !== Node.ELEMENT_NODE) return true;
+      const tag = child.tagName?.toLowerCase();
+      if (tag === 'ul' || tag === 'ol') return false;
+      return !child.classList.contains('task-checkbox');
+    });
+  }
+
+  function replaceRichInlineEditBlockContent(block, fragment) {
+    if (block.tagName?.toLowerCase() !== 'li') {
+      block.replaceChildren(fragment);
+      ensureRichTextBlockPlaceholder(block);
+      return;
+    }
+
+    for (const node of richInlineEditBlockContentNodes(block)) node.remove();
+    const nestedList = Array.from(block.children).find((child) => ['ul', 'ol'].includes(child.tagName?.toLowerCase()));
+    if (nestedList) {
+      block.insertBefore(fragment, nestedList);
+    } else {
+      block.appendChild(fragment);
+    }
+    ensureListItemEditablePlaceholder(block);
+  }
+
+  function restoreCaretFromTextToken(root, token) {
+    if (!token) return false;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const index = (node.nodeValue || '').indexOf(token);
+      if (index === -1) continue;
+      node.nodeValue = (node.nodeValue || '').slice(0, index) + (node.nodeValue || '').slice(index + token.length);
+      sanitizeRichCaretTokensInDom(root);
+      placeCaretInTextNode(node, index);
+      return true;
+    }
+    const sourceElement = Array.from(root.querySelectorAll('.rich-inline-source, .rich-inline-atom'))
+      .find((element) => String(element.dataset.inlineSource || '').includes(token));
+    if (sourceElement) {
+      const rawSource = String(sourceElement.dataset.inlineSource || '');
+      const index = rawSource.indexOf(token);
+      const cleaned = stripRichCaretTokens(rawSource);
+      sourceElement.dataset.inlineSource = cleaned;
+      sanitizeRichCaretTokensInDom(root);
+      if (sourceElement.classList.contains('rich-inline-source')) {
+        sourceElement.textContent = stripRichCaretTokens(sourceElement.textContent || cleaned);
+        placeCaretInInlineSource(sourceElement, Math.max(0, Math.min(index, sourceElement.textContent.length)));
+      } else if (index <= 0) {
+        placeCaretAtInlineBoundary(sourceElement, 'before');
+      } else if (index >= cleaned.length) {
+        placeCaretAtInlineBoundary(sourceElement, 'after');
+      } else {
+        activateRichInlineSource(sourceElement, Math.max(0, Math.min(index, cleaned.length)));
+      }
+      return true;
+    }
+    sanitizeRichCaretTokensInDom(root);
+    return false;
+  }
+
+  function sanitizeRichCaretTokensInDom(root) {
+    if (!root) return;
+    const textWalker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    while (textWalker.nextNode()) {
+      const node = textWalker.currentNode;
+      const cleaned = stripRichCaretTokens(node.nodeValue || '');
+      if (cleaned !== node.nodeValue) node.nodeValue = cleaned;
+    }
+
+    if (!root.querySelectorAll) return;
+    root.querySelectorAll('[data-inline-source], [data-rich-source], [data-mermaid-source], [data-math-source]').forEach((element) => {
+      ['inlineSource', 'richSource', 'mermaidSource', 'mathSource'].forEach((key) => {
+        if (!Object.prototype.hasOwnProperty.call(element.dataset, key)) return;
+        element.dataset[key] = stripRichCaretTokens(element.dataset[key] || '');
+      });
+    });
+  }
+
+  function sanitizeRichCaretTokensInDomPreservingSelection(root) {
+    if (!root) return;
+    const selection = window.getSelection?.();
+    const activeNode = selection?.rangeCount && root.contains(selection.anchorNode)
+      ? selection.anchorNode
+      : null;
+    const activeOffset = selection?.rangeCount ? selection.anchorOffset : 0;
+    let nextSelection = null;
+
+    const textWalker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (textWalker.nextNode()) nodes.push(textWalker.currentNode);
+
+    for (const node of nodes) {
+      const value = node.nodeValue || '';
+      if (!RICH_CARET_TOKEN_PATTERN.test(value)) {
+        RICH_CARET_TOKEN_PATTERN.lastIndex = 0;
+        continue;
+      }
+      RICH_CARET_TOKEN_PATTERN.lastIndex = 0;
+      const cleaned = stripRichCaretTokens(value);
+      if (node === activeNode) {
+        nextSelection = {
+          node,
+          offset: stripRichCaretTokens(value.slice(0, activeOffset)).length,
+        };
+      }
+      node.nodeValue = cleaned;
+    }
+
+    sanitizeRichCaretTokensInDom(root);
+    if (nextSelection?.node?.isConnected) {
+      placeCaretInTextNode(
+        nextSelection.node,
+        Math.max(0, Math.min(nextSelection.offset, nextSelection.node.nodeValue?.length || 0)),
+      );
+    }
+  }
+
+  function stripRichCaretTokens(value) {
+    return String(value || '').replace(RICH_CARET_TOKEN_PATTERN, '');
+  }
+
+  function richInlineSourceShouldStayLiteral(source) {
+    const text = String(source || '');
+    if (!text) return false;
+    if (hasAmbiguousStrongDelimiterNeighborhood(text)) return true;
+    if (isCompleteSingleRichInlineMarkdownSource(text)) return false;
+    return (
+      text.startsWith('~~') || text.endsWith('~~')
+      || text.startsWith('`') || text.endsWith('`')
+      || text.startsWith('$') || text.endsWith('$')
+    );
+  }
+
+  function isCompleteSingleRichInlineMarkdownSource(source) {
+    return Boolean(String(source || '').match(/^(?:!\[[^\]\n]*\]\((?:<[^>\n]+>|[^)\n]+)\)|\[[^\]\n]+\]\((?:<[^>\n]+>|[^)\n]+)\)|`[^`\n]+`|~~[^~\n]+~~|\*\*[^*\n]+?\*\*|__[^_\n]+?__|\*[^*\n]+\*|_[^_\n]+_|\$\$[^\n$]+?\$\$|\$[^\s$][^\n$]*?\$|\\\([^)]+\\\))$/));
+  }
+
   function richInlineSourceFromElement(element) {
     if (!element) return '';
+    const atom = element.classList?.contains('rich-inline-atom')
+      ? element
+      : element.closest?.('.rich-inline-atom');
+    if (atom && els.rich.contains(atom)) {
+      return stripRichCaretTokens(atom.dataset.inlineSource || serializeInlineChildren(atom));
+    }
     const tag = element.tagName?.toLowerCase();
     if (tag === 'strong' || tag === 'b') return `**${serializeInlineChildren(element).trim()}**`;
     if (tag === 'em' || tag === 'i') return `*${serializeInlineChildren(element).trim()}*`;
@@ -4374,6 +10164,152 @@ flowchart TD
     if (element.classList?.contains('math-inline')) return serializeMathElement(element);
     if (element.classList?.contains('blocked-image')) return serializeBlockedImageElement(element);
     return '';
+  }
+
+  function wrapRenderedInlineAtoms(root) {
+    if (!root?.querySelectorAll) return;
+    const candidates = Array.from(root.querySelectorAll('strong, b, em, i, del, s, code, a, img, .math-inline, .blocked-image'));
+    for (const element of candidates) {
+      if (!shouldWrapRichInlineAtom(element)) continue;
+      const source = richInlineSourceFromElement(element);
+      if (!source) continue;
+      const wrapper = document.createElement('span');
+      wrapper.className = 'rich-inline-atom';
+      wrapper.contentEditable = 'false';
+      wrapper.dataset.inlineRun = inlineAtomKind(element);
+      wrapper.dataset.kind = wrapper.dataset.inlineRun;
+      wrapper.dataset.inlineSource = stripRichCaretTokens(source);
+      element.replaceWith(wrapper);
+      wrapper.appendChild(element);
+    }
+  }
+
+  function annotateRenderedInlineAtomRanges(root) {
+    if (!root?.querySelectorAll) return;
+    const markdown = stripRichCaretTokens(state.markdown || els.source?.value || '');
+    const blocks = Array.from(root.querySelectorAll('[data-source-start][data-source-end]'));
+    for (const block of blocks) {
+      const start = numericData(block, 'sourceStart');
+      const end = numericData(block, 'sourceEnd');
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) continue;
+      const source = markdown.slice(start, end);
+      const runs = inlineRunsForBlockSource(source, start);
+      if (!runs.length) continue;
+      const used = new Set();
+      for (const atom of Array.from(block.querySelectorAll('.rich-inline-atom'))) {
+        const run = matchingInlineRunForAtom(atom, runs, used);
+        if (!run) continue;
+        used.add(run);
+        atom.dataset.srcStart = String(run.sourceStart);
+        atom.dataset.srcEnd = String(run.sourceEnd);
+        atom.dataset.contentStart = String(run.contentStart ?? run.sourceStart);
+        atom.dataset.contentEnd = String(run.contentEnd ?? run.sourceEnd);
+      }
+    }
+  }
+
+  function matchingInlineRunForAtom(atom, runs, used) {
+    const kind = atom.dataset.kind || atom.dataset.inlineRun || '';
+    const source = stripRichCaretTokens(atom.dataset.inlineSource || '');
+    const text = normalizeRichText(atom.textContent || '');
+    const exact = runs.find((run) => !used.has(run) && run.kind === kind && run.source === source);
+    if (exact) return exact;
+    return runs.find((run) => !used.has(run) && run.kind === kind && normalizeRichText(run.text) === text) || null;
+  }
+
+  function inlineRunsForBlockSource(source, baseOffset = 0) {
+    const runs = [];
+    const text = String(source || '');
+    let index = 0;
+    while (index < text.length) {
+      const run = inlineRunAt(text, index, baseOffset);
+      if (!run) {
+        index += 1;
+        continue;
+      }
+      runs.push(run);
+      index += Math.max(1, run.source.length);
+    }
+    return runs;
+  }
+
+  function inlineRunAt(text, index, baseOffset) {
+    const rest = text.slice(index);
+    const patterns = [
+      { kind: 'image', pattern: /^!\[([^\]\n]*)\]\((<[^>\n]+>|[^)\n]+)\)/, contentGroup: 1 },
+      { kind: 'link', pattern: /^\[([^\]\n]+)\]\((<[^>\n]+>|[^)\n]+)\)/, contentGroup: 1 },
+      { kind: 'code', pattern: /^`([^`\n]+)`/, contentGroup: 1 },
+      { kind: 'del', pattern: /^~~([^~\n]+)~~/, contentGroup: 1 },
+      { kind: 'strong', pattern: /^\*\*([^*\n]+?)\*\*/, contentGroup: 1 },
+      { kind: 'strong', pattern: /^__([^_\n]+?)__/, contentGroup: 1 },
+      { kind: 'math', pattern: /^\$\$([^\n$]+?)\$\$/, contentGroup: 1 },
+      { kind: 'math', pattern: /^\$([^\s$][^\n$]*?)\$/, contentGroup: 1 },
+      { kind: 'math', pattern: /^\\\(([^)]+)\\\)/, contentGroup: 1 },
+    ];
+    for (const item of patterns) {
+      const match = rest.match(item.pattern);
+      if (!match) continue;
+      return inlineRunFromMatch(item.kind, match, index, baseOffset, item.contentGroup);
+    }
+
+    if (rest[0] === '*' && rest[1] !== '*' && canOpenSingleDelimiterAt(text, index, '*')) {
+      const close = rest.indexOf('*', 1);
+      if (close > 1 && !rest.slice(1, close).includes('\n')) {
+        return inlineRunFromSource('em', rest.slice(0, close + 1), rest.slice(1, close), index, baseOffset, 1);
+      }
+    }
+
+    if (rest[0] === '_' && rest[1] !== '_' && canOpenSingleDelimiterAt(text, index, '_')) {
+      const close = rest.indexOf('_', 1);
+      if (close > 1 && !rest.slice(1, close).includes('\n')) {
+        return inlineRunFromSource('em', rest.slice(0, close + 1), rest.slice(1, close), index, baseOffset, 1);
+      }
+    }
+
+    return null;
+  }
+
+  function inlineRunFromMatch(kind, match, index, baseOffset, contentGroup) {
+    const source = match[0];
+    const text = match[contentGroup] || '';
+    const contentOffset = source.indexOf(text);
+    return inlineRunFromSource(kind, source, text, index, baseOffset, contentOffset);
+  }
+
+  function inlineRunFromSource(kind, source, text, index, baseOffset, contentOffset) {
+    const sourceStart = baseOffset + index;
+    const contentStart = sourceStart + Math.max(0, contentOffset || 0);
+    return {
+      kind,
+      sourceStart,
+      sourceEnd: sourceStart + source.length,
+      contentStart,
+      contentEnd: contentStart + String(text || '').length,
+      source,
+      text: String(text || ''),
+    };
+  }
+
+  function shouldWrapRichInlineAtom(element) {
+    if (!element) return false;
+    if (element.closest('.rich-inline-atom, .rich-inline-source')) return false;
+    if (element.closest('.rich-source-editor, .mermaid-diagram, pre, .math-display')) return false;
+    if (element.classList?.contains('code-language-input') || element.classList?.contains('task-checkbox')) return false;
+    if (element.tagName?.toLowerCase() === 'code' && element.closest('pre')) return false;
+    return Boolean(richInlineSourceFromElement(element));
+  }
+
+  function inlineAtomKind(element) {
+    if (element.classList?.contains('math-inline')) return 'math';
+    if (element.classList?.contains('blocked-image')) return 'image';
+    const tag = element.tagName?.toLowerCase();
+    if (tag === 'strong' || tag === 'b') return 'strong';
+    if (tag === 'em' || tag === 'i') return 'em';
+    if (tag === 'del' || tag === 's') return 'del';
+    if (tag === 'code') return 'code';
+    if (tag === 'a') return 'link';
+    if (tag === 'img') return 'image';
+    return 'text';
   }
 
   function showRichSourceEditor(kind, element, options = {}) {
@@ -4476,8 +10412,47 @@ flowchart TD
       element.setAttribute('data-math-display', 'true');
     }
     setRichSourceOnElement(kind, element, source);
-    syncRichMarkdownFromDom(`${kind}-source`, { refreshRich: true });
+    const sourceTransaction = richSourceBlockTransaction(kind, element, source);
+    if (sourceTransaction) {
+      applySourceTransaction(sourceTransaction, `${kind}-source`);
+    } else {
+      if (element.matches?.(RICH_SOURCE_BLOCK_SELECTOR)) {
+        renderAll(`${kind}-source-revert`);
+        setStatus(`${richSourceTitle(kind)}ソースを反映できませんでした`);
+        return;
+      }
+      syncRichMarkdownFromDom(`${kind}-source`, { refreshRich: true });
+    }
     setStatus(`${richSourceTitle(kind)}ソースを反映しました`);
+  }
+
+  function richSourceBlockTransaction(kind, element, source) {
+    const start = numericData(element, 'sourceStart');
+    const end = numericData(element, 'sourceEnd');
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start) return null;
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    if (end > markdown.length) return null;
+    let replacement = '';
+    if (kind === 'mermaid') {
+      replacement = serializeMermaidDiagram(element);
+    } else if (kind === 'code') {
+      replacement = serializePreElement(element);
+    } else if (kind === 'math') {
+      replacement = serializeMathElement(element);
+    } else {
+      replacement = normalizeNewlines(source);
+    }
+    if (!replacement) return null;
+    return {
+      from: start,
+      to: end,
+      insert: replacement,
+      selectionAfter: {
+        anchor: start + replacement.length,
+        focus: start + replacement.length,
+        affinity: 'after',
+      },
+    };
   }
 
   function normalizeMathEditorSource(source) {
@@ -4539,16 +10514,81 @@ flowchart TD
   }
 
   function syncRichMarkdownFromDom(reason, options = {}) {
-    state.markdown = serializeRichMarkdown(els.rich);
+    if (repairRichLineBreakCaretDomSync(reason)) return;
+    sanitizeRichCaretTokensInDom(els.rich);
+    const serialized = stripRichCaretTokens(serializeRichMarkdown(els.rich));
+    const shortcutNormalized = normalizeSyncedMarkdownShortcuts(serialized);
+    state.markdown = shortcutNormalized.markdown;
     els.source.value = state.markdown;
     markDirty();
-    if (options.refreshRich) {
+    if (shortcutNormalized.changed) setStatus(shortcutNormalized.status || 'Markdown入力を変換しました');
+    if (options.refreshRich || shortcutNormalized.changed) {
       renderAll(reason || 'rich-edit');
     } else {
+      refreshRichSourceRangesFromMarkdown();
       scheduleRender('rich-input');
       if (options.reparseRich) scheduleRichReparse();
     }
     scheduleAutosave();
+  }
+
+  function repairRichLineBreakCaretDomSync(reason) {
+    const anchor = els.rich?.querySelector?.('.rich-line-break-caret-anchor[data-source-offset]');
+    const offset = state.richLineBreakInputOffset !== null && Number.isFinite(Number(state.richLineBreakInputOffset))
+      ? Number(state.richLineBreakInputOffset)
+      : Number(anchor?.dataset?.sourceOffset);
+    if (!Number.isFinite(offset)) return false;
+    const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
+    if (offset <= 0 || offset > markdown.length || markdown[offset - 1] !== '\n') return false;
+    const block = renderedBlockForSourceOffset(els.rich, offset);
+    if (!block) return false;
+    const insert = richLineBreakCaretInputText(null, block, markdown);
+    if (!insert || insert.includes('\n')) return false;
+    state.richLineBreakInputOffset = null;
+    applySourceTransaction({
+      from: offset,
+      to: offset,
+      insert,
+      selectionAfter: {
+        anchor: offset + insert.length,
+        focus: offset + insert.length,
+        affinity: 'after',
+      },
+    }, reason || 'rich-line-break-caret-sync');
+    return true;
+  }
+
+  function normalizeSyncedMarkdownShortcuts(markdown) {
+    const source = stripRichCaretTokens(markdown || '');
+    const blocks = buildBlockModel(source);
+    for (let index = blocks.length - 1; index >= 0; index -= 1) {
+      const block = blocks[index];
+      if (block.type !== 'paragraph') continue;
+      const replacement = richBlockMarkdownTriggerReplacement(block.raw, { allowBareMath: false });
+      if (!replacement) continue;
+      return {
+        markdown: source.slice(0, block.start) + replacement.insert + source.slice(block.end),
+        changed: true,
+        status: replacement.status,
+      };
+    }
+    return { markdown: source, changed: false, status: '' };
+  }
+
+  function refreshRichSourceRangesFromMarkdown() {
+    if (state.mode !== 'rich' || !els.rich) return false;
+    const blocks = buildBlockModel(state.markdown);
+    const rendered = Array.from(els.rich.children).filter((child) => child.matches?.(RICH_SOURCE_BLOCK_SELECTOR));
+    if (blocks.length !== rendered.length) return false;
+    rendered.forEach((element, index) => {
+      const block = blocks[index];
+      element.dataset.blockId = block.id;
+      element.dataset.blockType = block.type;
+      element.dataset.sourceStart = String(block.start);
+      element.dataset.sourceEnd = String(block.end);
+    });
+    annotateRenderedInlineAtomRanges(els.rich);
+    return true;
   }
 
   function serializeRichMarkdown(root) {
@@ -4574,7 +10614,7 @@ flowchart TD
     if (/^h[1-6]$/.test(tag)) return `${'#'.repeat(Number(tag[1]))} ${serializeInlineChildren(element).trim()}`;
     if (tag === 'p') return serializeInlineChildren(element).trim();
     if (tag === 'pre') return serializePreElement(element);
-    if (tag === 'blockquote') return prefixLines(serializeBlockChildren(element), '> ');
+    if (tag === 'blockquote') return serializeQuoteElement(element);
     if (tag === 'ul' || tag === 'ol') return serializeListElement(element);
     if (tag === 'table') return serializeTableElement(element);
     if (tag === 'hr') return '---';
@@ -4598,8 +10638,32 @@ flowchart TD
     return serializeInlineNodes(Array.from(element.childNodes));
   }
 
+  function serializeQuoteElement(blockquote) {
+    const source = serializeInlineNodes(Array.from(blockquote.childNodes)).replace(/^[ \t]+|[ \t]+$/g, '');
+    return source ? prefixLines(source, '> ') : '>';
+  }
+
   function serializeInlineNodes(nodes) {
     return nodes.map((node) => serializeInlineNode(node)).join('').replace(/[ \t]+\n/g, '\n');
+  }
+
+  function serializeTableCellInlineNodes(nodes) {
+    return nodes.map((node) => serializeTableCellInlineNode(node)).join('');
+  }
+
+  function serializeTableCellElement(cell) {
+    const nodes = Array.from(cell?.childNodes || []);
+    if (nodes.every((node) => node.nodeType === 1 && node.tagName?.toLowerCase() === 'br')) return '';
+    return serializeTableCellInlineNodes(nodes).replace(/^[ \t]+|[ \t]+$/g, '');
+  }
+
+  function serializeTableCellInlineNode(node) {
+    if (node.nodeType === 3) return escapeMarkdownTableCell(normalizeRichText(node.nodeValue || ''));
+    if (node.nodeType !== 1) return '';
+
+    const element = node;
+    if (element.tagName?.toLowerCase() === 'br') return '<br>';
+    return escapeMarkdownTableCell(serializeInlineNode(element));
   }
 
   function serializeInlineNode(node) {
@@ -4607,7 +10671,10 @@ flowchart TD
     if (node.nodeType !== 1) return '';
 
     const element = node;
-    if (element.classList.contains('rich-inline-source')) return normalizeNewlines(element.textContent || '');
+    if (element.classList.contains('rich-inline-source')) return stripRichCaretTokens(normalizeNewlines(element.textContent || ''));
+    if (element.classList.contains('rich-inline-atom')) return stripRichCaretTokens(element.dataset.inlineSource || serializeInlineChildren(element));
+    if (element.classList.contains('rich-list-caret-anchor')) return normalizeRichText(element.textContent || '').replace(/\u200b/g, '');
+    if (element.classList.contains('rich-line-break-caret-anchor')) return normalizeRichText(element.textContent || '').replace(/\u200b/g, '');
     if (element.classList.contains('math-inline') || element.classList.contains('math-display')) return serializeMathElement(element);
     if (element.classList.contains('blocked-image') && element.getAttribute('data-markdown-src')) {
       return serializeBlockedImageElement(element);
@@ -4643,13 +10710,19 @@ flowchart TD
       const marker = ordered ? `${itemIndex + 1}.` : '-';
       const lines = serializeInlineNodes(contentNodes)
         .split('\n')
-        .map((line) => line.trim())
+        .map((line) => normalizeListItemSourceLine(line))
         .filter((line) => line !== '');
       const text = lines.shift() || ' ';
       const continuation = lines.map((line) => `${indent}  ${line}`).join('\n');
       const nested = nestedLists.map((child) => serializeListElement(child, depth + 1)).filter(Boolean).join('\n');
       return `${indent}${marker} ${taskPrefix}${text}${continuation ? `\n${continuation}` : ''}${nested ? `\n${nested}` : ''}`;
     }).join('\n');
+  }
+
+  function normalizeListItemSourceLine(line) {
+    const value = String(line || '').trimStart();
+    if (/[ \t]{2}$/.test(value)) return value.replace(/[ \t]+$/, '  ');
+    return value.trimEnd();
   }
 
   function serializePreElement(pre) {
@@ -4662,10 +10735,10 @@ flowchart TD
     const rows = Array.from(table.querySelectorAll('tr'));
     if (!rows.length) return '';
     const firstRowCells = Array.from(rows[0].children);
-    const headers = firstRowCells.map((cell) => escapeMarkdownTableCell(serializeInlineChildren(cell).trim()));
+    const headers = firstRowCells.map((cell) => serializeTableCellElement(cell));
     const separator = headers.map(() => '---');
     const bodyRows = rows.slice(1).map((row) => {
-      const cells = Array.from(row.children).map((cell) => escapeMarkdownTableCell(serializeInlineChildren(cell).trim()));
+      const cells = Array.from(row.children).map((cell) => serializeTableCellElement(cell));
       return `| ${cells.join(' | ')} |`;
     });
     return [`| ${headers.join(' | ')} |`, `| ${separator.join(' | ')} |`, ...bodyRows].join('\n');
@@ -4702,7 +10775,7 @@ flowchart TD
   }
 
   function normalizeRichText(value) {
-    return String(value || '').replace(/\u00a0/g, ' ').replace(/\u200b/g, '');
+    return stripRichCaretTokens(String(value || '')).replace(/\u00a0/g, ' ').replace(/\u200b/g, '');
   }
 
   function markdownCodeSpan(value) {
@@ -4750,17 +10823,237 @@ flowchart TD
   }
 
   function syncPreviewScroll() {
-    if (state.mode !== 'split') return;
-    const sourceMax = els.source.scrollHeight - els.source.clientHeight;
-    const previewMax = els.preview.scrollHeight - els.preview.clientHeight;
-    if (sourceMax <= 0 || previewMax <= 0) return;
-    els.preview.scrollTop = (els.source.scrollTop / sourceMax) * previewMax;
+    if (state.mode !== 'split' || state.scrollSyncLock) return;
+    const anchor = captureSourceScrollAnchor();
+    if (!anchor) return;
+    withScrollSyncLock(() => {
+      if (!restoreRenderedScrollAnchor(els.preview, anchor)) restoreRenderedScrollByRatio(els.preview, els.source);
+    });
+  }
+
+  function syncSourceScroll() {
+    if (state.mode !== 'split' || state.scrollSyncLock) return;
+    const anchor = captureRenderedScrollAnchor(els.preview);
+    if (!anchor) return;
+    withScrollSyncLock(() => {
+      if (!restoreSourceScrollAnchor(anchor)) restoreSourceScrollByRatio(els.preview);
+    });
+  }
+
+  function withScrollSyncLock(callback) {
+    state.scrollSyncLock = true;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      state.scrollSyncLock = false;
+    };
+    try {
+      callback();
+    } finally {
+      window.requestAnimationFrame(release);
+      window.setTimeout(release, 80);
+    }
+  }
+
+  function captureCurrentScrollAnchor() {
+    if (!els.source || !els.preview || !els.rich) return null;
+    if (state.mode === 'rich') return captureRenderedScrollAnchor(els.rich) || captureSourceScrollAnchor();
+    if (state.mode === 'preview') return captureRenderedScrollAnchor(els.preview) || captureSourceScrollAnchor();
+    return captureSourceScrollAnchor() || captureRenderedScrollAnchor(els.preview) || captureRenderedScrollAnchor(els.rich);
+  }
+
+  function restoreCurrentModeScrollSoon(anchor) {
+    const restore = () => restoreCurrentModeScroll(anchor);
+    window.requestAnimationFrame(() => {
+      restore();
+      window.setTimeout(restore, 180);
+    });
+  }
+
+  function restoreCurrentModeScroll(anchor) {
+    if (!anchor) return;
+    withScrollSyncLock(() => {
+      if (state.mode === 'rich') {
+        restoreRenderedScrollAnchor(els.rich, anchor);
+        return;
+      }
+      if (state.mode === 'preview') {
+        restoreRenderedScrollAnchor(els.preview, anchor);
+        return;
+      }
+      if (state.mode === 'source' || state.mode === 'focus') {
+        restoreSourceScrollAnchor(anchor);
+        return;
+      }
+      if (state.mode === 'split') {
+        restoreSourceScrollAnchor(anchor);
+        restoreRenderedScrollAnchor(els.preview, anchor);
+      }
+    });
+  }
+
+  function captureSourceScrollAnchor() {
+    const value = normalizeNewlines(els.source?.value || state.markdown || '');
+    const lineHeight = textareaLineHeight(els.source);
+    const lineIndex = Math.max(0, Math.floor((els.source?.scrollTop || 0) / lineHeight));
+    const lineStarts = markdownLineStarts(value);
+    const boundedLine = Math.min(lineIndex, Math.max(0, lineStarts.length - 1));
+    const offset = lineStarts[boundedLine] || 0;
+    return {
+      type: 'source',
+      offset,
+      lineIndex: boundedLine,
+      lineTop: (els.source?.scrollTop || 0) - boundedLine * lineHeight,
+      ratio: scrollRatio(els.source),
+    };
+  }
+
+  function restoreSourceScrollAnchor(anchor) {
+    if (!anchor || !els.source) return false;
+    const value = normalizeNewlines(els.source.value || state.markdown || '');
+    const lineIndex = markdownLineIndexAtOffset(value, anchor.offset || 0);
+    const lineHeight = textareaLineHeight(els.source);
+    els.source.scrollTop = Math.max(0, lineIndex * lineHeight + (anchor.lineTop || 0));
+    return true;
+  }
+
+  function captureRenderedScrollAnchor(container) {
+    if (!container) return null;
+    const elements = renderedSourceElements(container);
+    if (!elements.length) return {
+      type: 'rendered',
+      offset: 0,
+      y: 0,
+      ratio: scrollRatio(container),
+    };
+    const containerRect = container.getBoundingClientRect();
+    const targetY = containerRect.top + Math.min(72, Math.max(16, container.clientHeight * 0.12));
+    let candidate = null;
+    for (const element of elements) {
+      const rect = element.getBoundingClientRect();
+      if (rect.bottom >= targetY) {
+        candidate = element;
+        break;
+      }
+      candidate = element;
+    }
+    if (!candidate) candidate = elements[0];
+    const rect = candidate.getBoundingClientRect();
+    return {
+      type: 'rendered',
+      offset: numericData(candidate, 'sourceStart'),
+      end: numericData(candidate, 'sourceEnd'),
+      y: Math.max(0, targetY - rect.top),
+      ratio: scrollRatio(container),
+    };
+  }
+
+  function restoreRenderedScrollAnchor(container, anchor) {
+    if (!container || !anchor) return false;
+    const target = renderedElementForOffset(container, anchor.offset || 0);
+    if (!target) return false;
+    const containerRect = container.getBoundingClientRect();
+    const targetY = containerRect.top + Math.min(72, Math.max(16, container.clientHeight * 0.12));
+    const rect = target.getBoundingClientRect();
+    container.scrollTop += rect.top - (targetY - (anchor.y || 0));
+    return true;
+  }
+
+  function renderedElementForOffset(container, offset) {
+    const elements = renderedSourceElements(container);
+    if (!elements.length) return null;
+    let previous = elements[0];
+    for (const element of elements) {
+      const start = numericData(element, 'sourceStart');
+      const end = numericData(element, 'sourceEnd');
+      if (start <= offset && offset <= end) return element;
+      if (start > offset) return previous || element;
+      previous = element;
+    }
+    return previous;
+  }
+
+  function renderedSourceElements(container) {
+    return Array.from(container.querySelectorAll('[data-source-start][data-source-end]'))
+      .filter((element) => Number.isFinite(numericData(element, 'sourceStart')));
+  }
+
+  function numericData(element, key) {
+    const value = Number(element?.dataset?.[key]);
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  function markdownLineStarts(markdown) {
+    const starts = [0];
+    const text = String(markdown || '');
+    for (let index = 0; index < text.length; index += 1) {
+      if (text[index] === '\n') starts.push(index + 1);
+    }
+    return starts;
+  }
+
+  function markdownLineIndexAtOffset(markdown, offset) {
+    const starts = markdownLineStarts(markdown);
+    const target = Math.max(0, Math.min(String(markdown || '').length, offset || 0));
+    let low = 0;
+    let high = starts.length - 1;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      if (starts[mid] <= target && (mid === starts.length - 1 || starts[mid + 1] > target)) return mid;
+      if (starts[mid] > target) high = mid - 1;
+      else low = mid + 1;
+    }
+    return 0;
+  }
+
+  function textareaLineHeight(textarea) {
+    if (!textarea) return 24;
+    const lineHeight = Number.parseFloat(window.getComputedStyle(textarea).lineHeight);
+    if (Number.isFinite(lineHeight) && lineHeight > 0) return lineHeight;
+    const fontSize = Number.parseFloat(window.getComputedStyle(textarea).fontSize);
+    return Number.isFinite(fontSize) && fontSize > 0 ? fontSize * 1.72 : 24;
+  }
+
+  function scrollRatio(element) {
+    const max = Math.max(1, (element?.scrollHeight || 0) - (element?.clientHeight || 0));
+    return Math.max(0, Math.min(1, (element?.scrollTop || 0) / max));
+  }
+
+  function restoreRenderedScrollByRatio(target, source) {
+    if (!target || !source) return;
+    const max = Math.max(0, target.scrollHeight - target.clientHeight);
+    target.scrollTop = scrollRatio(source) * max;
+  }
+
+  function restoreSourceScrollByRatio(source) {
+    if (!els.source || !source) return;
+    const max = Math.max(0, els.source.scrollHeight - els.source.clientHeight);
+    els.source.scrollTop = scrollRatio(source) * max;
   }
 
   function renderMarkdownHtml(markdown) {
-    const blocks = splitMarkdownBlocks(markdown);
+    const blocks = buildBlockModel(stripRichCaretTokens(markdown));
     const headings = buildHeadingIndex(blocks);
-    return blocks.map((block) => renderBlockHtml(block, headings)).join('\n');
+    return blocks.map((block) => annotateRenderedBlockHtml(renderBlockHtml(block, headings), block)).join('\n');
+  }
+
+  function buildBlockModel(markdown) {
+    return splitMarkdownBlocks(markdown).map((block, index) => ({
+      ...block,
+      id: block.id || `b${index}-${hashString(`${block.start}:${block.end}:${block.type}:${block.raw}`)}`,
+    }));
+  }
+
+  function annotateRenderedBlockHtml(html, block) {
+    if (!html || !Number.isFinite(block?.start) || !Number.isFinite(block?.end)) return html;
+    const attrs = [
+      ` data-block-id="${escapeAttribute(block.id || '')}"`,
+      ` data-block-type="${escapeAttribute(block.type || 'paragraph')}"`,
+      ` data-source-start="${escapeAttribute(block.start)}"`,
+      ` data-source-end="${escapeAttribute(block.end)}"`,
+    ].join('');
+    return String(html).replace(/^(\s*<[a-z][\w:-]*)(?=[\s>/])/i, `$1${attrs}`);
   }
 
   function renderMarkdownWithVendor(markdown) {
@@ -5033,7 +11326,14 @@ flowchart TD
 
       const end = endIndex > index ? lines[endIndex - 1].end : startLine.end;
       const raw = text.slice(startLine.start, end).replace(/\n$/, '');
-      blocks.push({ raw, start: startLine.start, end: startLine.start + raw.length, type: classifyBlock(raw) });
+      const sourceEnd = startLine.start + raw.length;
+      blocks.push({
+        raw,
+        start: startLine.start,
+        end: sourceEnd,
+        type: classifyBlock(raw),
+        trailingNewline: text[sourceEnd] === '\n',
+      });
       index = Math.max(endIndex, index + 1);
     }
     return blocks;
@@ -5071,6 +11371,9 @@ flowchart TD
     switch (block.type) {
       case 'heading':
         return renderHeading(block, headingIndex);
+      case 'paragraph':
+        if (block.trailingNewline && /[ \t]{2}$/.test(block.raw || '')) return renderParagraph(block.raw, block);
+        break;
       case 'toc':
         return renderToc(headingIndex.items);
       case 'code':
@@ -5081,6 +11384,8 @@ flowchart TD
         return renderList(block.raw, block);
       case 'table':
         return renderTable(block.raw);
+      case 'quote':
+        return renderQuote(block.raw);
       default: {
         const vendorHtml = renderBlockWithVendor(block.raw, block);
         if (vendorHtml) return vendorHtml;
@@ -5093,14 +11398,14 @@ flowchart TD
       case 'quote':
         return renderQuote(block.raw);
       default:
-        return renderParagraph(block.raw);
+        return renderParagraph(block.raw, block);
     }
   }
 
   function renderHeading(block, headingIndex) {
     const raw = block.raw;
     const match = raw.match(/^\s*(#{1,6})\s+(.+?)\s*#*\s*$/);
-    if (!match) return renderParagraph(raw);
+    if (!match) return renderParagraph(raw, block);
     const level = match[1].length;
     const text = stripInlineMarkdown(match[2]);
     const id = headingIndex.byOffset.get(block.start) || slugify(text);
@@ -5108,6 +11413,7 @@ flowchart TD
   }
 
   function renderBlockWithVendor(raw, block = null) {
+    if (hasAmbiguousStrongDelimiterNeighborhood(raw)) return '';
     const md = getVendorMarkdownRenderer();
     if (!md) return '';
     return md.render(preprocessVendorMarkdown(raw), buildMarkdownItEnv(raw, block)).trimEnd();
@@ -5130,9 +11436,34 @@ flowchart TD
   }
 
   function renderInlineMarkdown(raw) {
+    const safeRaw = stripRichCaretTokens(raw);
+    if (hasAmbiguousStrongDelimiterNeighborhood(safeRaw)) return renderInline(safeRaw);
     const md = getVendorMarkdownRenderer();
-    if (!md) return renderInline(raw);
-    return md.renderInline(String(raw || ''));
+    if (!md) return renderInline(safeRaw);
+    return md.renderInline(String(safeRaw || ''));
+  }
+
+  function hasAmbiguousStrongDelimiterNeighborhood(raw) {
+    const text = String(raw || '');
+    return hasAmbiguousStrongDelimiter(text, '*') || hasAmbiguousStrongDelimiter(text, '_');
+  }
+
+  function hasAmbiguousStrongDelimiter(text, delimiter) {
+    const pair = delimiter + delimiter;
+    let index = 0;
+    while (index < text.length - 1) {
+      const open = text.indexOf(pair, index);
+      if (open === -1) return false;
+      const closePair = text.indexOf(pair, open + 2);
+      if (closePair !== -1 && !text.slice(open + 2, closePair).includes('\n')) {
+        index = closePair + 2;
+        continue;
+      }
+      const singleClose = text.indexOf(delimiter, open + 2);
+      if (singleClose !== -1 && !text.slice(open + 2, singleClose).includes('\n')) return true;
+      index = open + 2;
+    }
+    return false;
   }
 
   function renderCodeBlock(raw, block = null) {
@@ -5183,9 +11514,17 @@ flowchart TD
     ].join('');
   }
 
-  function renderParagraph(raw) {
+  function renderParagraph(raw, block = null) {
     const lines = raw.split('\n');
-    return `<p>${lines.map((line) => renderInline(line)).join('<br>')}</p>`;
+    const rendered = lines.map((line, index) => {
+      const trailingHardBreak = index === lines.length - 1
+        && block?.trailingNewline
+        && /[ \t]{2}$/.test(line);
+      const anchorOffset = Number.isFinite(block?.end) ? block.end + 1 : '';
+      const anchor = `<br><span class="rich-line-break-caret-anchor" data-source-offset="${escapeAttribute(anchorOffset)}">\u200b</span>`;
+      return `${renderInline(line)}${trailingHardBreak ? anchor : ''}`;
+    });
+    return `<p>${rendered.join('<br>')}</p>`;
   }
 
   function renderQuote(raw) {
@@ -5230,11 +11569,16 @@ flowchart TD
     }
 
     const items = itemsData.map((item) => {
-      const body = item.lines.map((line) => renderInlineMarkdown(line)).join('<br>') || '<br>';
+      const body = renderListItemBody(item.lines);
       return `<li${item.className}>${item.checkbox}${body}</li>`;
     }).join('');
     const classAttr = hasTasks ? ' class="task-list"' : '';
     return `<${tag}${classAttr}>${items}</${tag}>`;
+  }
+
+  function renderListItemBody(lines) {
+    const body = lines.map((line) => renderInlineMarkdown(line)).join('<br>');
+    return body || '<span class="rich-list-caret-anchor">\u200b</span><br>';
   }
 
   function renderTable(raw) {
@@ -5993,6 +12337,8 @@ ${body}
 
   function enhanceRenderedHtml(root) {
     renderKaTeXIn(root);
+    wrapRenderedInlineAtoms(root);
+    annotateRenderedInlineAtomRanges(root);
     renderMermaidIn(root);
   }
 
@@ -6767,10 +13113,8 @@ ${body}
   }
 
   function splitTableRow(line) {
-    let value = String(line || '').trim();
-    if (value.startsWith('|')) value = value.slice(1);
-    if (value.endsWith('|')) value = value.slice(0, -1);
-    return value.split('|').map((cell) => cell.trim());
+    return splitTableRowWithSourceRanges(String(line || '').trim())
+      .map((cell) => unescapeMarkdownTableCell(cell.raw.trim()));
   }
 
   function parseAlign(cell) {

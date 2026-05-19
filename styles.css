@@ -502,6 +502,15 @@ body.outline-collapsed .sidebar { display: none; }
   font-size: 0.9em;
 }
 
+.rich-inline-atom {
+  display: inline;
+  user-select: text;
+}
+
+.rich-list-caret-anchor {
+  display: inline;
+}
+
 .rich-inline-source {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1308,7 +1317,35 @@ body[data-mode="preview"] .markdown-body {
 dialog { border: 0; border-radius: 1rem; background: transparent; }
 dialog::backdrop { background: rgba(15, 23, 42, 0.58); backdrop-filter: blur(4px); }
 .dialog-card h2 { margin-top: 0; }
-.dialog-card menu { display: flex; justify-content: flex-end; padding: 0; }
+.dialog-card menu {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  padding: 0;
+}
+
+.data-management-panel {
+  margin-top: 1rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--border);
+}
+
+.data-management-panel h3 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+}
+
+.data-management-panel p {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+}
+
+.data-management-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
 
 .dialog-field {
   display: grid;

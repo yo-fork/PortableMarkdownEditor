@@ -1,0 +1,7 @@
+{
+  "app": "Portable Markdown Editor",
+  "version": 1,
+  "allowedLinkDomains": [
+    "example.com"
+  ]
+}
