@@ -4,16 +4,44 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src data: blob:; font-src 'self' data:; connect-src 'none'; worker-src 'none'; manifest-src 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self' 'sha256-IIfcoSB3WiDM1jdnFiAv48Oe64spHLLyoiiPyOmBd6Q='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src data: blob:; font-src 'self' data:; connect-src 'none'; worker-src 'none'; manifest-src 'none';">
   <title>Portable Markdown Editor</title>
   <link rel="stylesheet" href="./vendor/highlight/styles/github-dark.min.css">
   <link rel="stylesheet" href="./vendor/katex/katex.min.css">
-  <link rel="stylesheet" href="./styles.css?v=mermaid-visual-fix-3">
+  <link rel="stylesheet" href="./styles.css?v=rich-trailing-paragraph-1">
   <script src="./vendor/markdown-it/markdown-it.min.js" defer></script>
   <script src="./vendor/highlight/highlight.min.js" defer></script>
   <script src="./vendor/mermaid/mermaid.min.js" defer></script>
   <script src="./vendor/katex/katex.min.js" defer></script>
-  <script src="./app.js?v=rich-source-transaction-128" defer></script>
+  <script src="./vendor/prosemirror/prosemirror-editor.js?v=rich-trailing-paragraph-1" defer></script>
+  <script type="importmap">
+{
+  "imports": {
+    "@codemirror/autocomplete": "./vendor/codemirror6/node_modules/@codemirror/autocomplete/dist/index.js",
+    "@codemirror/commands": "./vendor/codemirror6/node_modules/@codemirror/commands/dist/index.js",
+    "@codemirror/lang-css": "./vendor/codemirror6/node_modules/@codemirror/lang-css/dist/index.js",
+    "@codemirror/lang-html": "./vendor/codemirror6/node_modules/@codemirror/lang-html/dist/index.js",
+    "@codemirror/lang-javascript": "./vendor/codemirror6/node_modules/@codemirror/lang-javascript/dist/index.js",
+    "@codemirror/lang-markdown": "./vendor/codemirror6/node_modules/@codemirror/lang-markdown/dist/index.js",
+    "@codemirror/language": "./vendor/codemirror6/node_modules/@codemirror/language/dist/index.js",
+    "@codemirror/lint": "./vendor/codemirror6/node_modules/@codemirror/lint/dist/index.js",
+    "@codemirror/state": "./vendor/codemirror6/node_modules/@codemirror/state/dist/index.js",
+    "@codemirror/view": "./vendor/codemirror6/node_modules/@codemirror/view/dist/index.js",
+    "@lezer/common": "./vendor/codemirror6/node_modules/@lezer/common/dist/index.js",
+    "@lezer/css": "./vendor/codemirror6/node_modules/@lezer/css/dist/index.js",
+    "@lezer/highlight": "./vendor/codemirror6/node_modules/@lezer/highlight/dist/index.js",
+    "@lezer/html": "./vendor/codemirror6/node_modules/@lezer/html/dist/index.js",
+    "@lezer/javascript": "./vendor/codemirror6/node_modules/@lezer/javascript/dist/index.js",
+    "@lezer/lr": "./vendor/codemirror6/node_modules/@lezer/lr/dist/index.js",
+    "@lezer/markdown": "./vendor/codemirror6/node_modules/@lezer/markdown/dist/index.js",
+    "@marijn/find-cluster-break": "./vendor/codemirror6/node_modules/@marijn/find-cluster-break/src/index.js",
+    "crelt": "./vendor/codemirror6/node_modules/crelt/index.js",
+    "style-mod": "./vendor/codemirror6/node_modules/style-mod/src/style-mod.js",
+    "w3c-keyname": "./vendor/codemirror6/node_modules/w3c-keyname/index.js"
+  }
+}
+  </script>
+  <script src="./app.js?v=rich-trailing-paragraph-1" defer></script>
 </head>
 <body data-mode="rich">
   <a class="skip-link" href="#mainWorkspace">本文へ移動</a>

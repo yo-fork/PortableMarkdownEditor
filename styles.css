@@ -356,7 +356,7 @@ body.outline-collapsed .sidebar { display: none; }
   overflow: hidden;
 }
 
-.source-pane { grid-area: source; }
+.source-pane { grid-area: source; position: relative; }
 .preview-pane { grid-area: preview; }
 .rich-pane { grid-area: source; display: none; }
 
@@ -391,6 +391,67 @@ body.outline-collapsed .sidebar { display: none; }
   tab-size: 2;
 }
 
+.source-pane.is-codemirror-ready #sourceEditor {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  min-height: 0;
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.source-codemirror {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+.source-codemirror .cm-editor {
+  height: 100%;
+  background: transparent;
+  color: var(--text);
+  outline: none;
+}
+
+.source-codemirror .cm-focused {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.source-codemirror .cm-scroller {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  line-height: 1.72;
+}
+
+.source-codemirror .cm-content {
+  min-height: 100%;
+  padding: 1.1rem;
+  caret-color: var(--accent);
+}
+
+.source-codemirror .cm-line {
+  padding: 0 0.2rem;
+}
+
+.source-codemirror .cm-gutters {
+  border-right: 1px solid var(--border);
+  background: var(--panel-soft);
+  color: var(--muted);
+}
+
+.source-codemirror .cm-activeLine,
+.source-codemirror .cm-activeLineGutter {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.source-codemirror .cm-selectionBackground,
+.source-codemirror .cm-editor.cm-focused .cm-selectionBackground,
+.source-codemirror .cm-content ::selection {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
 .markdown-body, .rich-editor {
   flex: 1;
   min-height: 0;
@@ -406,10 +467,57 @@ body.outline-collapsed .sidebar { display: none; }
   -webkit-user-select: text;
 }
 
+.rich-editor.is-prosemirror-rich {
+  padding: 0;
+}
+
+.rich-editor.is-prosemirror-fallback {
+  cursor: default;
+}
+
+.rich-editor .ProseMirror {
+  min-height: 100%;
+  padding: clamp(1.2rem, 3vw, 3.5rem);
+  outline: none;
+  white-space: pre-wrap;
+}
+
+.rich-editor .ProseMirror-selectednode {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.rich-editor .ProseMirror-gapcursor {
+  display: none;
+  pointer-events: none;
+  position: absolute;
+}
+
+.rich-editor .ProseMirror-gapcursor:after {
+  content: "";
+  display: block;
+  position: absolute;
+  width: 20px;
+  border-top: 1px solid var(--accent);
+  animation: ProseMirror-cursor-blink 1.1s steps(2, start) infinite;
+}
+
+.rich-editor .ProseMirror-focused .ProseMirror-gapcursor {
+  display: block;
+}
+
+@keyframes ProseMirror-cursor-blink {
+  to { visibility: hidden; }
+}
+
 .rich-editor:focus {
   box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
+.rich-editor:focus-within {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.source-codemirror.is-drag-over,
 #sourceEditor.is-drag-over,
 .rich-editor.is-drag-over {
   box-shadow: inset 0 0 0 2px var(--accent);
@@ -438,6 +546,40 @@ body.outline-collapsed .sidebar { display: none; }
 .rich-editor .math-display:focus-within {
   outline: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
   outline-offset: 4px;
+}
+
+.rich-editor .pme-math-node,
+.rich-editor .pme-mermaid-node,
+.rich-editor .pme-toc-node {
+  user-select: none;
+}
+
+.rich-editor .math-inline.pme-math-node {
+  display: inline-flex;
+  align-items: baseline;
+  min-height: 1.25em;
+  vertical-align: -0.08em;
+}
+
+.rich-editor .math-display.pme-math-node {
+  display: block;
+  overflow-x: auto;
+  padding: 0.75rem 1rem;
+}
+
+.rich-editor .math-inline.pme-math-node.is-error,
+.rich-editor .math-display.pme-math-node.is-error {
+  color: var(--danger);
+  font-family: var(--mono);
+  white-space: pre-wrap;
+}
+
+.rich-editor .pme-mermaid-node .mermaid-render-target {
+  min-height: 3rem;
+}
+
+.rich-editor .pme-mermaid-node .mermaid-fallback pre {
+  white-space: pre-wrap;
 }
 
 .rich-editor .is-editing-source {
@@ -500,6 +642,54 @@ body.outline-collapsed .sidebar { display: none; }
   border-radius: 0.35rem;
   padding: 0.1rem 0.28rem;
   font-size: 0.9em;
+}
+
+.rich-editor .pme-inline-code-boundary-spacer {
+  display: inline-block;
+  width: 0.32rem;
+  height: 1.38em;
+  margin: 0;
+  padding: 0;
+  pointer-events: none;
+  position: relative;
+  user-select: none;
+  vertical-align: -0.28em;
+}
+
+.rich-editor .ProseMirror.pme-inline-code-outside-boundary {
+  caret-color: transparent;
+}
+
+.rich-editor .ProseMirror.pme-inline-code-outside-boundary .pme-inline-code-boundary-spacer::before {
+  animation: ProseMirror-cursor-blink 1.1s steps(2, start) infinite;
+  border-left: 1.5px solid var(--accent);
+  content: "";
+  height: 1.32em;
+  left: 0.08rem;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.rich-editor .pme-inline-source-token {
+  color: color-mix(in srgb, var(--muted) 76%, transparent);
+  font-family: var(--mono);
+  font-size: 0.78em;
+  font-style: normal;
+  font-weight: 400;
+  line-height: 1;
+  opacity: 0.78;
+  pointer-events: none;
+  text-decoration: none;
+  user-select: none;
+}
+
+.rich-editor .pme-inline-source-token--before {
+  margin-right: 0.06rem;
+}
+
+.rich-editor .pme-inline-source-token--after {
+  margin-left: 0.06rem;
 }
 
 .rich-inline-atom {
@@ -1168,6 +1358,7 @@ body.outline-collapsed .sidebar { display: none; }
 .markdown-body th, .markdown-body td, .rich-editor th, .rich-editor td {
   border: 1px solid var(--border);
   padding: 0.55rem 0.68rem;
+  position: relative;
   vertical-align: top;
 }
 
@@ -1175,6 +1366,37 @@ body.outline-collapsed .sidebar { display: none; }
 .markdown-body .align-left, .rich-editor .align-left { text-align: left; }
 .markdown-body .align-center, .rich-editor .align-center { text-align: center; }
 .markdown-body .align-right, .rich-editor .align-right { text-align: right; }
+
+.rich-editor .pme-rich-table {
+  table-layout: fixed;
+}
+
+.rich-editor .pme-rich-table th,
+.rich-editor .pme-rich-table td {
+  min-width: 6rem;
+  white-space: pre-wrap;
+}
+
+.rich-editor .ProseMirror table th:focus-within,
+.rich-editor .ProseMirror table td:focus-within {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.rich-editor .ProseMirror .tableWrapper {
+  overflow-x: auto;
+}
+
+.rich-editor .ProseMirror .selectedCell::after {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  bottom: 0;
+  content: "";
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+  top: 0;
+  z-index: 2;
+}
 
 .markdown-body img, .rich-editor img {
   max-width: 100%;
@@ -1231,6 +1453,22 @@ body.outline-collapsed .sidebar { display: none; }
 
 .toc strong { display: block; margin-bottom: 0.4rem; font-family: var(--sans); }
 .toc a { display: block; padding: 0.18rem 0; text-decoration: none; }
+.toc button {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  padding: 0.18rem 0;
+  text-align: left;
+}
+.toc button:hover,
+.toc button:focus-visible {
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
 .toc .level-2 { margin-left: 1rem; }
 .toc .level-3 { margin-left: 2rem; }
 .toc .level-4, .toc .level-5, .toc .level-6 { margin-left: 3rem; }
@@ -1280,6 +1518,9 @@ body[data-mode="preview"] .source-pane, body[data-mode="preview"] .rich-pane { d
 
 body[data-mode="focus"] .source-pane { border: 0; box-shadow: none; background: transparent; }
 body[data-mode="focus"] #sourceEditor { font-family: var(--serif); font-size: 1.15rem; line-height: 1.95; padding: clamp(1.2rem, 5vw, 4rem); }
+body[data-mode="focus"] .source-codemirror .cm-scroller { font-family: var(--serif); font-size: 1.15rem; line-height: 1.95; }
+body[data-mode="focus"] .source-codemirror .cm-content { padding: clamp(1.2rem, 5vw, 4rem); }
+body[data-mode="focus"] .source-codemirror .cm-gutters { display: none; }
 body[data-mode="focus"] .pane-title,
 body[data-mode="focus"] .sidebar,
 body[data-mode="focus"] .security-badges,

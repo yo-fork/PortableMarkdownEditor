@@ -132,6 +132,13 @@ flowchart TD
     folderScanLimitMessage: '',
     pendingImageInsertionContext: null,
     pendingInlineInsertContext: null,
+    codeMirrorSource: null,
+    codeMirrorSourceLoading: false,
+    codeMirrorSourceReady: false,
+    proseMirrorRich: null,
+    proseMirrorRichActive: false,
+    proseMirrorRichFallbackReason: '',
+    proseMirrorFocusTimer: 0,
   };
 
   const els = {};
@@ -146,6 +153,7 @@ flowchart TD
     applyTheme();
     initializeVendorLibraries();
     els.source.value = state.markdown;
+    initializeCodeMirrorSourceEditor();
     applyMode(state.mode, { preserveScroll: false });
     renderAll('init');
     setStatus('準備完了');
@@ -405,13 +413,7 @@ flowchart TD
     document.addEventListener('pointerup', onDocumentPointerEnd);
     document.addEventListener('pointercancel', onDocumentPointerEnd);
 
-    els.source.addEventListener('input', () => {
-      state.markdown = stripRichCaretTokens(normalizeNewlines(els.source.value));
-      if (state.markdown !== els.source.value) els.source.value = state.markdown;
-      markDirty();
-      scheduleRender();
-      scheduleAutosave();
-    });
+    els.source.addEventListener('input', handleSourceTextareaInput);
 
     els.source.addEventListener('scroll', syncPreviewScroll);
     els.source.addEventListener('keyup', syncPreviewScroll);
@@ -430,7 +432,7 @@ flowchart TD
     els.inlineInsertDialog.addEventListener('close', () => {
       if (els.inlineInsertDialog.returnValue !== 'inserted') state.pendingInlineInsertContext = null;
     });
-    els.rich.setAttribute('contenteditable', 'true');
+    els.rich.removeAttribute('contenteditable');
     els.rich.setAttribute('role', 'textbox');
     els.rich.setAttribute('aria-multiline', 'true');
     els.rich.setAttribute('aria-label', 'リッチMarkdown編集');
@@ -442,6 +444,7 @@ flowchart TD
     els.rich.addEventListener('drop', onEditorDrop);
     els.rich.addEventListener('compositionstart', () => { state.richComposing = true; });
     els.rich.addEventListener('compositionend', onRichCompositionEnd);
+    els.rich.addEventListener('pointerdown', onRichPointerDownCapture, true);
     els.rich.addEventListener('click', onRichClick);
 
     window.addEventListener('beforeunload', (event) => {
@@ -451,11 +454,345 @@ flowchart TD
     });
   }
 
+  function initializeCodeMirrorSourceEditor() {
+    if (!els.source || state.codeMirrorSource || state.codeMirrorSourceLoading) return;
+    state.codeMirrorSourceLoading = true;
+    import('./vendor/codemirror6/source-editor.js')
+      .then((module) => {
+        const createEditor = module?.createPortableMarkdownSourceEditor;
+        if (typeof createEditor !== 'function') throw new Error('CodeMirror source editor factory is missing');
+        state.codeMirrorSource = createEditor({
+          textarea: els.source,
+          onChange: handleCodeMirrorSourceChange,
+          onScroll: syncPreviewScroll,
+          onSelectionChange: syncPreviewScroll,
+          onPaste: onMarkdownPaste,
+          onDragOver: onEditorDragOver,
+          onDragLeave: onEditorDragLeave,
+          onDrop: onEditorDrop,
+        });
+        state.codeMirrorSourceReady = true;
+        state.codeMirrorSourceLoading = false;
+        els.source.closest?.('.source-pane')?.classList.add('is-codemirror-ready');
+        syncCodeMirrorSourceFromTextarea('codemirror-init');
+        refreshCodeMirrorSourceEditorSoon();
+      })
+      .catch(() => {
+        state.codeMirrorSource = null;
+        state.codeMirrorSourceReady = false;
+        state.codeMirrorSourceLoading = false;
+        els.source.closest?.('.source-pane')?.classList.remove('is-codemirror-ready');
+        setStatus('CodeMirrorソースエディタを読み込めませんでした。textareaで続行します');
+      });
+  }
+
+  function isCodeMirrorSourceReady() {
+    return Boolean(state.codeMirrorSourceReady && state.codeMirrorSource);
+  }
+
+  function handleSourceTextareaInput() {
+    handleSourceValueChange(els.source.value, { source: 'textarea' });
+  }
+
+  function handleCodeMirrorSourceChange(value) {
+    handleSourceValueChange(value, { source: 'codemirror' });
+  }
+
+  function handleSourceValueChange(value, options = {}) {
+    const markdown = stripRichCaretTokens(normalizeNewlines(value));
+    state.markdown = markdown;
+    if (els.source.value !== markdown) els.source.value = markdown;
+    if (options.source !== 'codemirror') syncCodeMirrorSourceFromTextarea('source-input');
+    markDirty();
+    if (options.renderNow) {
+      window.clearTimeout(state.renderTimer);
+      renderAll(options.reason || 'edit');
+    } else {
+      scheduleRender(options.reason || 'edit');
+    }
+    scheduleAutosave();
+  }
+
+  function sourceMarkdownValue() {
+    const value = isCodeMirrorSourceReady()
+      ? state.codeMirrorSource.value()
+      : (els.source?.value ?? state.markdown ?? '');
+    return stripRichCaretTokens(normalizeNewlines(value));
+  }
+
+  function syncCodeMirrorSourceFromTextarea(_reason = 'sync') {
+    if (!isCodeMirrorSourceReady()) return;
+    state.codeMirrorSource.setValue(els.source.value || state.markdown || '', { silent: true });
+  }
+
+  function refreshCodeMirrorSourceEditorSoon() {
+    if (!isCodeMirrorSourceReady()) return;
+    const refresh = () => state.codeMirrorSource?.refresh?.();
+    window.requestAnimationFrame(() => {
+      refresh();
+      window.setTimeout(refresh, 80);
+    });
+  }
+
+  function focusSourceEditor() {
+    if (isCodeMirrorSourceReady()) {
+      state.codeMirrorSource.focus();
+      return els.source;
+    }
+    els.source.focus();
+    return els.source;
+  }
+
+  function sourceSelectionRange() {
+    if (isCodeMirrorSourceReady()) return state.codeMirrorSource.selection();
+    return {
+      start: els.source.selectionStart,
+      end: els.source.selectionEnd,
+      anchor: els.source.selectionStart,
+      head: els.source.selectionEnd,
+    };
+  }
+
+  function setSourceSelectionRange(start, end = start, options = {}) {
+    if (isCodeMirrorSourceReady()) {
+      state.codeMirrorSource.setSelection(start, end, options);
+      return;
+    }
+    els.source.focus();
+    els.source.setSelectionRange(start, end);
+  }
+
+  function replaceSourceRange(from, to, replacement, options = {}) {
+    const current = sourceMarkdownValue();
+    const start = Math.max(0, Math.min(current.length, Number(from)));
+    const end = Math.max(start, Math.min(current.length, Number(to)));
+    const insert = normalizeNewlines(replacement);
+    const nextStart = Number.isInteger(options.selectionStart) ? options.selectionStart : start + insert.length;
+    const nextEnd = Number.isInteger(options.selectionEnd) ? options.selectionEnd : nextStart;
+    if (isCodeMirrorSourceReady()) {
+      state.codeMirrorSource.replaceRange(start, end, insert, {
+        selectionStart: nextStart,
+        selectionEnd: nextEnd,
+        focus: options.focus !== false,
+      });
+      if (options.renderNow) {
+        window.clearTimeout(state.renderTimer);
+        renderAll(options.reason || 'edit');
+      }
+      return;
+    }
+
+    els.source.value = current.slice(0, start) + insert + current.slice(end);
+    els.source.focus();
+    els.source.setSelectionRange(nextStart, nextEnd);
+    handleSourceValueChange(els.source.value, {
+      source: 'textarea',
+      renderNow: Boolean(options.renderNow),
+      reason: options.reason || 'edit',
+    });
+  }
+
+  function sourceScrollElement() {
+    return isCodeMirrorSourceReady() ? state.codeMirrorSource.scrollElement() : els.source;
+  }
+
+  function isProseMirrorRichActive() {
+    return Boolean(state.proseMirrorRichActive && state.proseMirrorRich);
+  }
+
+  function isProseMirrorRichTarget(target) {
+    return Boolean(target && els.rich?.contains(target) && nodeElement(target)?.closest?.('.ProseMirror'));
+  }
+
+  function isProseMirrorRichEventContext(event) {
+    const target = eventTargetElement(event);
+    if (isProseMirrorRichTarget(target)) return true;
+    if (!isProseMirrorRichActive() || !target || !els.rich?.contains(target)) return false;
+    const active = nodeElement(document.activeElement);
+    if (active && els.rich.contains(active) && active.closest?.('.ProseMirror')) return true;
+    const selection = window.getSelection?.();
+    const anchor = nodeElement(selection?.anchorNode);
+    return Boolean(anchor && els.rich.contains(anchor) && anchor.closest?.('.ProseMirror'));
+  }
+
+  function isSelectionInsideProseMirror(proseMirror) {
+    const selection = window.getSelection?.();
+    const anchor = nodeElement(selection?.anchorNode);
+    return Boolean(anchor && proseMirror?.contains(anchor));
+  }
+
+  function focusProseMirrorElement(proseMirror) {
+    if (!proseMirror || document.activeElement === proseMirror) return;
+    proseMirror.focus({ preventScroll: true });
+  }
+
+  function scheduleProseMirrorFocus(proseMirror) {
+    window.clearTimeout(state.proseMirrorFocusTimer);
+    state.proseMirrorFocusTimer = window.setTimeout(() => {
+      if (!isProseMirrorRichActive() || !isSelectionInsideProseMirror(proseMirror)) return;
+      focusProseMirrorElement(proseMirror);
+    }, 0);
+  }
+
+  function focusProseMirrorTarget(target) {
+    const proseMirror = nodeElement(target)?.closest?.('.ProseMirror');
+    if (!proseMirror) return;
+    scheduleProseMirrorFocus(proseMirror);
+  }
+
+  function focusProseMirrorSelection() {
+    if (!isProseMirrorRichActive()) return false;
+    const selection = window.getSelection?.();
+    const proseMirror = nodeElement(selection?.anchorNode)?.closest?.('.ProseMirror');
+    if (!proseMirror || !els.rich?.contains(proseMirror)) return false;
+    scheduleProseMirrorFocus(proseMirror);
+    return true;
+  }
+
+  function isReadOnlyRichFallbackActive() {
+    return state.mode === 'rich' && !isProseMirrorRichActive();
+  }
+
+  function guardReadOnlyRichFallbackAction(actionLabel = 'この操作') {
+    if (!isReadOnlyRichFallbackActive()) return false;
+    setStatus(`${actionLabel}: ProseMirrorを初期化できないため、リッチ表示は読み取り専用です。ソース編集を使用してください`);
+    return true;
+  }
+
+  function proseMirrorUnsupportedReason(markdown = state.markdown) {
+    const detector = window.PMEProseMirror?.unsupportedMarkdownReason;
+    return typeof detector === 'function' ? detector(markdown || '') : '';
+  }
+
+  function ensureProseMirrorRichEditor() {
+    if (state.proseMirrorRich) return true;
+    const factory = window.PMEProseMirror?.createRichMarkdownEditor;
+    if (typeof factory !== 'function') return false;
+    state.proseMirrorRich = factory({
+      mount: els.rich,
+      markdown: state.markdown,
+      onChange: handleProseMirrorRichChange,
+    });
+    return true;
+  }
+
+  function renderProseMirrorRich() {
+    if (!window.PMEProseMirror) {
+      state.proseMirrorRichFallbackReason = 'prosemirror-unavailable';
+      return false;
+    }
+    const reason = proseMirrorUnsupportedReason(state.markdown);
+    if (reason) {
+      teardownProseMirrorRichEditor();
+      state.proseMirrorRichFallbackReason = reason;
+      return false;
+    }
+    state.proseMirrorRichFallbackReason = '';
+    try {
+      if (!ensureProseMirrorRichEditor()) {
+        state.proseMirrorRichFallbackReason = 'prosemirror-init-failed';
+        return false;
+      }
+      if (!state.proseMirrorRich.setMarkdown(state.markdown)) {
+        teardownProseMirrorRichEditor();
+        state.proseMirrorRichFallbackReason = 'prosemirror-set-markdown-failed';
+        return false;
+      }
+    } catch (error) {
+      teardownProseMirrorRichEditor();
+      state.proseMirrorRichFallbackReason = String(error?.message || 'prosemirror-error').slice(0, 120);
+      return false;
+    }
+    state.proseMirrorRichActive = true;
+    els.rich.classList.add('is-prosemirror-rich');
+    els.rich.classList.remove('is-prosemirror-fallback');
+    delete els.rich.dataset.richFallback;
+    els.rich.removeAttribute('contenteditable');
+    els.rich.removeAttribute('aria-readonly');
+    els.rich.setAttribute('role', 'textbox');
+    els.rich.setAttribute('aria-multiline', 'true');
+    els.rich.setAttribute('aria-label', 'リッチMarkdown編集');
+    return true;
+  }
+
+  function teardownProseMirrorRichEditor() {
+    if (state.proseMirrorRich) {
+      state.proseMirrorRich.destroy();
+      state.proseMirrorRich = null;
+    }
+    state.proseMirrorRichActive = false;
+    els.rich?.classList?.remove('is-prosemirror-rich');
+  }
+
+  function renderReadOnlyRichFallback() {
+    const reason = state.proseMirrorRichFallbackReason || 'prosemirror-unavailable';
+    const html = renderMarkdownHtml(state.markdown);
+    safeSetHtml(els.rich, html || '<p><br></p>');
+    configureReadOnlyRichFallbackSurface(reason);
+    setStatus(`ProseMirrorを初期化できないため、リッチ表示は読み取り専用です: ${reason}`);
+  }
+
+  function configureReadOnlyRichFallbackSurface(reason) {
+    els.rich.classList.add('is-prosemirror-fallback');
+    els.rich.classList.remove('is-prosemirror-rich');
+    els.rich.dataset.richFallback = reason;
+    els.rich.removeAttribute('contenteditable');
+    els.rich.setAttribute('role', 'document');
+    els.rich.setAttribute('aria-readonly', 'true');
+    els.rich.querySelectorAll('[contenteditable]').forEach((node) => node.removeAttribute('contenteditable'));
+    els.rich.querySelectorAll('input, textarea, button, select').forEach((node) => {
+      node.disabled = true;
+      node.setAttribute('aria-disabled', 'true');
+    });
+  }
+
+  function handleProseMirrorRichChange(markdown) {
+    state.markdown = stripRichCaretTokens(normalizeNewlines(markdown));
+    els.source.value = state.markdown;
+    syncCodeMirrorSourceFromTextarea('prosemirror-rich-input');
+    markDirty();
+    renderPreview();
+    renderOutline();
+    updateStatusBar();
+    scheduleAutosave();
+  }
+
+  function applyProseMirrorFormat(format) {
+    if (!isProseMirrorRichActive()) return false;
+    if (state.proseMirrorRich.applyFormat(format)) {
+      renderPreview();
+      renderOutline();
+      updateStatusBar();
+      scheduleAutosave();
+      setStatus(`ProseMirror: ${format} を適用しました`);
+      return true;
+    }
+    if (format === 'table') {
+      insertProseMirrorMarkdown('| 項目 | 内容 |\n| --- | --- |\n| 例 | テキスト |', { status: '表を挿入しました' });
+      return true;
+    }
+    if (format === 'toc') {
+      insertProseMirrorMarkdown('[toc]', { status: '目次を挿入しました' });
+      return true;
+    }
+    setStatus('この操作はProseMirrorリッチ編集では未対応です');
+    return true;
+  }
+
+  function insertProseMirrorMarkdown(markdown, options = {}) {
+    if (!isProseMirrorRichActive()) return false;
+    if (!state.proseMirrorRich.insertMarkdown(markdown, options)) return false;
+    setStatus(options.status || 'ProseMirrorリッチ編集へ挿入しました');
+    return true;
+  }
+
   function onDocumentClick(event) {
     const target = eventTargetElement(event);
-    commitActiveRichInlineSourceForTarget(target);
-    cancelActiveRichSourceEditorForTarget(target);
-    if (state.mode === 'rich') parsePendingRichMathShortcutAwayFromTarget(target);
+    if (!isProseMirrorRichActive()) {
+      commitActiveRichInlineSourceForTarget(target);
+      cancelActiveRichSourceEditorForTarget(target);
+      if (state.mode === 'rich') parsePendingRichMathShortcutAwayFromTarget(target);
+    }
 
     const actionButton = event.target.closest('[data-action]');
     if (!actionButton) return;
@@ -650,9 +987,20 @@ flowchart TD
     }
   }
 
+  function onRichPointerDownCapture(event) {
+    const target = eventTargetElement(event);
+    const proseMirror = nodeElement(target)?.closest?.('.ProseMirror');
+    if (!proseMirror || !els.rich?.contains(proseMirror)) return;
+    focusProseMirrorElement(proseMirror);
+  }
+
   function onRichClick(event) {
     const target = eventTargetElement(event);
     if (!target || !els.rich.contains(target)) return;
+    if (isProseMirrorRichTarget(target)) {
+      focusProseMirrorTarget(target);
+      return;
+    }
 
     const activeInline = state.richInlineSource?.element;
     if (activeInline && !activeInline.contains(target)) {
@@ -904,6 +1252,7 @@ flowchart TD
   }
 
   function onSelectionChange() {
+    if (focusProseMirrorSelection()) return;
     if (state.richSelectionLock) return;
     window.clearTimeout(state.richSelectionTimer);
     state.richSelectionTimer = window.setTimeout(updateRichInlineSourceFromSelection, 0);
@@ -911,6 +1260,7 @@ flowchart TD
 
   function updateRichInlineSourceFromSelection() {
     if (state.mode !== 'rich' || state.richComposing) return;
+    if (isProseMirrorRichActive()) return;
     cleanupRichCaretBoundaryMarkers({ preserveSelection: true });
     const selection = window.getSelection?.();
     const active = state.richInlineSource?.element;
@@ -1123,6 +1473,7 @@ flowchart TD
   }
 
   function onRichInput(event) {
+    if (isProseMirrorRichTarget(eventTargetElement(event))) return;
     sanitizeRichCaretTokensInDomPreservingSelection(els.rich);
     if (event.target?.closest?.('.task-checkbox, .code-language-input, .rich-source-editor')) return;
     const inlineSource = richInlineSourceFromEventContext(event);
@@ -1165,6 +1516,7 @@ flowchart TD
 
   function onRichCompositionEnd(event) {
     state.richComposing = false;
+    if (isProseMirrorRichTarget(eventTargetElement(event))) return;
     if (event.target?.closest?.('.rich-source-editor, .code-language-input')) return;
     const inlineSource = richInlineSourceFromEventContext(event);
     if (inlineSource) {
@@ -1224,8 +1576,24 @@ flowchart TD
       scheduleRender(reason);
       return true;
     }
+    const quoteHardBreakRepair = richQuoteHardBreakDomRepair(sourceBlock, markdown.slice(start, end), insert);
+    if (quoteHardBreakRepair) {
+      applySourceTransaction({
+        from: start,
+        to: end,
+        insert: quoteHardBreakRepair.insert,
+        selectionAfter: {
+          anchor: start + quoteHardBreakRepair.selectionOffset,
+          focus: start + quoteHardBreakRepair.selectionOffset,
+          affinity: 'after',
+        },
+      }, `${reason}-quote-hard-break`);
+      suppressRichInlineActivation();
+      return true;
+    }
 
-    const selectionAfter = richSourceBackedDomSelectionAfter(sourceBlock, start, insert.length);
+    const previousSource = markdown.slice(start, end);
+    const selectionAfter = richSourceBackedDomSelectionAfter(sourceBlock, start, previousSource, insert);
     applySourceTransaction({
       from: start,
       to: end,
@@ -1234,6 +1602,30 @@ flowchart TD
     }, reason);
     suppressRichInlineActivation();
     return true;
+  }
+
+  function richQuoteHardBreakDomRepair(sourceBlock, previousSource, domSource) {
+    if (!sourceBlock?.matches?.('blockquote')) return null;
+    const before = String(previousSource || '');
+    const after = String(domSource || '');
+    const beforeLines = before.split('\n');
+    const afterLines = after.split('\n');
+    if (beforeLines.length < 2 || afterLines.length < 2) return null;
+    const beforeLast = beforeLines[beforeLines.length - 1] || '';
+    const afterLast = afterLines[afterLines.length - 1] || '';
+    if (!/^\s*>\s?$/.test(beforeLast) || !/^\s*>\s?$/.test(afterLast)) return null;
+    const beforePrevious = String(beforeLines[beforeLines.length - 2] || '').replace(/^\s*>\s?/, '');
+    const afterPrevious = String(afterLines[afterLines.length - 2] || '').replace(/^\s*>\s?/, '');
+    if (!/[ \t]{2}$/.test(beforePrevious)) return null;
+    const visibleBeforeBreak = beforePrevious.replace(/[ \t]{2}$/, '');
+    if (!afterPrevious.startsWith(visibleBeforeBreak)) return null;
+    const inserted = afterPrevious.slice(visibleBeforeBreak.length).replace(/[ \t]+$/, '').trimStart();
+    if (!inserted || inserted.includes('\n')) return null;
+    const repairedInsert = `${before}${markdownQuoteTextFromPlainText(inserted)}`;
+    return {
+      insert: repairedInsert,
+      selectionOffset: repairedInsert.length,
+    };
   }
 
   function richSourceBackedDomShortcutReplacement(sourceBlock, start, end, insert, reason) {
@@ -1296,11 +1688,21 @@ flowchart TD
     return true;
   }
 
-  function richSourceBackedDomSelectionAfter(sourceBlock, start, insertLength) {
+  function richSourceBackedDomSelectionAfter(sourceBlock, start, previousSource, nextSource) {
+    const diffOffset = sourceOffsetAfterTextChange(previousSource, nextSource);
+    if (Number.isFinite(diffOffset)) {
+      return {
+        anchor: start + diffOffset,
+        focus: start + diffOffset,
+        affinity: 'after',
+      };
+    }
+
     const selection = window.getSelection?.();
     const point = selection?.rangeCount && els.rich.contains(selection.anchorNode)
       ? domPointToSourceOffset(selection.anchorNode, selection.anchorOffset)
       : null;
+    const insertLength = String(nextSource || '').length;
     const localOffset = Number.isFinite(point?.offset)
       ? Math.max(0, Math.min(insertLength, point.offset - start))
       : insertLength;
@@ -1309,6 +1711,25 @@ flowchart TD
       focus: start + localOffset,
       affinity: point?.affinity || 'after',
     };
+  }
+
+  function sourceOffsetAfterTextChange(previousSource, nextSource) {
+    const before = String(previousSource || '');
+    const after = String(nextSource || '');
+    if (before === after) return NaN;
+    let prefix = 0;
+    const maxPrefix = Math.min(before.length, after.length);
+    while (prefix < maxPrefix && before[prefix] === after[prefix]) prefix += 1;
+
+    let suffix = 0;
+    const maxSuffix = Math.min(before.length - prefix, after.length - prefix);
+    while (
+      suffix < maxSuffix
+      && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+    ) {
+      suffix += 1;
+    }
+    return after.length - suffix;
   }
 
   function repairRichLineBreakCaretInput(event) {
@@ -1322,10 +1743,18 @@ flowchart TD
     if (!Number.isFinite(offset)) return false;
     if (event?.inputType && !String(event.inputType).startsWith('insert')) return false;
     const markdown = stripRichCaretTokens(state.markdown || els.source.value || '');
-    if (offset <= 0 || offset > markdown.length || markdown[offset - 1] !== '\n') return false;
+    const quoteAnchor = nodeClosest(activeAnchor, 'blockquote');
+    if (offset <= 0 || offset > markdown.length) return false;
+    if (quoteAnchor) {
+      if (!markdown.slice(0, offset).endsWith('\n> ')) return false;
+    } else if (markdown[offset - 1] !== '\n') {
+      return false;
+    }
     const block = renderedBlockForSourceOffset(els.rich, offset);
-    if (!block?.matches?.('p, h1, h2, h3, h4, h5, h6')) return false;
-    const insert = richLineBreakCaretInputText(event, block, markdown);
+    if (!block?.matches?.('p, h1, h2, h3, h4, h5, h6, blockquote')) return false;
+    const insert = block.matches('blockquote')
+      ? richQuoteLineBreakCaretInputText(event, block, markdown, offset, activeAnchor)
+      : richLineBreakCaretInputText(event, block, markdown);
     if (!insert || insert.includes('\n')) return false;
     state.richLineBreakInputOffset = null;
     applySourceTransaction({
@@ -1340,6 +1769,32 @@ flowchart TD
     }, 'rich-line-break-caret-input');
     suppressRichInlineActivation();
     return true;
+  }
+
+  function richQuoteLineBreakCaretInputText(event, blockquote, markdown, offset, anchor) {
+    if (typeof event?.data === 'string' && event.data) {
+      return markdownQuoteTextFromPlainText(event.data);
+    }
+    if (!anchor || !blockquote?.contains?.(anchor)) return '';
+    const blockStart = numericData(blockquote, 'sourceStart');
+    if (!Number.isFinite(blockStart) || offset < blockStart) return '';
+    const sourceBeforeCaret = markdown.slice(blockStart, offset);
+    const sourceLines = sourceBeforeCaret.split('\n');
+    if (sourceLines.length < 2 || !/^\s*>\s?$/.test(sourceLines[sourceLines.length - 1] || '')) return '';
+    const previousSource = String(sourceLines[sourceLines.length - 2] || '').replace(/^\s*>\s?/, '');
+    if (!/[ \t]{2}$/.test(previousSource)) return '';
+    const previousVisible = previousSource.replace(/[ \t]{2}$/, '');
+    const before = document.createRange();
+    before.selectNodeContents(blockquote);
+    try {
+      before.setEndBefore(anchor);
+    } catch (_) {
+      return '';
+    }
+    const current = stripRichCaretTokens(serializeInlineNodes(Array.from(before.cloneContents().childNodes))).replace(/\n$/, '');
+    if (!current.startsWith(previousVisible)) return '';
+    const inserted = current.slice(previousVisible.length).replace(/[ \t]+$/, '').trimStart();
+    return inserted ? markdownQuoteTextFromPlainText(inserted) : '';
   }
 
   function richLineBreakCaretInputText(event, block, markdown) {
@@ -1635,7 +2090,7 @@ flowchart TD
     const range = currentCollapsedRichRange();
     if (!range || !isSourceTransactionTextRange(range)) return false;
     if (handleRichBlockMarkdownShortcutInput(event, range)) return true;
-    const point = activeRichTransactionBlankPoint() || richPlainTextSourcePointFromRange(range);
+    const point = activeRichTransactionBlankPoint(range) || richPlainTextSourcePointFromRange(range);
     if (!point) return false;
     if (handleRichBlockMarkdownShortcutSourceInput(event, point)) return true;
     if (shouldLetDomHandleMarkdownShortcutInput(range, event.data)) return false;
@@ -1646,8 +2101,9 @@ flowchart TD
         ? markdownQuoteTextFromPlainText(event.data)
         : stripRichCaretTokens(event.data);
     const trailingPrefix = point.trailingParagraph && (state.markdown || '').length ? '\n\n' : '';
-    const insert = point.blankParagraph ? `${input}\n\n` : `${trailingPrefix}${input}`;
-    const nextOffset = point.offset + trailingPrefix.length + input.length;
+    const blankInsert = point.blankParagraph ? blankParagraphSourceInsertion(point.offset, input) : null;
+    const insert = blankInsert ? blankInsert.insert : `${trailingPrefix}${input}`;
+    const nextOffset = blankInsert ? blankInsert.selectionOffset : point.offset + trailingPrefix.length + input.length;
     applySourceTransaction({
       from: point.offset,
       to: point.offset,
@@ -1661,6 +2117,20 @@ flowchart TD
     if (point.blankParagraph) state.richTransactionBlank = null;
     suppressRichInlineActivation();
     return true;
+  }
+
+  function blankParagraphSourceInsertion(offset, text) {
+    const source = stripRichCaretTokens(state.markdown || els.source?.value || '');
+    const gap = Math.max(0, Math.min(source.length, Number(offset) || 0));
+    const input = stripRichCaretTokens(String(text || ''));
+    const beforeHasBreak = gap === 0 || source.slice(0, gap).endsWith('\n\n');
+    const afterHasBreak = gap === source.length || source.slice(gap).startsWith('\n\n');
+    const prefix = beforeHasBreak ? '' : '\n\n';
+    const suffix = afterHasBreak ? '' : '\n\n';
+    return {
+      insert: `${prefix}${input}${suffix}`,
+      selectionOffset: gap + prefix.length + input.length,
+    };
   }
 
   function handleRichBlockMarkdownShortcutSourceInput(event, point) {
@@ -2292,6 +2762,7 @@ flowchart TD
     if (nodeClosest(range.startContainer, '.rich-inline-atom, .rich-source-editor, .mermaid-diagram, pre.code-block, .math-display, .toc')) return false;
     const editBlock = richInlineEditBlockForRange(range);
     if (!editBlock || !els.rich.contains(editBlock)) return false;
+    if (nodeClosest(range.startContainer, '.rich-line-break-caret-anchor')) return true;
     if (editBlock.matches('p[data-rich-trailing="true"]')) return true;
     if (editBlock.matches('p[data-rich-transaction-blank][data-source-gap]')) return true;
     if (editBlock.matches('td, th')) return Boolean(richTableSourcePointFromRange(editBlock, range));
@@ -2312,7 +2783,17 @@ flowchart TD
       const sourceBlock = nodeClosest(lineBreakAnchor, RICH_SOURCE_BLOCK_SELECTOR);
       if (!editBlock || !sourceBlock) return null;
       const blockStart = numericData(sourceBlock, 'sourceStart');
+      const blockEnd = numericData(sourceBlock, 'sourceEnd');
       const baseOffset = sourceContentBaseOffset(sourceBlock);
+      const storedOffset = Number(lineBreakAnchor.dataset.sourceOffset);
+      if (Number.isFinite(storedOffset)) {
+        return {
+          offset: storedOffset,
+          contentStart: blockStart + baseOffset,
+          contentEnd: blockEnd,
+          quoteBlock: editBlock.matches?.('blockquote') || undefined,
+        };
+      }
       const before = document.createRange();
       before.selectNodeContents(editBlock);
       try {
@@ -2421,6 +2902,15 @@ flowchart TD
     if (itemIndex < 0 || sourceItems.length !== items.length) return null;
     const sourceItem = sourceItems[itemIndex];
     const content = visibleTextFromListSourceItem(sourceItem);
+    if (isRichListItemEmpty(item)) {
+      if (content.trim() !== '') return null;
+      const sourceOffset = sourceOffsetFromListItemTextOffset(sourceItem, 0);
+      return {
+        offset: blockStart + sourceOffset,
+        contentStart: blockStart + sourceItem.lines[0].start + sourceItem.parsed.prefix.length,
+        contentEnd: blockStart + listSourceItemTextEnd(sourceItem),
+      };
+    }
     if (content !== visibleListItemText(item)) return null;
     const caretOffset = Math.max(0, Math.min(content.length, richListCaretSourceContentOffset(item, range)));
     const sourceOffset = sourceOffsetFromListItemTextOffset(sourceItem, caretOffset);
@@ -2783,6 +3273,7 @@ flowchart TD
     const canPatchRich = canPatchRichBlockTransaction(oldRichBlock, from, to, insert);
     state.markdown = markdown.slice(0, from) + insert + markdown.slice(to);
     els.source.value = state.markdown;
+    syncCodeMirrorSourceFromTextarea(reason);
     markDirty();
     if (canPatchRich && patchRichBlockAfterTransaction(oldRichBlock, transaction.selectionAfter?.focus ?? from + insert.length)) {
       if (refreshRichSourceRangesFromMarkdown()) {
@@ -2795,8 +3286,12 @@ flowchart TD
     } else {
       renderAll(reason);
     }
+    const shouldRestoreAfterBlankParagraph = transaction.placeCaretInBlankParagraph === false;
+    if (shouldRestoreAfterBlankParagraph && Number.isFinite(transaction.blankParagraphAt)) {
+      ensureRichBlankParagraphAtSourceGap(transaction.blankParagraphAt, { placeCaret: false });
+    }
     restoreRichCaretFromSourceSelection(transaction.selectionAfter);
-    if (Number.isFinite(transaction.blankParagraphAt)) {
+    if (!shouldRestoreAfterBlankParagraph && Number.isFinite(transaction.blankParagraphAt)) {
       ensureRichBlankParagraphAtSourceGap(transaction.blankParagraphAt);
     }
     scheduleAutosave();
@@ -2901,20 +3396,25 @@ flowchart TD
     return changed;
   }
 
-  function ensureRichBlankParagraphAtSourceGap(offset) {
+  function ensureRichBlankParagraphAtSourceGap(offset, options = {}) {
     if (state.mode !== 'rich' || !els.rich) return false;
     const target = Number(offset);
     if (!Number.isFinite(target)) return false;
+    const placeCaret = options.placeCaret !== false;
     const existing = richEmptySourceParagraphAtGap(target);
     if (existing) {
       state.richTransactionBlank = null;
       configureRichEditableSurface();
-      placeCaretAtStart(existing);
+      if (placeCaret) placeCaretAtStart(existing);
       return true;
     }
     const paragraph = document.createElement('p');
-    paragraph.dataset.richTransactionBlank = 'true';
+    paragraph.dataset.richTransactionBlank = placeCaret ? 'true' : 'visual';
     paragraph.dataset.sourceGap = String(target);
+    if (!placeCaret) {
+      paragraph.setAttribute('contenteditable', 'false');
+      paragraph.setAttribute('aria-hidden', 'true');
+    }
     const anchor = document.createElement('span');
     anchor.className = 'rich-list-caret-anchor';
     const textNode = document.createTextNode('\u200b');
@@ -2932,9 +3432,9 @@ flowchart TD
     } else {
       els.rich.appendChild(paragraph);
     }
-    state.richTransactionBlank = { element: paragraph, sourceGap: target };
+    state.richTransactionBlank = placeCaret ? { element: paragraph, sourceGap: target } : null;
     configureRichEditableSurface();
-    placeCaretInTextNode(textNode, textNode.nodeValue.length);
+    if (placeCaret) placeCaretInTextNode(textNode, textNode.nodeValue.length);
     return true;
   }
 
@@ -2948,11 +3448,13 @@ flowchart TD
   }
 
   function onDocumentBeforeInput(event) {
+    if (isProseMirrorRichTarget(eventTargetElement(event))) return;
     onRichBeforeInput(event);
   }
 
   function onDocumentKeyUp(event) {
     if (event.defaultPrevented || state.mode !== 'rich' || event.key !== ' ') return;
+    if (isProseMirrorRichActive()) return;
     applyRichQuoteShortcutAfterSpaceKey();
   }
 
@@ -2976,6 +3478,7 @@ flowchart TD
   function isRichBeforeInputContext(event) {
     if (state.mode !== 'rich' || state.richComposing) return false;
     const target = eventTargetElement(event);
+    if (isProseMirrorRichTarget(target)) return false;
     const selection = window.getSelection?.();
     if (selection?.anchorNode && nodeClosest(selection.anchorNode, '.rich-inline-source')) return false;
     if (target?.closest?.('.task-checkbox, .code-language-input, .rich-source-editor, .rich-inline-source')) return false;
@@ -3610,6 +4113,7 @@ flowchart TD
   }
 
   async function onRichPaste(event) {
+    if (isProseMirrorRichEventContext(event)) return;
     const control = eventTargetElement(event)?.closest?.('.rich-source-editor, .code-language-input');
     if (control) return;
 
@@ -3675,7 +4179,8 @@ flowchart TD
         : stripRichCaretTokens(normalizeNewlines(text));
     const selectionLength = insert.length;
     const trailingPrefix = replacementRange.trailingParagraph && (state.markdown || '').length ? '\n\n' : '';
-    if (replacementRange.blankParagraph) insert = `${insert}\n\n`;
+    const blankInsert = replacementRange.blankParagraph ? blankParagraphSourceInsertion(replacementRange.from, insert) : null;
+    if (blankInsert) insert = blankInsert.insert;
     else insert = `${trailingPrefix}${insert}`;
     const nextOffset = replacementRange.from + insert.length;
     applySourceTransaction({
@@ -3683,8 +4188,8 @@ flowchart TD
       to: replacementRange.to,
       insert,
       selectionAfter: {
-        anchor: replacementRange.blankParagraph ? replacementRange.from + selectionLength : nextOffset,
-        focus: replacementRange.blankParagraph ? replacementRange.from + selectionLength : nextOffset,
+        anchor: blankInsert ? blankInsert.selectionOffset : nextOffset,
+        focus: blankInsert ? blankInsert.selectionOffset : nextOffset,
         affinity: 'after',
       },
     }, 'rich-paste');
@@ -3781,6 +4286,7 @@ flowchart TD
   function onRichCut(event) {
     if (state.mode !== 'rich' || state.richComposing) return;
     const target = eventTargetElement(event);
+    if (isProseMirrorRichTarget(target)) return;
     if (target?.closest?.('.rich-inline-source, .rich-source-editor, .code-language-input')) return;
     const selection = window.getSelection?.();
     const range = richSelectionRange(selection);
@@ -3838,7 +4344,7 @@ flowchart TD
     return escapeMarkdownTableCell(stripRichCaretTokens(normalizeNewlines(text))).replace(/\n+/g, '<br>');
   }
 
-  function activeRichTransactionBlankPoint() {
+  function activeRichTransactionBlankPoint(range = null) {
     const blank = state.richTransactionBlank;
     const element = blank?.element;
     const sourceGap = Number(blank?.sourceGap);
@@ -3846,6 +4352,17 @@ flowchart TD
       state.richTransactionBlank = null;
       return null;
     }
+    let selectedRange = range;
+    if (!selectedRange) {
+      const selection = window.getSelection?.();
+      if (!selection?.rangeCount) return null;
+      try {
+        selectedRange = selection.getRangeAt(0);
+      } catch (_) {
+        return null;
+      }
+    }
+    if (!element.contains(selectedRange.startContainer) || !element.contains(selectedRange.endContainer)) return null;
     return {
       offset: sourceGap,
       contentStart: sourceGap,
@@ -3938,15 +4455,25 @@ flowchart TD
 
   function createImageInsertionContext(event) {
     const target = eventTargetElement(event);
-    if (target === els.source) {
+    if (target === els.source || target?.closest?.('.source-codemirror')) {
+      const selection = sourceSelectionRange();
       return {
         mode: 'source',
-        start: els.source.selectionStart,
-        end: els.source.selectionEnd,
+        start: selection.start,
+        end: selection.end,
       };
     }
 
+    if (state.mode === 'rich' && isProseMirrorRichActive()) {
+      return { mode: 'prosemirror' };
+    }
+
+    if (isProseMirrorRichTarget(target)) {
+      return { mode: 'prosemirror' };
+    }
+
     if (state.mode === 'rich') {
+      if (guardReadOnlyRichFallbackAction('画像挿入')) return null;
       if (target && els.rich.contains(target) && Number.isFinite(event?.clientX) && Number.isFinite(event?.clientY)) {
         placeCaretAtPointer(event);
       }
@@ -3960,10 +4487,11 @@ flowchart TD
       }
     }
 
+    const selection = sourceSelectionRange();
     return {
       mode: 'source',
-      start: els.source.selectionStart,
-      end: els.source.selectionEnd,
+      start: selection.start,
+      end: selection.end,
     };
   }
 
@@ -4154,6 +4682,10 @@ flowchart TD
   }
 
   function insertMarkdownAtImageContext(markdown, context) {
+    if (context?.mode === 'prosemirror') {
+      insertProseMirrorMarkdown(markdown, { inline: true, status: '画像参照を挿入しました' });
+      return;
+    }
     if (context?.mode === 'rich') {
       if (insertRichImageMarkdownAtSourceContext(markdown, context)) return;
       restoreImageInsertionRange(context);
@@ -4166,20 +4698,19 @@ flowchart TD
       return;
     }
 
-    const start = Number.isInteger(context?.start) ? context.start : els.source.selectionStart;
-    const end = Number.isInteger(context?.end) ? context.end : els.source.selectionEnd;
-    const value = els.source.value;
-    els.source.value = value.slice(0, start) + markdown + value.slice(end);
+    const selection = sourceSelectionRange();
+    const start = Number.isInteger(context?.start) ? context.start : selection.start;
+    const end = Number.isInteger(context?.end) ? context.end : selection.end;
     const next = start + markdown.length;
-    els.source.setSelectionRange(next, next);
-    els.source.focus();
+    replaceSourceRange(start, end, markdown, {
+      selectionStart: next,
+      selectionEnd: next,
+      renderNow: true,
+      reason: 'edit',
+    });
     context.mode = 'source';
     context.start = next;
     context.end = next;
-    state.markdown = normalizeNewlines(els.source.value);
-    markDirty();
-    renderAll('edit');
-    scheduleAutosave();
   }
 
   function insertRichImageMarkdownAtSourceContext(markdown, context) {
@@ -4217,6 +4748,7 @@ flowchart TD
     if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown', 'Escape'].includes(event.key)) {
       state.richLineBreakInputOffset = null;
     }
+    if (event.defaultPrevented && isProseMirrorRichTarget(eventTargetElement(event))) return;
     const inlineSource = richInlineSourceFromEventContext(event);
     if (inlineSource) {
       if (isRichUndoShortcut(event) && restoreRichUndoSnapshot()) {
@@ -4247,6 +4779,9 @@ flowchart TD
     if (isRichKeyEventContext(event)) {
       if (isRichUndoShortcut(event) && restoreRichUndoSnapshot()) {
         event.preventDefault();
+        return;
+      }
+      if (handleRichQuoteTextKeydown(event)) {
         return;
       }
       if ((event.key === 'ArrowRight' || event.key === 'ArrowLeft') && handleRichInlineBoundaryArrow(event)) {
@@ -4342,7 +4877,36 @@ flowchart TD
   }
 
   function isEnterKey(event) {
+    if (event?.isComposing || event?.keyCode === 229) return false;
     return event.key === 'Enter' || event.key === 'NumpadEnter' || event.key === 'ENTER';
+  }
+
+  function handleRichQuoteTextKeydown(event) {
+    if (state.richComposing || event?.isComposing || event?.keyCode === 229) return false;
+    if (event.ctrlKey || event.metaKey || event.altKey) return false;
+    if (typeof event.key !== 'string' || event.key.length !== 1) return false;
+    const selection = window.getSelection?.();
+    const range = richSelectionRange(selection);
+    if (!range?.collapsed) return false;
+    const quote = nodeClosest(range.startContainer, 'blockquote');
+    if (!quote || !els.rich.contains(quote)) return false;
+    const point = richQuoteSourcePointFromRange(quote, range);
+    if (!point || !Number.isFinite(point.offset)) return false;
+    const insert = markdownQuoteTextFromPlainText(event.key);
+    event.preventDefault();
+    pushRichUndoSnapshot('insert');
+    applySourceTransaction({
+      from: point.offset,
+      to: point.offset,
+      insert,
+      selectionAfter: {
+        anchor: point.offset + insert.length,
+        focus: point.offset + insert.length,
+        affinity: 'after',
+      },
+    }, 'rich-quote-key-insert');
+    suppressRichInlineActivation();
+    return true;
   }
 
   function isRichUndoShortcut(event) {
@@ -4372,6 +4936,7 @@ flowchart TD
     state.richSelectionLock = true;
     state.markdown = normalizeNewlines(snapshot.markdown || '');
     els.source.value = state.markdown;
+    syncCodeMirrorSourceFromTextarea('rich-undo');
     state.richInlineSource = null;
     renderAll('rich-undo');
     restoreRichCaret(snapshot.bookmark);
@@ -4386,6 +4951,7 @@ flowchart TD
 
   function isRichKeyEventContext(event) {
     const target = eventTargetElement(event);
+    if (isProseMirrorRichTarget(target)) return false;
     if (target?.closest?.('.rich-source-editor, .code-language-input')) return false;
     if (target && els.rich.contains(target)) return true;
     const active = document.activeElement;
@@ -4397,6 +4963,7 @@ flowchart TD
       && selection.rangeCount
       && selection.isCollapsed
       && els.rich.contains(selection.anchorNode)
+      && !isProseMirrorRichTarget(selection.anchorNode)
     );
   }
 
@@ -4672,6 +5239,7 @@ flowchart TD
 
     state.markdown = markdown.slice(0, sourceRange.start) + nextSource + markdown.slice(sourceRange.end);
     els.source.value = state.markdown;
+    syncCodeMirrorSourceFromTextarea('rich-inline-source-transaction');
     inlineSource.textContent = nextSource;
     inlineSource.dataset.inlineSource = nextSource;
     inlineSource.dataset.srcStart = String(sourceRange.start);
@@ -4706,6 +5274,7 @@ flowchart TD
     if (current !== source) {
       state.markdown = markdown.slice(0, sourceRange.start) + source + markdown.slice(sourceRange.end);
       els.source.value = state.markdown;
+      syncCodeMirrorSourceFromTextarea(reason);
       markDirty();
       renderPreview();
       renderOutline();
@@ -5384,7 +5953,7 @@ flowchart TD
       const tableCell = nodeClosest(range.startContainer, 'td, th');
       if (tableCell && els.rich.contains(tableCell) && handleRichTableCellLineBreakTransaction(tableCell, range)) return;
       const quote = nodeClosest(range.startContainer, 'blockquote');
-      if (quote && els.rich.contains(quote) && handleRichQuoteEnterTransaction(quote, range)) return;
+      if (quote && els.rich.contains(quote) && handleRichQuoteLineBreakTransaction(quote, range)) return;
       if (handleRichLineBreakTransaction({ pushUndo: false })) return;
       if (insertRichLineBreakAtRange(range)) syncRichMarkdownFromDom('rich-input');
       return;
@@ -5498,6 +6067,12 @@ flowchart TD
     const blockStart = numericData(textBlock, 'sourceStart');
     const blockEnd = numericData(textBlock, 'sourceEnd');
     if (sourcePoint.offset < blockStart || sourcePoint.offset > blockEnd) return false;
+    const blankParagraphAt = sourcePoint.offset === blockStart
+      ? blockStart
+      : sourcePoint.offset === blockEnd
+        ? sourcePoint.offset + 2
+        : undefined;
+    const placeCaretInBlankParagraph = sourcePoint.offset === blockEnd ? undefined : false;
     return applySourceTransaction({
       from: sourcePoint.offset,
       to: sourcePoint.offset,
@@ -5507,6 +6082,8 @@ flowchart TD
         focus: sourcePoint.offset + 2,
         affinity: 'after',
       },
+      blankParagraphAt,
+      placeCaretInBlankParagraph,
     }, 'rich-enter-text-block');
   }
 
@@ -5981,10 +6558,9 @@ flowchart TD
     const parsed = sourceItem?.parsed;
     if (!sourceItem || !parsed) return false;
     const content = visibleTextFromListSourceItem(sourceItem);
-    const serialized = visibleListItemText(item);
-    if (content !== serialized) return false;
 
     if (isRichListItemEmpty(item)) {
+      if (content.trim() !== '') return false;
       const from = blockStart + sourceItem.start;
       const to = blockStart + sourceItem.end;
       return applySourceTransaction({
@@ -5999,6 +6575,9 @@ flowchart TD
         },
       }, 'rich-list-exit');
     }
+
+    const serialized = visibleListItemText(item);
+    if (content !== serialized) return false;
 
     const caretOffset = Math.max(0, Math.min(content.length, richListCaretSourceContentOffset(item, range)));
     const currentSource = listItemSourceFromText(parsed.prefix, parsed, content.slice(0, caretOffset));
@@ -6143,7 +6722,7 @@ flowchart TD
   }
 
   function visibleListItemText(item) {
-    return normalizeRichText(serializeInlineNodes(listItemEditableContentNodes(item))).replace(/[ \t]{2}\n/g, '\n');
+    return stripRichCaretTokens(normalizeRichText(serializeInlineNodes(listItemEditableContentNodes(item)))).replace(/[ \t]{2}\n/g, '\n');
   }
 
   function createEmptyListItemLike(item, list) {
@@ -6345,7 +6924,7 @@ flowchart TD
 
     const quote = nodeClosest(selection?.anchorNode, 'blockquote');
     const focusQuote = nodeClosest(selection?.focusNode, 'blockquote');
-    if (quote && quote === focusQuote && els.rich.contains(quote)) return '\n> ';
+    if (quote && quote === focusQuote && els.rich.contains(quote)) return '  \n> ';
 
     const item = nodeClosest(selection?.anchorNode, 'li');
     const focusItem = nodeClosest(selection?.focusNode, 'li');
@@ -6394,6 +6973,23 @@ flowchart TD
         affinity: 'after',
       },
     }, 'rich-quote-enter');
+  }
+
+  function handleRichQuoteLineBreakTransaction(blockquote, range) {
+    if (!range?.collapsed || !blockquote?.matches?.('blockquote')) return false;
+    const point = richQuoteSourcePointFromRange(blockquote, range);
+    if (!point) return false;
+    const insert = '  \n> ';
+    return applySourceTransaction({
+      from: point.offset,
+      to: point.offset,
+      insert,
+      selectionAfter: {
+        anchor: point.offset + insert.length,
+        focus: point.offset + insert.length,
+        affinity: 'after',
+      },
+    }, 'rich-quote-line-break');
   }
 
   function insertRichLineBreakAtRange(range) {
@@ -6717,6 +7313,7 @@ flowchart TD
       await clearPersistedDirectoryHandle();
     }
     els.source.value = state.markdown;
+    syncCodeMirrorSourceFromTextarea('grant-folder');
     refreshAfterFolderGrant(previousMode, richBookmark, sourceSelection);
     state.dirty = previousDirty;
     persistDraft();
@@ -6751,28 +7348,32 @@ flowchart TD
   }
 
   function captureCurrentMarkdownFromEditor() {
-    if (state.mode === 'rich' && els.rich) {
-      state.markdown = normalizeNewlines(serializeRichMarkdown(els.rich));
+    if (state.mode === 'rich' && isProseMirrorRichActive()) {
+      state.markdown = normalizeNewlines(state.proseMirrorRich.markdown());
     } else {
-      state.markdown = normalizeNewlines(els.source.value || state.markdown);
+      state.markdown = sourceMarkdownValue() || normalizeNewlines(state.markdown);
     }
     els.source.value = state.markdown;
+    syncCodeMirrorSourceFromTextarea('capture-current');
   }
 
   function sourceSelectionBookmark() {
-    if (document.activeElement !== els.source) return null;
+    if (isCodeMirrorSourceReady() && !state.codeMirrorSource.hasFocus()) return null;
+    if (!isCodeMirrorSourceReady() && document.activeElement !== els.source) return null;
+    const selection = sourceSelectionRange();
+    const scroller = sourceScrollElement();
     return {
-      start: els.source.selectionStart,
-      end: els.source.selectionEnd,
-      scrollTop: els.source.scrollTop,
+      start: selection.start,
+      end: selection.end,
+      scrollTop: scroller?.scrollTop || 0,
     };
   }
 
   function restoreSourceSelection(bookmark) {
     if (!bookmark) return;
-    els.source.focus();
-    els.source.setSelectionRange(bookmark.start, bookmark.end);
-    els.source.scrollTop = bookmark.scrollTop || 0;
+    setSourceSelectionRange(bookmark.start, bookmark.end);
+    const scroller = sourceScrollElement();
+    if (scroller) scroller.scrollTop = bookmark.scrollTop || 0;
   }
 
   function refreshAfterFolderGrant(previousMode, richBookmark, sourceBookmark) {
@@ -6948,6 +7549,7 @@ flowchart TD
 
   function beginImageInsertion(event) {
     state.pendingImageInsertionContext = createImageInsertionContext(event);
+    if (!state.pendingImageInsertionContext) return;
     if (guardUnsupportedImageInsertionContext(state.pendingImageInsertionContext, '画像挿入')) {
       state.pendingImageInsertionContext = null;
       return;
@@ -7071,12 +7673,17 @@ flowchart TD
   }
 
   function applyFormat(format) {
-    if (state.mode === 'rich' && applyRichFormat(format)) return;
+    if (state.mode === 'rich' && applyProseMirrorFormat(format)) return;
+    if (state.mode === 'rich') {
+      guardReadOnlyRichFallbackAction('書式設定');
+      return;
+    }
 
-    const textarea = focusMarkdownInput();
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    const selected = textarea.value.slice(start, end);
+    focusMarkdownInput();
+    const selection = sourceSelectionRange();
+    const start = selection.start;
+    const end = selection.end;
+    const selected = sourceMarkdownValue().slice(start, end);
     let replacement = selected;
     let selectionStart = start;
     let selectionEnd = end;
@@ -7773,31 +8380,29 @@ flowchart TD
 
   function createInlineInsertContext(kind) {
     const isImage = kind === 'image';
-    if (state.mode === 'rich') {
-      const selection = window.getSelection?.();
-      const range = richInlineInsertRangeFromSelection(selection);
-      if (!range) {
-        setStatus('リッチ編集内の挿入位置を選んでください');
-        return null;
-      }
-      const selected = richSelectedText();
+    if (state.mode === 'rich' && isProseMirrorRichActive()) {
+      const selected = state.proseMirrorRich.selectedText();
       return {
         kind,
-        mode: 'rich',
-        range,
+        mode: 'prosemirror',
         label: isImage ? sanitizeMarkdownLabel(selected || '画像') : (selected || 'リンク'),
         target: isImage ? './images/example.png' : './README.md',
       };
     }
+    if (state.mode === 'rich') {
+      guardReadOnlyRichFallbackAction(isImage ? '画像参照' : 'リンク挿入');
+      return null;
+    }
 
     focusMarkdownInput();
     const selected = getSelectedText();
+    const selection = sourceSelectionRange();
     return {
       kind,
       mode: state.mode,
       range: {
-        from: els.source.selectionStart,
-        to: els.source.selectionEnd,
+        from: selection.start,
+        to: selection.end,
       },
       label: isImage ? sanitizeMarkdownLabel(selected || '画像') : (selected || 'リンク'),
       target: isImage ? './images/example.png' : './README.md',
@@ -7864,8 +8469,12 @@ flowchart TD
 
   function insertCodeBlock() {
     if (state.mode === 'rich') {
-      const selected = richSelectedText();
-      insertRichMarkdownBlock(`\`\`\`\n${selected || 'code'}\n\`\`\``, 'コードブロックを挿入しました');
+      if (isProseMirrorRichActive()) {
+        const selected = state.proseMirrorRich.selectedText();
+        insertProseMirrorMarkdown(`\`\`\`\n${selected || 'code'}\n\`\`\``, { status: 'コードブロックを挿入しました' });
+        return;
+      }
+      guardReadOnlyRichFallbackAction('コードブロック挿入');
       return;
     }
 
@@ -7876,9 +8485,13 @@ flowchart TD
 
   function insertMermaid() {
     if (state.mode === 'rich') {
-      const selected = richSelectedText().trim();
-      const body = selected || 'flowchart TD\n  A[開始] --> B{確認}\n  B -->|OK| C[完了]\n  B -->|修正| A';
-      insertRichMarkdownBlock(`\`\`\`mermaid\n${body}\n\`\`\``, 'Mermaidを挿入しました');
+      if (isProseMirrorRichActive()) {
+        const selected = state.proseMirrorRich.selectedText().trim();
+        const body = selected || 'flowchart TD\n  A[開始] --> B{確認}\n  B -->|OK| C[完了]\n  B -->|修正| A';
+        insertProseMirrorMarkdown(`\`\`\`mermaid\n${body}\n\`\`\``, { status: 'Mermaidを挿入しました' });
+        return;
+      }
+      guardReadOnlyRichFallbackAction('Mermaid挿入');
       return;
     }
 
@@ -7908,17 +8521,20 @@ flowchart TD
 
   function focusMarkdownInput() {
     if (state.mode === 'rich') {
+      if (isProseMirrorRichActive()) {
+        state.proseMirrorRich.focus();
+        return els.source;
+      }
       els.rich.focus();
       return els.source;
     }
     if (state.mode === 'preview') applyMode('split');
-    els.source.focus();
-    return els.source;
+    return focusSourceEditor();
   }
 
   function getSelectedText() {
-    const textarea = getActiveMarkdownInput();
-    return textarea.value.slice(textarea.selectionStart, textarea.selectionEnd);
+    const selection = sourceSelectionRange();
+    return sourceMarkdownValue().slice(selection.start, selection.end);
   }
 
   function insertAtSelection(text) {
@@ -7931,12 +8547,11 @@ flowchart TD
   }
 
   function insertRichMarkdownAtSelection(markdown) {
-    const image = String(markdown || '').match(/^!\[([^\]]*)\]\((<[^>]+>|[^)]+)\)$/s);
-    if (image) {
-      insertRichImageElement(image[1], parseMarkdownTarget(image[2]));
+    if (isProseMirrorRichActive()) {
+      insertProseMirrorMarkdown(markdown, { inline: !String(markdown || '').includes('\n'), status: 'ProseMirrorリッチ編集へ挿入しました' });
       return;
     }
-    insertRichMarkdownBlock(markdown);
+    guardReadOnlyRichFallbackAction('Markdown挿入');
   }
 
   function insertRichImageElement(label, target) {
@@ -8024,8 +8639,14 @@ flowchart TD
     }
     const range = context.range;
     const insert = stripRichCaretTokens(normalizeNewlines(markdown || ''));
+    if (context.mode === 'prosemirror') {
+      if (!insert || insert.includes('\n')) return false;
+      if (!insertProseMirrorMarkdown(insert, { inline: true, status })) return false;
+      if (options.activateWhenCollapsed) state.proseMirrorRich?.focus?.();
+      return true;
+    }
     if (!range || !insert || insert.includes('\n')) return false;
-    const current = stripRichCaretTokens(state.markdown || els.source.value || '');
+    const current = stripRichCaretTokens(sourceMarkdownValue() || state.markdown || '');
     const from = Math.max(0, Math.min(current.length, Number(range.from)));
     const to = Math.max(from, Math.min(current.length, Number(range.to)));
     const collapsed = from === to;
@@ -8055,44 +8676,40 @@ flowchart TD
       return true;
     }
 
-    state.markdown = current.slice(0, from) + insert + current.slice(to);
-    els.source.value = state.markdown;
     const selectionStart = from + (Number.isFinite(Number(options.selectionStart)) ? Number(options.selectionStart) : insert.length);
     const selectionEnd = from + (Number.isFinite(Number(options.selectionEnd)) ? Number(options.selectionEnd) : selectionStart);
-    markDirty();
-    renderAll('inline-insert');
+    replaceSourceRange(from, to, insert, {
+      selectionStart,
+      selectionEnd,
+      renderNow: true,
+      reason: 'inline-insert',
+    });
     if (state.mode === 'source' || state.mode === 'split') {
-      els.source.focus();
-      els.source.setSelectionRange(selectionStart, selectionEnd);
       window.setTimeout(() => {
-        els.source.focus();
-        els.source.setSelectionRange(selectionStart, selectionEnd);
+        setSourceSelectionRange(selectionStart, selectionEnd);
       }, 0);
     }
-    scheduleAutosave();
     setStatus(status);
     return true;
   }
 
   function replaceSelection(replacement, selectionStart, selectionEnd) {
     const textarea = getActiveMarkdownInput();
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    const before = textarea.value.slice(0, start);
-    const after = textarea.value.slice(end);
-    textarea.value = before + replacement + after;
+    const selection = sourceSelectionRange();
+    const start = selection.start;
+    const end = selection.end;
     const nextStart = Number.isInteger(selectionStart) ? selectionStart : start + replacement.length;
     const nextEnd = Number.isInteger(selectionEnd) ? selectionEnd : nextStart;
-    textarea.setSelectionRange(nextStart, nextEnd);
-    textarea.focus();
     if (textarea !== els.source) {
       setStatus('ブロック編集欄に挿入しました');
       return;
     }
-    state.markdown = normalizeNewlines(textarea.value);
-    markDirty();
-    renderAll('edit');
-    scheduleAutosave();
+    replaceSourceRange(start, end, replacement, {
+      selectionStart: nextStart,
+      selectionEnd: nextEnd,
+      renderNow: true,
+      reason: 'edit',
+    });
   }
 
   function getActiveMarkdownInput() {
@@ -8115,6 +8732,7 @@ flowchart TD
     if (shouldPersist) persistSettings();
     if (mode === 'split' || mode === 'preview') renderPreview();
     if (mode === 'rich') renderRich();
+    if (mode === 'split' || mode === 'source' || mode === 'focus') refreshCodeMirrorSourceEditorSoon();
     if (scrollAnchor) restoreCurrentModeScrollSoon(scrollAnchor);
     setStatus(`表示モード: ${mode}`);
   }
@@ -8576,9 +9194,10 @@ flowchart TD
   }
 
   function renderAll(reason) {
-    if (reason !== 'init' && reason !== 'rich-input') state.markdown = stripRichCaretTokens(normalizeNewlines(els.source.value));
+    if (reason !== 'init' && reason !== 'rich-input') state.markdown = sourceMarkdownValue();
     else state.markdown = stripRichCaretTokens(state.markdown);
     if (els.source.value !== state.markdown) els.source.value = state.markdown;
+    syncCodeMirrorSourceFromTextarea(`render-${reason || 'all'}`);
     renderPreview();
     if (reason !== 'rich-input') renderRich();
     renderOutline();
@@ -8593,10 +9212,9 @@ flowchart TD
 
   function renderRich() {
     state.richInlineSource = null;
-    const html = renderMarkdownHtml(state.markdown);
-    safeSetHtml(els.rich, html || renderEmptyRichSourceParagraph());
-    ensureRichTrailingEditableParagraph();
-    configureRichEditableSurface();
+    if (renderProseMirrorRich()) return;
+    teardownProseMirrorRichEditor();
+    renderReadOnlyRichFallback();
   }
 
   function renderEmptyRichSourceParagraph() {
@@ -8732,9 +9350,13 @@ flowchart TD
     if (!range) return false;
     const selection = window.getSelection?.();
     if (!selection) return false;
+    try {
+      els.rich.focus({ preventScroll: true });
+    } catch (_) {
+      els.rich.focus();
+    }
     selection.removeAllRanges();
     selection.addRange(range);
-    els.rich.focus();
     return true;
   }
 
@@ -9170,6 +9792,15 @@ flowchart TD
     const blockStart = numericData(blockquote, 'sourceStart');
     const blockEnd = numericData(blockquote, 'sourceEnd');
     if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return null;
+    const anchor = Array.from(blockquote.querySelectorAll('.rich-line-break-caret-anchor[data-source-offset]'))
+      .find((element) => Number(element.dataset.sourceOffset) === offset);
+    if (anchor?.firstChild?.nodeType === Node.TEXT_NODE) {
+      const range = document.createRange();
+      range.setStart(anchor.firstChild, anchor.firstChild.nodeValue.length);
+      range.collapse(true);
+      state.richLineBreakInputOffset = offset;
+      return range;
+    }
     const raw = stripRichCaretTokens(state.markdown || '').slice(blockStart, blockEnd);
     const model = parseMarkdownQuoteSource(raw);
     if (!model?.lines?.length) return null;
@@ -9563,6 +10194,7 @@ flowchart TD
     const mark = input.checked ? 'x' : ' ';
     state.markdown = state.markdown.slice(0, position) + mark + state.markdown.slice(position + 1);
     els.source.value = state.markdown;
+    syncCodeMirrorSourceFromTextarea('task-toggle');
     markDirty();
     renderAll('task-toggle');
     persistDraft();
@@ -9608,6 +10240,7 @@ flowchart TD
     const replacement = `${match[1]}${language}`;
     state.markdown = state.markdown.slice(0, start) + replacement + state.markdown.slice(fenceEnd);
     els.source.value = state.markdown;
+    syncCodeMirrorSourceFromTextarea('code-language');
     markDirty();
     renderAll('code-language');
     persistDraft();
@@ -10520,6 +11153,7 @@ flowchart TD
     const shortcutNormalized = normalizeSyncedMarkdownShortcuts(serialized);
     state.markdown = shortcutNormalized.markdown;
     els.source.value = state.markdown;
+    syncCodeMirrorSourceFromTextarea(reason);
     markDirty();
     if (shortcutNormalized.changed) setStatus(shortcutNormalized.status || 'Markdown入力を変換しました');
     if (options.refreshRich || shortcutNormalized.changed) {
@@ -10640,7 +11274,16 @@ flowchart TD
 
   function serializeQuoteElement(blockquote) {
     const source = serializeInlineNodes(Array.from(blockquote.childNodes)).replace(/^[ \t]+|[ \t]+$/g, '');
-    return source ? prefixLines(source, '> ') : '>';
+    const serialized = source ? prefixLines(source, '> ') : '>';
+    const start = numericData(blockquote, 'sourceStart');
+    const end = numericData(blockquote, 'sourceEnd');
+    if (Number.isFinite(start) && Number.isFinite(end)) {
+      const previousSource = blockquote.dataset.richQuoteHardBreakSource
+        || stripRichCaretTokens(state.markdown || '').slice(start, end);
+      const repair = richQuoteHardBreakDomRepair(blockquote, previousSource, serialized);
+      if (repair) return repair.insert;
+    }
+    return serialized;
   }
 
   function serializeInlineNodes(nodes) {
@@ -10827,7 +11470,7 @@ flowchart TD
     const anchor = captureSourceScrollAnchor();
     if (!anchor) return;
     withScrollSyncLock(() => {
-      if (!restoreRenderedScrollAnchor(els.preview, anchor)) restoreRenderedScrollByRatio(els.preview, els.source);
+      if (!restoreRenderedScrollAnchor(els.preview, anchor)) restoreRenderedScrollByRatio(els.preview, sourceScrollElement());
     });
   }
 
@@ -10894,9 +11537,10 @@ flowchart TD
   }
 
   function captureSourceScrollAnchor() {
-    const value = normalizeNewlines(els.source?.value || state.markdown || '');
-    const lineHeight = textareaLineHeight(els.source);
-    const lineIndex = Math.max(0, Math.floor((els.source?.scrollTop || 0) / lineHeight));
+    const scroller = sourceScrollElement();
+    const value = sourceMarkdownValue() || normalizeNewlines(state.markdown || '');
+    const lineHeight = textareaLineHeight(scroller);
+    const lineIndex = Math.max(0, Math.floor((scroller?.scrollTop || 0) / lineHeight));
     const lineStarts = markdownLineStarts(value);
     const boundedLine = Math.min(lineIndex, Math.max(0, lineStarts.length - 1));
     const offset = lineStarts[boundedLine] || 0;
@@ -10904,17 +11548,18 @@ flowchart TD
       type: 'source',
       offset,
       lineIndex: boundedLine,
-      lineTop: (els.source?.scrollTop || 0) - boundedLine * lineHeight,
-      ratio: scrollRatio(els.source),
+      lineTop: (scroller?.scrollTop || 0) - boundedLine * lineHeight,
+      ratio: scrollRatio(scroller),
     };
   }
 
   function restoreSourceScrollAnchor(anchor) {
-    if (!anchor || !els.source) return false;
-    const value = normalizeNewlines(els.source.value || state.markdown || '');
+    const scroller = sourceScrollElement();
+    if (!anchor || !scroller) return false;
+    const value = sourceMarkdownValue() || normalizeNewlines(state.markdown || '');
     const lineIndex = markdownLineIndexAtOffset(value, anchor.offset || 0);
-    const lineHeight = textareaLineHeight(els.source);
-    els.source.scrollTop = Math.max(0, lineIndex * lineHeight + (anchor.lineTop || 0));
+    const lineHeight = textareaLineHeight(scroller);
+    scroller.scrollTop = Math.max(0, lineIndex * lineHeight + (anchor.lineTop || 0));
     return true;
   }
 
@@ -11027,9 +11672,10 @@ flowchart TD
   }
 
   function restoreSourceScrollByRatio(source) {
-    if (!els.source || !source) return;
-    const max = Math.max(0, els.source.scrollHeight - els.source.clientHeight);
-    els.source.scrollTop = scrollRatio(source) * max;
+    const scroller = sourceScrollElement();
+    if (!scroller || !source) return;
+    const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    scroller.scrollTop = scrollRatio(source) * max;
   }
 
   function renderMarkdownHtml(markdown) {
@@ -11385,7 +12031,7 @@ flowchart TD
       case 'table':
         return renderTable(block.raw);
       case 'quote':
-        return renderQuote(block.raw);
+        return renderQuote(block.raw, block);
       default: {
         const vendorHtml = renderBlockWithVendor(block.raw, block);
         if (vendorHtml) return vendorHtml;
@@ -11396,7 +12042,7 @@ flowchart TD
       case 'rule':
         return '<hr>';
       case 'quote':
-        return renderQuote(block.raw);
+        return renderQuote(block.raw, block);
       default:
         return renderParagraph(block.raw, block);
     }
@@ -11527,11 +12173,22 @@ flowchart TD
     return `<p>${rendered.join('<br>')}</p>`;
   }
 
-  function renderQuote(raw) {
-    const body = raw.split('\n')
+  function renderQuote(raw, block = null) {
+    const lines = raw.split('\n');
+    const trailingEmptyQuoteLine = lines.length > 1 && /^\s*>\s?$/.test(lines[lines.length - 1] || '');
+    const previousQuoteContent = trailingEmptyQuoteLine
+      ? String(lines[lines.length - 2] || '').replace(/^\s*>\s?/, '')
+      : '';
+    const trailingHardBreak = trailingEmptyQuoteLine && /[ \t]{2}$/.test(previousQuoteContent);
+    const anchorOffset = Number.isFinite(block?.end) ? block.end : '';
+    const anchor = `<span class="rich-line-break-caret-anchor" data-source-offset="${escapeAttribute(anchorOffset)}">\u200b</span>`;
+    const body = lines
       .map((line) => line.replace(/^\s*>\s?/, ''))
       .map((line) => renderInline(line))
       .join('<br>');
+    if (trailingHardBreak) {
+      return `<blockquote data-rich-quote-hard-break-source="${escapeAttribute(raw)}">${body}${anchor}</blockquote>`;
+    }
     return `<blockquote>${body}</blockquote>`;
   }
 
@@ -12350,6 +13007,8 @@ ${body}
       .then(() => renderMermaidTargets(targets))
       .catch(() => {});
   }
+
+  window.PMERenderMermaidIn = renderMermaidIn;
 
   async function renderMermaidTargets(targets) {
     for (const target of targets) {

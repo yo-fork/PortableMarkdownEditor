@@ -1,0 +1,25 @@
+{
+  "imports": {
+    "@codemirror/autocomplete": "./vendor/codemirror6/node_modules/@codemirror/autocomplete/dist/index.js",
+    "@codemirror/commands": "./vendor/codemirror6/node_modules/@codemirror/commands/dist/index.js",
+    "@codemirror/lang-css": "./vendor/codemirror6/node_modules/@codemirror/lang-css/dist/index.js",
+    "@codemirror/lang-html": "./vendor/codemirror6/node_modules/@codemirror/lang-html/dist/index.js",
+    "@codemirror/lang-javascript": "./vendor/codemirror6/node_modules/@codemirror/lang-javascript/dist/index.js",
+    "@codemirror/lang-markdown": "./vendor/codemirror6/node_modules/@codemirror/lang-markdown/dist/index.js",
+    "@codemirror/language": "./vendor/codemirror6/node_modules/@codemirror/language/dist/index.js",
+    "@codemirror/lint": "./vendor/codemirror6/node_modules/@codemirror/lint/dist/index.js",
+    "@codemirror/state": "./vendor/codemirror6/node_modules/@codemirror/state/dist/index.js",
+    "@codemirror/view": "./vendor/codemirror6/node_modules/@codemirror/view/dist/index.js",
+    "@lezer/common": "./vendor/codemirror6/node_modules/@lezer/common/dist/index.js",
+    "@lezer/css": "./vendor/codemirror6/node_modules/@lezer/css/dist/index.js",
+    "@lezer/highlight": "./vendor/codemirror6/node_modules/@lezer/highlight/dist/index.js",
+    "@lezer/html": "./vendor/codemirror6/node_modules/@lezer/html/dist/index.js",
+    "@lezer/javascript": "./vendor/codemirror6/node_modules/@lezer/javascript/dist/index.js",
+    "@lezer/lr": "./vendor/codemirror6/node_modules/@lezer/lr/dist/index.js",
+    "@lezer/markdown": "./vendor/codemirror6/node_modules/@lezer/markdown/dist/index.js",
+    "@marijn/find-cluster-break": "./vendor/codemirror6/node_modules/@marijn/find-cluster-break/src/index.js",
+    "crelt": "./vendor/codemirror6/node_modules/crelt/index.js",
+    "style-mod": "./vendor/codemirror6/node_modules/style-mod/src/style-mod.js",
+    "w3c-keyname": "./vendor/codemirror6/node_modules/w3c-keyname/index.js"
+  }
+}

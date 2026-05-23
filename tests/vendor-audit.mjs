@@ -13,6 +13,13 @@ const requiredFiles = [
   'vendor/katex/katex.min.css',
   'vendor/katex/fonts',
   'vendor/katex/LICENSE',
+  'vendor/codemirror6/node_modules',
+  'vendor/codemirror6/import-map.json',
+  'vendor/codemirror6/package-lock.json',
+  'vendor/codemirror6/source-editor.js',
+  'vendor/prosemirror/prosemirror-editor.js',
+  'vendor/prosemirror/package-lock.json',
+  'vendor/prosemirror/licenses',
   'docs/third-party-licenses.md',
 ];
 
@@ -30,6 +37,9 @@ assert.match(index, /vendor\/highlight\/styles\/github-dark\.min\.css/);
 assert.match(index, /vendor\/mermaid\/mermaid\.min\.js/);
 assert.match(index, /vendor\/katex\/katex\.min\.js/);
 assert.match(index, /vendor\/katex\/katex\.min\.css/);
+assert.match(index, /vendor\/codemirror6\/node_modules\/@codemirror\/state\/dist\/index\.js/);
+assert.match(index, /vendor\/codemirror6\/node_modules\/@codemirror\/view\/dist\/index\.js/);
+assert.match(index, /vendor\/prosemirror\/prosemirror-editor\.js/);
 assert.doesNotMatch(index, /https?:\/\/.*(?:markdown-it|highlight|mermaid|katex|jsdelivr|unpkg|cdnjs)/i);
 
 assert.match(app, /window\.markdownit|window\.markdownIt/);
@@ -43,5 +53,10 @@ assert.match(licenses, /markdown-it/i);
 assert.match(licenses, /highlight/i);
 assert.match(licenses, /mermaid/i);
 assert.match(licenses, /KaTeX/i);
+assert.match(licenses, /CodeMirror 6/i);
+assert.match(licenses, /@codemirror\/lang-markdown/i);
+assert.match(licenses, /ProseMirror local bundle/i);
+assert.match(licenses, /prosemirror-view/i);
+assert.match(licenses, /prosemirror-markdown/i);
 
 console.log('vendor audit checks passed');

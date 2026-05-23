@@ -3,5 +3,7 @@ Thumbs.db
 *.tmp
 *.bak
 node_modules/
+!vendor/codemirror6/node_modules/
+!vendor/codemirror6/node_modules/**
 .vendor-cache/
 downloads/

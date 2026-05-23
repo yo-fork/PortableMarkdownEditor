@@ -3,7 +3,8 @@
 Windowsでインストールせずに使える、完全ローカル実行のMarkdownエディタです。
 
 * `index.html` をブラウザで開くだけで起動します。
-* CDN、npm実行、外部配信JavaScript、外部配信CSS、外部API通信は使いません。必要なブラウザ用ライブラリは `vendor/` に固定して同梱します。
+* CDN、アプリ実行時のnpm実行、外部配信JavaScript、外部配信CSS、外部API通信は使いません。必要なブラウザ用ライブラリは `vendor/` に固定して同梱します。
+* リッチ編集は vendored ProseMirror、Markdownソース編集は vendored CodeMirror 6 を使い、ローカル同梱ファイルだけを読み込みます。
 * シームレスなリッチ編集、ソース編集、分割プレビュー、プレビュー専用、集中モードを切り替えられます。
 * 初期表示はリッチ編集モードです。
 * Markdownの読み込み、保存、HTML出力、HTMLコピー、PDF/印刷に対応します。File System Access API でフォルダを許可している場合、保存ボタンは開いているMarkdownファイルへ上書き保存します。未許可時は従来どおりダウンロード保存します。
@@ -53,7 +54,7 @@ python -m http.server 8773 --bind 127.0.0.1
 
 見出し、段落、引用、箇条書き、番号リスト、チェックリスト、表、コードブロック、インラインコード、太字、斜体、打ち消し線、リンク、PNG/JPEG/GIF/WebPのdata URL画像、許可済みフォルダ内の相対画像参照、assetsフォルダへの画像貼り付け/ドロップ、折りたたみ可能な目次 `\[toc]` に対応しています。
 
-Markdown解析、コードハイライト、Mermaid図、KaTeX数式は、`vendor/` に同梱したブラウザ用ライブラリをローカルから読み込んで処理します。`js`, `ts`, `python`, `html`, `css`, `json`, `bash`, `powershell`, `sql`, `yaml` などの主要言語、`mermaid` コードブロック、`$...$` / `$$...$$` / `\(...\)` / `\[...\]` の数式に対応します。
+Markdown解析、リッチ編集、ソース編集、コードハイライト、Mermaid図、KaTeX数式は、`vendor/` に同梱したブラウザ用ライブラリをローカルから読み込んで処理します。`js`, `ts`, `python`, `html`, `css`, `json`, `bash`, `powershell`, `sql`, `yaml` などの主要言語、`mermaid` コードブロック、`$...$` / `$$...$$` / `\(...\)` / `\[...\]` の数式に対応します。
 
 ## セキュリティ設計
 
