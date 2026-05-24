@@ -604,6 +604,15 @@ flowchart TD
     return Boolean(target && els.rich?.contains(target) && nodeElement(target)?.closest?.('.ProseMirror'));
   }
 
+  function prosemirrorAtomSourceElement(target) {
+    return nodeElement(target)?.closest?.('.pme-math-node, .pme-mermaid-node, .pme-toc-node') || null;
+  }
+
+  function isProseMirrorAtomSourceTarget(target) {
+    const element = nodeElement(target);
+    return Boolean(element?.closest?.('.pme-node-source-editor, .pme-link-href-editor') || prosemirrorAtomSourceElement(element));
+  }
+
   function isProseMirrorRichEventContext(event) {
     const target = eventTargetElement(event);
     if (isProseMirrorRichTarget(target)) return true;
@@ -773,6 +782,10 @@ flowchart TD
     }
     if (format === 'toc') {
       insertProseMirrorMarkdown('[toc]', { status: '目次を挿入しました' });
+      return true;
+    }
+    if (format === 'math') {
+      insertProseMirrorMarkdown('$x$', { inline: true, status: 'インライン数式を挿入しました' });
       return true;
     }
     setStatus('この操作はProseMirrorリッチ編集では未対応です');
@@ -989,6 +1002,17 @@ flowchart TD
 
   function onRichPointerDownCapture(event) {
     const target = eventTargetElement(event);
+    const atomSource = prosemirrorAtomSourceElement(target);
+    if (atomSource) {
+      if (nodeElement(target)?.closest?.('button, a, input, textarea, select, option')) return;
+      if (typeof atomSource.__pmeOpenSourceEditor === 'function') {
+        event.preventDefault();
+        event.stopPropagation();
+        atomSource.__pmeOpenSourceEditor();
+      }
+      return;
+    }
+    if (isProseMirrorAtomSourceTarget(target)) return;
     const proseMirror = nodeElement(target)?.closest?.('.ProseMirror');
     if (!proseMirror || !els.rich?.contains(proseMirror)) return;
     focusProseMirrorElement(proseMirror);
@@ -997,6 +1021,10 @@ flowchart TD
   function onRichClick(event) {
     const target = eventTargetElement(event);
     if (!target || !els.rich.contains(target)) return;
+    if (isProseMirrorAtomSourceTarget(target)) {
+      event.stopPropagation();
+      return;
+    }
     if (isProseMirrorRichTarget(target)) {
       focusProseMirrorTarget(target);
       return;
@@ -7722,6 +7750,11 @@ flowchart TD
       case 'toc':
         replacement = selected || '[toc]';
         break;
+      case 'math':
+        replacement = `$${selected || 'x'}$`;
+        selectionStart = start + 1;
+        selectionEnd = selectionStart + (selected || 'x').length;
+        break;
       default:
         return;
     }
@@ -7770,6 +7803,14 @@ flowchart TD
         return true;
       case 'toc':
         insertRichMarkdownBlock('[toc]', '目次を挿入しました');
+        return true;
+      case 'math':
+        if (insertRichInlineMarkdownSource(`$${richSelectedText() || 'x'}$`, 'インライン数式を挿入しました', {
+          activateWhenCollapsed: true,
+          selectionStart: 1,
+          selectionEnd: 2,
+        })) return true;
+        insertRichInlineElement('span', 'x', { class: 'math-inline', 'data-math-source': 'x', 'data-math-display': 'false' });
         return true;
       default:
         return false;

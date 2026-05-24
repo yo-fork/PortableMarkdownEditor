@@ -18664,7 +18664,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     return null;
   }
 
-  function sourceMarkerWidget(mark, side) {
+  function simpleSourceMarkerWidget(mark, side) {
     return function() {
       var marker = document.createElement('span');
       marker.className = 'pme-inline-source-token pme-inline-source-token--' + side;
@@ -18673,6 +18673,207 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       marker.textContent = sourceMarkerText(mark, side) || '';
       return marker;
     };
+  }
+
+  function linkMarkRangeAtPosition(doc, pos) {
+    if (!schema.marks.link) return null;
+    var bounded = Math.max(0, Math.min(pos, doc.content.size));
+    var $pos = doc.resolve(bounded);
+    if (!$pos.parent.inlineContent) return null;
+    var parentOffset = $pos.parentOffset;
+    var children = [];
+    $pos.parent.forEach(function(node, offset) {
+      children.push({ node: node, offset: offset, mark: schema.marks.link.isInSet(node.marks || []) });
+    });
+    var index = -1;
+    for (var childIndex = 0; childIndex < children.length; childIndex += 1) {
+      var child = children[childIndex];
+      var childEnd = child.offset + child.node.nodeSize;
+      if (child.mark && child.offset <= parentOffset && parentOffset <= childEnd) {
+        index = childIndex;
+        break;
+      }
+    }
+    if (index < 0) return null;
+    var mark = children[index].mark;
+    var startIndex = index;
+    while (startIndex > 0 && children[startIndex - 1].mark && children[startIndex - 1].mark.eq(mark)) startIndex -= 1;
+    var endIndex = index;
+    while (endIndex + 1 < children.length && children[endIndex + 1].mark && children[endIndex + 1].mark.eq(mark)) endIndex += 1;
+    var from = $pos.start() + children[startIndex].offset;
+    var to = $pos.start() + children[endIndex].offset + children[endIndex].node.nodeSize;
+    return from < to ? { from: from, to: to, mark: mark } : null;
+  }
+
+  function updateLinkHref(editorView, getPos, fallbackRange, nextHref) {
+    if (!editorView || !schema.marks.link) return false;
+    var pos = typeof getPos === 'function' ? getPos() : fallbackRange && fallbackRange.to;
+    var range = Number.isInteger(pos) ? linkMarkRangeAtPosition(editorView.state.doc, pos) : null;
+    if (!range && fallbackRange) {
+      range = {
+        from: fallbackRange.from,
+        to: fallbackRange.to,
+        mark: fallbackRange.mark
+      };
+    }
+    if (!range || !range.mark || range.mark.type !== schema.marks.link) return false;
+    var href = String(nextHref || '').trim();
+    if (String(range.mark.attrs && range.mark.attrs.href || '') === href) return false;
+    var attrs = extendObject(range.mark.attrs || {}, { href: href });
+    var tr = editorView.state.tr
+      .removeMark(range.from, range.to, schema.marks.link)
+      .addMark(range.from, range.to, schema.marks.link.create(attrs));
+    editorView.dispatch(tr);
+    return true;
+  }
+
+  var activeLinkHrefPopover = null;
+
+  function linkHrefPopoverInput(popover) {
+    return popover && popover.querySelector ? popover.querySelector('.pme-link-href-input') : null;
+  }
+
+  function ensureLinkHrefPopover() {
+    var popover = document.querySelector('body > .pme-link-href-popover');
+    if (popover) return popover;
+    popover = document.createElement('span');
+    var before = document.createElement('span');
+    var after = document.createElement('span');
+    var input = document.createElement('input');
+    popover.className = 'pme-link-href-popover';
+    before.className = 'pme-inline-source-token pme-inline-source-token--link-url-before';
+    before.textContent = '](';
+    after.className = 'pme-inline-source-token pme-inline-source-token--link-url-after';
+    after.textContent = ')';
+    input.className = 'pme-link-href-input';
+    input.type = 'text';
+    input.setAttribute('aria-label', 'link URL');
+    input.setAttribute('spellcheck', 'false');
+    input.setAttribute('autocomplete', 'off');
+    input.setAttribute('autocapitalize', 'off');
+    popover.appendChild(before);
+    popover.appendChild(input);
+    popover.appendChild(after);
+    document.body.appendChild(popover);
+    input.addEventListener('input', function() {
+      input.size = Math.max(4, Math.min(48, input.value.length + 1));
+      if (!activeLinkHrefPopover) return;
+      updateLinkHref(activeLinkHrefPopover.editorView, activeLinkHrefPopover.getPos, activeLinkHrefPopover.range, input.value);
+      positionLinkHrefPopover();
+    });
+    input.addEventListener('keydown', function(event) {
+      if (event.key === 'Enter' || event.key === 'Escape') {
+        event.preventDefault();
+        hideLinkHrefPopover(true);
+      }
+    });
+    input.addEventListener('blur', function() {
+      setTimeout(function() {
+        if (document.activeElement !== input) hideLinkHrefPopover(false);
+      }, 0);
+    });
+    ['pointerdown', 'mousedown', 'mouseup', 'click', 'dblclick', 'touchstart'].forEach(function(type) {
+      popover.addEventListener(type, function(event) {
+        event.stopPropagation();
+      }, true);
+    });
+    return popover;
+  }
+
+  function positionLinkHrefPopover() {
+    if (!activeLinkHrefPopover || !activeLinkHrefPopover.anchor || !activeLinkHrefPopover.popover) return;
+    var anchor = activeLinkHrefPopover.anchor;
+    var popover = activeLinkHrefPopover.popover;
+    var rect = anchor.getBoundingClientRect();
+    var viewportWidth = global.innerWidth || document.documentElement.clientWidth || 1024;
+    var margin = 12;
+    var width = Math.min(Math.max(popover.offsetWidth || 180, 120), viewportWidth - margin * 2);
+    var left = clampNumber(rect.left, margin, viewportWidth - width - margin);
+    var top = rect.top + (rect.height - (popover.offsetHeight || rect.height)) / 2;
+    popover.style.position = 'fixed';
+    popover.style.left = left + 'px';
+    popover.style.top = Math.max(margin, top) + 'px';
+    popover.style.zIndex = '1000';
+  }
+
+  function hideLinkHrefPopover(refocusEditor) {
+    if (!activeLinkHrefPopover) return;
+    var active = activeLinkHrefPopover;
+    activeLinkHrefPopover = null;
+    if (active.popover) active.popover.classList.remove('is-open');
+    if (refocusEditor && active.editorView) active.editorView.focus();
+  }
+
+  function showLinkHrefPopover(editorView, getPos, range, mark, anchor) {
+    var popover = ensureLinkHrefPopover();
+    var input = linkHrefPopoverInput(popover);
+    if (!input) return false;
+    input.value = String(mark.attrs && mark.attrs.href || '');
+    input.size = Math.max(4, Math.min(48, input.value.length + 1));
+    activeLinkHrefPopover = {
+      editorView: editorView,
+      getPos: getPos,
+      range: { from: range.from, to: range.to, mark: mark },
+      anchor: anchor,
+      popover: popover
+    };
+    popover.classList.add('is-open');
+    positionLinkHrefPopover();
+    setTimeout(function() {
+      try {
+        input.focus({ preventScroll: true });
+      } catch (error) {
+        input.focus();
+      }
+      if (document.activeElement === input && typeof input.setSelectionRange === 'function') {
+        input.setSelectionRange(0, input.value.length);
+      }
+    }, 0);
+    return true;
+  }
+
+  function linkHrefEditorWidget(mark, range) {
+    return function(editorView, getPos) {
+      var wrapper = document.createElement('span');
+      var before = document.createElement('span');
+      var after = document.createElement('span');
+      var value = document.createElement('span');
+      wrapper.className = 'pme-link-href-editor ProseMirror-widget';
+      before.className = 'pme-inline-source-token pme-inline-source-token--link-url-before';
+      before.textContent = '](';
+      after.className = 'pme-inline-source-token pme-inline-source-token--link-url-after';
+      after.textContent = ')';
+      value.className = 'pme-link-href-value';
+      value.textContent = String(mark.attrs && mark.attrs.href || '');
+      ['pointerdown', 'mousedown', 'touchstart'].forEach(function(type) {
+        wrapper.addEventListener(type, function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          showLinkHrefPopover(editorView, getPos, range, mark, wrapper);
+        }, true);
+      });
+      ['mouseup', 'click', 'dblclick'].forEach(function(type) {
+        wrapper.addEventListener(type, function(event) {
+          event.stopPropagation();
+        }, true);
+      });
+      wrapper.appendChild(before);
+      wrapper.appendChild(value);
+      wrapper.appendChild(after);
+      return wrapper;
+    };
+  }
+
+  function sourceMarkerWidget(mark, side, range) {
+    if (mark && mark.type === schema.marks.link && side === 'after' && range) {
+      return linkHrefEditorWidget(mark, { from: range.from, to: range.to, mark: mark });
+    }
+    return simpleSourceMarkerWidget(mark, side);
+  }
+
+  function stopLinkHrefEditorEvent(event) {
+    var target = event && event.target;
+    return Boolean(target && target.closest && target.closest('.pme-link-href-editor'));
   }
 
   function codeBoundarySpacerWidget() {
@@ -18742,13 +18943,16 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     var mark = inlineAffordanceMark(editorState);
     var range = markRangeAroundSelection(selection, mark);
     if (mark && range) {
-      decorations.push(view.Decoration.widget(range.from, sourceMarkerWidget(mark, 'before'), {
+      decorations.push(view.Decoration.widget(range.from, sourceMarkerWidget(mark, 'before', range), {
         key: 'pme-inline-source-before-' + mark.type.name + '-' + range.from,
         side: -1
       }));
-      decorations.push(view.Decoration.widget(range.to, sourceMarkerWidget(mark, 'after'), {
+      decorations.push(view.Decoration.widget(range.to, sourceMarkerWidget(mark, 'after', range), {
         key: 'pme-inline-source-after-' + mark.type.name + '-' + range.to,
-        side: 1
+        side: 1,
+        raw: mark.type === schema.marks.link,
+        ignoreSelection: mark.type === schema.marks.link,
+        stopEvent: stopLinkHrefEditorEvent
       }));
     }
 
@@ -18771,8 +18975,587 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
   }
 
   function atomDomAttrs(dom, nodeName) {
-    dom.setAttribute('contenteditable', 'false');
     dom.setAttribute('data-pme-atom-node', nodeName);
+  }
+
+  function nodeViewPosition(getPos) {
+    if (typeof getPos !== 'function') return null;
+    try {
+      var pos = getPos();
+      return typeof pos === 'number' ? pos : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function attrsMatch(currentAttrs, nextAttrs) {
+    currentAttrs = currentAttrs || {};
+    nextAttrs = nextAttrs || {};
+    for (var key in nextAttrs) {
+      if (currentAttrs[key] !== nextAttrs[key]) return false;
+    }
+    return true;
+  }
+
+  function updateNodeViewAttrs(editorView, getPos, node, nextAttrs, options) {
+    if (!editorView || !node || !nextAttrs) return false;
+    if (attrsMatch(node.attrs, nextAttrs)) return false;
+    var pos = nodeViewPosition(getPos);
+    if (pos == null) return false;
+    var tr = editorView.state.tr.setNodeMarkup(pos, null, extendObject(node.attrs || {}, nextAttrs));
+    if (options && options.selectAfterNode) {
+      var after = Math.max(0, Math.min(pos + node.nodeSize, tr.doc.content.size));
+      try {
+        tr = tr.setSelection(state.TextSelection.create(tr.doc, after));
+      } catch (error) {
+        tr = tr.setSelection(state.Selection.near(tr.doc.resolve(after), 1));
+      }
+    }
+    editorView.dispatch(tr);
+    return true;
+  }
+
+  function isEditableAtomNode(node) {
+    if (!node || !node.type) return false;
+    return node.type === schema.nodes.math_inline
+      || node.type === schema.nodes.math_display
+      || node.type === schema.nodes.mermaid_block
+      || node.type === schema.nodes.toc_block;
+  }
+
+  function setSelectionNearDeletedRange(tr, pos, dir) {
+    if (!tr.doc.childCount) tr.insert(0, schema.nodes.paragraph.create());
+    var bounded = Math.max(0, Math.min(pos, tr.doc.content.size));
+    var selection = null;
+    try {
+      selection = state.Selection.near(tr.doc.resolve(bounded), dir < 0 ? -1 : 1);
+    } catch (error) {
+      selection = state.Selection.atEnd(tr.doc);
+    }
+    return tr.setSelection(selection);
+  }
+
+  function deleteAtomRange(editorState, dispatch, from, to, dir) {
+    if (!dispatch) return true;
+    var tr = editorState.tr.delete(from, to);
+    dispatch(setSelectionNearDeletedRange(tr, from, dir).scrollIntoView());
+    return true;
+  }
+
+  function adjacentBlockAtomRange($pos, dir) {
+    if (!$pos || !$pos.depth) return null;
+    var blockDepth = $pos.depth;
+    while (blockDepth > 0 && !$pos.node(blockDepth).isTextblock) blockDepth -= 1;
+    if (!blockDepth) return null;
+    var parentDepth = blockDepth - 1;
+    var parent = $pos.node(parentDepth);
+    var blockIndex = $pos.index(parentDepth);
+    if (dir < 0) {
+      if ($pos.parentOffset !== 0 || blockIndex <= 0) return null;
+      var previous = parent.child(blockIndex - 1);
+      if (!isEditableAtomNode(previous)) return null;
+      var blockStart = $pos.before(blockDepth);
+      return { from: blockStart - previous.nodeSize, to: blockStart };
+    }
+    if ($pos.parentOffset !== $pos.parent.content.size || blockIndex + 1 >= parent.childCount) return null;
+    var next = parent.child(blockIndex + 1);
+    if (!isEditableAtomNode(next)) return null;
+    var blockEnd = $pos.after(blockDepth);
+    return { from: blockEnd, to: blockEnd + next.nodeSize };
+  }
+
+  function atomDeletionRangeNearSelection(editorState, dir) {
+    var selection = editorState.selection;
+    if (selection instanceof state.NodeSelection && isEditableAtomNode(selection.node)) {
+      return { from: selection.from, to: selection.to };
+    }
+    if (!selection.empty) return null;
+    var $pos = selection.$from;
+    var adjacent = dir < 0 ? $pos.nodeBefore : $pos.nodeAfter;
+    if (isEditableAtomNode(adjacent)) {
+      return dir < 0
+        ? { from: $pos.pos - adjacent.nodeSize, to: $pos.pos }
+        : { from: $pos.pos, to: $pos.pos + adjacent.nodeSize };
+    }
+    return adjacentBlockAtomRange($pos, dir);
+  }
+
+  function deleteSelectedOrAdjacentAtomCommand(dir) {
+    return function(editorState, dispatch) {
+      var range = atomDeletionRangeNearSelection(editorState, dir);
+      if (!range) return false;
+      return deleteAtomRange(editorState, dispatch, range.from, range.to, dir);
+    };
+  }
+
+  function deleteNodeView(editorView, getPos, node, dir) {
+    if (!editorView || !node) return false;
+    var pos = nodeViewPosition(getPos);
+    if (pos == null) return false;
+    var tr = editorView.state.tr.delete(pos, pos + node.nodeSize);
+    editorView.dispatch(setSelectionNearDeletedRange(tr, pos, dir || 1).scrollIntoView());
+    editorView.focus();
+    return true;
+  }
+
+  function replaceNodeViewWithMarkdown(editorView, getPos, node, markdownText) {
+    if (!editorView || !node) return false;
+    var pos = nodeViewPosition(getPos);
+    if (pos == null) return false;
+    var parsed = parseMarkdown(markdownText || '');
+    var content = parsed && parsed.content && parsed.content.size
+      ? parsed.content
+      : model.Fragment.from(schema.nodes.paragraph.create());
+    editorView.dispatch(editorView.state.tr.replaceWith(pos, pos + node.nodeSize, content).scrollIntoView());
+    return true;
+  }
+
+  function setSelectionAfterNodeView(editorView, getPos, node) {
+    if (!editorView || !node) return false;
+    var pos = nodeViewPosition(getPos);
+    if (pos == null) return false;
+    var tr = editorView.state.tr;
+    var after = Math.max(0, Math.min(pos + node.nodeSize, tr.doc.content.size));
+    var selection = null;
+    if (node.isInline) {
+      try {
+        selection = state.TextSelection.create(tr.doc, after);
+      } catch (error) {
+        selection = state.Selection.near(tr.doc.resolve(after), 1);
+      }
+    } else {
+      var $after = tr.doc.resolve(after);
+      var nextNode = $after.nodeAfter;
+      if (!nextNode || !nextNode.isTextblock) {
+        tr.insert(after, schema.nodes.paragraph.create());
+      }
+      try {
+        selection = state.TextSelection.create(tr.doc, Math.min(after + 1, tr.doc.content.size));
+      } catch (error) {
+        selection = state.Selection.near(tr.doc.resolve(Math.min(after, tr.doc.content.size)), 1);
+      }
+    }
+    editorView.dispatch(tr.setSelection(selection).scrollIntoView());
+    editorView.focus();
+    return true;
+  }
+
+  function setSelectionBeforeNodeView(editorView, getPos, node) {
+    if (!editorView || !node) return false;
+    var pos = nodeViewPosition(getPos);
+    if (pos == null) return false;
+    var tr = editorView.state.tr;
+    var before = Math.max(0, Math.min(pos, tr.doc.content.size));
+    var selection = null;
+    if (!node.isInline) {
+      var $before = tr.doc.resolve(before);
+      var previousNode = $before.nodeBefore;
+      if (!previousNode || !previousNode.isTextblock) {
+        tr.insert(before, schema.nodes.paragraph.create());
+        try {
+          selection = state.TextSelection.create(tr.doc, before + 1);
+        } catch (error) {
+          selection = state.Selection.near(tr.doc.resolve(before), 1);
+        }
+      }
+    }
+    if (!selection) {
+      try {
+        selection = state.TextSelection.create(tr.doc, before);
+      } catch (error) {
+        selection = state.Selection.near(tr.doc.resolve(before), -1);
+      }
+    }
+    editorView.dispatch(tr.setSelection(selection).scrollIntoView());
+    editorView.focus();
+    return true;
+  }
+
+  function sourceEditorInput(control) {
+    return control && control.__pmeValueInput || control;
+  }
+
+  function sourceEditorHasFocus(control) {
+    var active = document.activeElement;
+    return Boolean(control && active && (active === control || active === control.__pmeValueInput || control.contains && control.contains(active)));
+  }
+
+  function setSourceEditorValue(control, value) {
+    if (!control) return;
+    value = String(value || '');
+    if (sourceEditorHasFocus(control) && control.value === value) return;
+    if (sourceEditorHasFocus(control)) return;
+    if (control.value !== value) control.value = value;
+  }
+
+  function autoSizeNodeSourceEditor(control) {
+    if (!control) return;
+    var input = sourceEditorInput(control);
+    if (input && input.nodeName === 'INPUT') {
+      input.size = Math.max(1, Math.min(64, String(input.value || '').length + 1));
+      return;
+    }
+    if (!input || input.nodeName !== 'TEXTAREA') return;
+    input.style.height = 'auto';
+    input.style.height = Math.max(48, input.scrollHeight) + 'px';
+  }
+
+  function cursorIsOnFirstSourceLine(input) {
+    return Boolean(input && typeof input.selectionStart === 'number' && String(input.value || '').lastIndexOf('\n', input.selectionStart - 1) === -1);
+  }
+
+  function cursorIsOnLastSourceLine(input) {
+    return Boolean(input && typeof input.selectionEnd === 'number' && String(input.value || '').indexOf('\n', input.selectionEnd) === -1);
+  }
+
+  function createNodeSourceEditor(options) {
+    var control = options.inlineTokens ? document.createElement('span') : document.createElement(options.multiline ? 'textarea' : 'input');
+    control.className = 'pme-node-source-editor ' + (options.className || '');
+    var valueInput = control;
+    if (options.inlineTokens) {
+      var beforeToken = document.createElement('span');
+      var afterToken = document.createElement('span');
+      valueInput = document.createElement('input');
+      beforeToken.className = 'pme-node-source-delimiter pme-inline-source-token pme-inline-source-token--before';
+      afterToken.className = 'pme-node-source-delimiter pme-inline-source-token pme-inline-source-token--after';
+      valueInput.className = 'pme-node-source-editor-input';
+      beforeToken.textContent = options.inlineTokens[0] || '';
+      afterToken.textContent = options.inlineTokens[1] || '';
+      valueInput.type = 'text';
+      control.appendChild(beforeToken);
+      control.appendChild(valueInput);
+      control.appendChild(afterToken);
+      control.__pmeValueInput = valueInput;
+      control.__pmeInlineTokens = options.inlineTokens;
+      Object.defineProperty(control, 'value', {
+        configurable: true,
+        get: function() {
+          return (control.__pmeInlineTokens[0] || '') + valueInput.value + (control.__pmeInlineTokens[1] || '');
+        },
+        set: function(nextValue) {
+          valueInput.value = latexFromMathSourceEditorValue(nextValue, false);
+        }
+      });
+    } else if (!options.multiline) {
+      control.type = 'text';
+    }
+    control.setAttribute('aria-label', options.label || 'source');
+    control.setAttribute('spellcheck', 'false');
+    control.setAttribute('autocomplete', 'off');
+    control.setAttribute('autocapitalize', 'off');
+    control.setAttribute('contenteditable', options.inlineTokens ? 'false' : 'true');
+    if (valueInput !== control) {
+      valueInput.setAttribute('aria-label', options.label || 'source');
+      valueInput.setAttribute('spellcheck', 'false');
+      valueInput.setAttribute('autocomplete', 'off');
+      valueInput.setAttribute('autocapitalize', 'off');
+    }
+    control.value = options.value || '';
+    autoSizeNodeSourceEditor(control);
+    function keepControlEvent(event) {
+      event.stopPropagation();
+      setTimeout(function() {
+        if (control.isConnected && !sourceEditorHasFocus(control)) {
+          focusNodeSourceEditor(control, { moveToEnd: false });
+        }
+      }, 0);
+    }
+    ['pointerdown', 'mousedown', 'mouseup', 'click', 'dblclick', 'touchstart'].forEach(function(type) {
+      control.addEventListener(type, keepControlEvent, true);
+      control.addEventListener(type, keepControlEvent);
+    });
+    control.addEventListener('input', function(event) {
+      if (options.multiline || control.__pmeValueInput) autoSizeNodeSourceEditor(control);
+      if (typeof options.onInput === 'function') options.onInput(control.value, event);
+      if (control.classList.contains('is-source-popover-open')) scheduleNodeSourceEditorPopoverPosition();
+    });
+    control.addEventListener('keydown', function(event) {
+      var shouldConfirm = ((event.ctrlKey || event.metaKey) && event.key === 'Enter')
+        || (!options.multiline && event.key === 'Enter');
+      var input = sourceEditorInput(control);
+      var plainCollapsedKey = input && typeof input.selectionStart === 'number' && input.selectionStart === input.selectionEnd && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
+      if (plainCollapsedKey && typeof options.onDeleteBoundary === 'function') {
+        if (event.key === 'Backspace' && input.selectionStart === 0) {
+          event.preventDefault();
+          hideSourceEditor(control, control.__pmeOwnerDom || null);
+          input.blur();
+          options.onDeleteBoundary('before', control.value, event);
+          return;
+        }
+        if (event.key === 'Delete' && input.selectionStart === String(input.value || '').length) {
+          event.preventDefault();
+          hideSourceEditor(control, control.__pmeOwnerDom || null);
+          input.blur();
+          options.onDeleteBoundary('after', control.value, event);
+          return;
+        }
+      }
+      if (typeof options.onExitBoundary === 'function' && plainCollapsedKey) {
+        var cursorPos = input.selectionStart;
+        var inputLength = String(input.value || '').length;
+        if (event.key === 'ArrowLeft' && cursorPos === 0) {
+          event.preventDefault();
+          options.onExitBoundary('before', control.value, event);
+          hideSourceEditor(control, control.__pmeOwnerDom || null);
+          return;
+        }
+        if (event.key === 'ArrowRight' && cursorPos === inputLength) {
+          event.preventDefault();
+          options.onExitBoundary('after', control.value, event);
+          hideSourceEditor(control, control.__pmeOwnerDom || null);
+          return;
+        }
+        if (options.multiline && event.key === 'ArrowUp' && cursorIsOnFirstSourceLine(input)) {
+          event.preventDefault();
+          options.onExitBoundary('before', control.value, event);
+          hideSourceEditor(control, control.__pmeOwnerDom || null);
+          return;
+        }
+        if (options.multiline && event.key === 'ArrowDown' && cursorIsOnLastSourceLine(input)) {
+          event.preventDefault();
+          options.onExitBoundary('after', control.value, event);
+          hideSourceEditor(control, control.__pmeOwnerDom || null);
+          return;
+        }
+        if (options.multiline && /^Arrow/.test(event.key)) return;
+        if (event.key === 'ArrowLeft' && typeof input.setSelectionRange === 'function') {
+          event.preventDefault();
+          input.setSelectionRange(cursorPos - 1, cursorPos - 1);
+          return;
+        }
+        if (event.key === 'ArrowRight' && typeof input.setSelectionRange === 'function') {
+          event.preventDefault();
+          input.setSelectionRange(cursorPos + 1, cursorPos + 1);
+          return;
+        }
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        hideSourceEditor(control, control.__pmeOwnerDom || null);
+        sourceEditorInput(control).blur();
+      } else if (shouldConfirm) {
+        event.preventDefault();
+        if (typeof options.onConfirm === 'function') options.onConfirm(control.value, event);
+        hideSourceEditor(control, control.__pmeOwnerDom || null);
+        sourceEditorInput(control).blur();
+      }
+    });
+    if (typeof options.onCommit === 'function') {
+      control.addEventListener('blur', function(event) {
+        options.onCommit(control.value, event);
+      });
+    }
+    return control;
+  }
+
+  function nodeSourceEditorFromEvent(event) {
+    var target = event && event.target;
+    return target && target.closest ? target.closest('.pme-node-source-editor') : null;
+  }
+
+  function isNodeSourceActivationTarget(event) {
+    var target = event && event.target;
+    if (!target || !target.closest) return true;
+    if (target.closest('.pme-node-source-editor')) return false;
+    if (target.closest('button, a, input, textarea, select, option')) return false;
+    return true;
+  }
+
+  function focusNodeSourceEditor(control, options) {
+    if (!control) return false;
+    var input = sourceEditorInput(control);
+    try {
+      input.focus({ preventScroll: true });
+    } catch (error) {
+      input.focus();
+    }
+    var valueLength = String(input.value || '').length;
+    var moveToEnd = !options || options.moveToEnd !== false;
+    if (moveToEnd && document.activeElement === input && typeof input.setSelectionRange === 'function') {
+      try {
+        input.setSelectionRange(valueLength, valueLength);
+      } catch (error) {}
+    }
+    autoSizeNodeSourceEditor(control);
+    return sourceEditorHasFocus(control);
+  }
+
+  var activeNodeSourceEditorPopover = null;
+  var nodeSourceEditorPopoverFrame = 0;
+  var nodeSourceEditorPopoverEventsBound = false;
+
+  function clampNumber(value, min, max) {
+    if (max < min) return min;
+    return Math.max(min, Math.min(value, max));
+  }
+
+  function isInlineMathSourceEditor(control) {
+    return Boolean(control && control.classList && control.classList.contains('pme-node-source-editor--math-inline'));
+  }
+
+  function positionNodeSourceEditorPopover(dom, control) {
+    if (!dom || !control) return;
+    if (!dom.isConnected) {
+      hideNodeSourceEditorPopover(control, dom);
+      return;
+    }
+    var rect = dom.getBoundingClientRect();
+    var viewportWidth = global.innerWidth || document.documentElement.clientWidth || 1024;
+    var viewportHeight = global.innerHeight || document.documentElement.clientHeight || 768;
+    var margin = 12;
+    var availableWidth = Math.max(180, viewportWidth - margin * 2);
+    if (isInlineMathSourceEditor(control)) {
+      var inlineWidth = clampNumber(Math.max(rect.width || 0, String(control.value || '').length * 8.5 + 6), 24, Math.min(420, availableWidth));
+      control.style.position = 'fixed';
+      control.style.left = clampNumber(rect.left, margin, viewportWidth - inlineWidth - margin) + 'px';
+      control.style.top = margin + 'px';
+      control.style.width = inlineWidth + 'px';
+      control.style.maxWidth = availableWidth + 'px';
+      control.style.maxHeight = '2.6rem';
+      control.style.zIndex = '1000';
+      autoSizeNodeSourceEditor(control);
+      var inlineRect = control.getBoundingClientRect();
+      var inlineTop = rect.top + (rect.height - inlineRect.height) / 2;
+      control.style.top = clampNumber(inlineTop, margin, viewportHeight - inlineRect.height - margin) + 'px';
+      return;
+    }
+    var maxEditorWidth = control.nodeName === 'INPUT' ? 320 : 520;
+    var preferredWidth = Math.max(240, Math.min(rect.width || 360, maxEditorWidth, availableWidth));
+    var anchorRight = clampNumber(rect.right - margin, margin + preferredWidth, viewportWidth - margin);
+    var left = clampNumber(anchorRight - preferredWidth, margin, viewportWidth - preferredWidth - margin);
+    control.style.position = 'fixed';
+    control.style.left = left + 'px';
+    control.style.top = margin + 'px';
+    control.style.width = preferredWidth + 'px';
+    control.style.maxWidth = availableWidth + 'px';
+    control.style.maxHeight = Math.max(80, Math.min(360, viewportHeight - margin * 2)) + 'px';
+    control.style.zIndex = '1000';
+    autoSizeNodeSourceEditor(control);
+    var popoverRect = control.getBoundingClientRect();
+    var preferredTop = rect.top + 8;
+    var top = clampNumber(preferredTop, margin, viewportHeight - popoverRect.height - margin);
+    control.style.top = top + 'px';
+  }
+
+  function scheduleNodeSourceEditorPopoverPosition() {
+    if (!activeNodeSourceEditorPopover) return;
+    if (nodeSourceEditorPopoverFrame) return;
+    var raf = global.requestAnimationFrame || function(callback) { return global.setTimeout(callback, 16); };
+    nodeSourceEditorPopoverFrame = raf(function() {
+      nodeSourceEditorPopoverFrame = 0;
+      var control = activeNodeSourceEditorPopover;
+      if (!control) return;
+      positionNodeSourceEditorPopover(control.__pmeOwnerDom || null, control);
+    });
+  }
+
+  function ensureNodeSourceEditorPopoverEvents() {
+    if (nodeSourceEditorPopoverEventsBound) return;
+    nodeSourceEditorPopoverEventsBound = true;
+    global.addEventListener('resize', scheduleNodeSourceEditorPopoverPosition, { passive: true });
+    global.addEventListener('scroll', scheduleNodeSourceEditorPopoverPosition, true);
+  }
+
+  function hideNodeSourceEditorPopover(control, dom) {
+    if (!control) return;
+    if (activeNodeSourceEditorPopover === control) activeNodeSourceEditorPopover = null;
+    control.classList.remove('is-source-popover-open');
+    control.style.left = '';
+    control.style.top = '';
+    control.style.width = '';
+    control.style.maxWidth = '';
+    control.style.maxHeight = '';
+    control.style.position = '';
+    control.style.zIndex = '';
+    var input = sourceEditorInput(control);
+    if (input && input !== control) input.blur();
+    if (dom) dom.classList.remove('is-editing-source');
+  }
+
+  function hideSourceEditor(control, dom) {
+    hideNodeSourceEditorPopover(control, dom);
+  }
+
+  function showNodeSourceEditorPopover(dom, control) {
+    if (!dom || !control) return false;
+    if (activeNodeSourceEditorPopover && activeNodeSourceEditorPopover !== control) {
+      hideNodeSourceEditorPopover(activeNodeSourceEditorPopover, activeNodeSourceEditorPopover.__pmeOwnerDom || null);
+    }
+    if (!control.parentNode) document.body.appendChild(control);
+    control.__pmeOwnerDom = dom;
+    control.classList.add('is-source-popover-open');
+    dom.classList.add('is-editing-source');
+    activeNodeSourceEditorPopover = control;
+    ensureNodeSourceEditorPopoverEvents();
+    positionNodeSourceEditorPopover(dom, control);
+    focusNodeSourceEditor(control, { moveToEnd: true });
+    setTimeout(function() {
+      if (control.isConnected && !sourceEditorHasFocus(control)) {
+        focusNodeSourceEditor(control, { moveToEnd: true });
+      }
+    }, 0);
+    return true;
+  }
+
+  function activateNodeSourceEditorFromEvent(event, control) {
+    if (!control || !isNodeSourceActivationTarget(event)) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    showNodeSourceEditorPopover(event.currentTarget, control);
+    return true;
+  }
+
+  function bindNodeSourceEditorActivation(dom, control) {
+    if (!dom || !control) return;
+    control.classList.add('pme-node-source-popover');
+    dom.__pmeOpenSourceEditor = function() {
+      return showNodeSourceEditorPopover(dom, control);
+    };
+    control.addEventListener('focusin', function() {
+      dom.classList.add('is-editing-source');
+      if (control.classList.contains('is-source-popover-open')) positionNodeSourceEditorPopover(dom, control);
+    });
+    control.addEventListener('focusout', function() {
+      setTimeout(function() {
+        if (!sourceEditorHasFocus(control)) hideNodeSourceEditorPopover(control, dom);
+      }, 0);
+    });
+    dom.addEventListener('pointerdown', function(event) {
+      activateNodeSourceEditorFromEvent(event, control);
+    }, true);
+  }
+
+  function destroyNodeSourceEditor(control) {
+    hideSourceEditor(control, control && control.__pmeOwnerDom || null);
+    if (control && control.parentNode) control.parentNode.removeChild(control);
+  }
+
+  function stopNodeSourceEditorEvent(event) {
+    return Boolean(nodeSourceEditorFromEvent(event));
+  }
+
+  function selectAtomSourceNode() {
+    var dom = this.dom;
+    var control = this.sourceEditor;
+    if (dom) {
+      dom.classList.add('ProseMirror-selectednode');
+      dom.classList.add('is-editing-source');
+    }
+    setTimeout(function() {
+      if (control) showNodeSourceEditorPopover(dom, control);
+    }, 0);
+  }
+
+  function deselectAtomSourceNode() {
+    if (this.dom) {
+      this.dom.classList.remove('ProseMirror-selectednode');
+      if (!sourceEditorHasFocus(this.sourceEditor)) this.dom.classList.remove('is-editing-source');
+    }
+  }
+
+  function ignoreNodeSourceEditorMutation(mutation) {
+    var target = mutation && mutation.target;
+    return Boolean(target && target.closest && target.closest('.pme-node-source-editor'));
   }
 
   function renderMathInto(dom, latex, displayMode) {
@@ -18792,18 +19575,73 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     dom.textContent = displayMode ? '$$ ' + (latex || '') + ' $$' : '$' + (latex || '') + '$';
   }
 
-  function MathNodeView(node) {
+  function mathSourceEditorValue(latex, displayMode) {
+    latex = normalizeNewlines(latex || '');
+    return displayMode ? latex : '$' + latex + '$';
+  }
+
+  function latexFromMathSourceEditorValue(value, displayMode) {
+    value = normalizeNewlines(value || '');
+    if (displayMode) return value;
+    var dollarMatch = value.match(/^\$([\s\S]*)\$$/);
+    if (dollarMatch) return dollarMatch[1];
+    var parenMatch = value.match(/^\\\(([\s\S]*)\\\)$/);
+    if (parenMatch) return parenMatch[1];
+    return value.replace(/^\$/, '').replace(/\$$/, '');
+  }
+
+  function MathNodeView(node, editorView, getPos) {
     this.node = node;
+    this.editorView = editorView;
+    this.getPos = getPos;
     this.displayMode = node.type.name === 'math_display';
     this.dom = document.createElement(this.displayMode ? 'div' : 'span');
     this.dom.className = (this.displayMode ? 'math-display' : 'math-inline') + ' pme-math-node';
     atomDomAttrs(this.dom, node.type.name);
+    this.preview = document.createElement(this.displayMode ? 'div' : 'span');
+    this.preview.className = 'pme-node-rendered-preview';
+    this.preview.setAttribute('contenteditable', 'false');
+    this.editPreview = null;
+    if (!this.displayMode) {
+      this.editPreview = document.createElement('span');
+      this.editPreview.className = 'pme-inline-math-edit-preview';
+      this.editPreview.setAttribute('contenteditable', 'false');
+      this.editPreview.setAttribute('aria-hidden', 'true');
+    }
+    var self = this;
+    this.sourceEditor = createNodeSourceEditor({
+      multiline: this.displayMode,
+      className: this.displayMode ? 'pme-node-source-editor--math-display' : 'pme-node-source-editor--math-inline',
+      label: this.displayMode ? 'display math source' : 'inline math source',
+      inlineTokens: this.displayMode ? null : ['$', '$'],
+      value: mathSourceEditorValue(node.attrs.latex || '', this.displayMode),
+      onInput: function(value) {
+        updateNodeViewAttrs(self.editorView, self.getPos, self.node, { latex: latexFromMathSourceEditorValue(value, self.displayMode) }, { selectAfterNode: !self.displayMode });
+      },
+      onConfirm: function() {
+        setSelectionAfterNodeView(self.editorView, self.getPos, self.node);
+      },
+      onDeleteBoundary: function(side) {
+        deleteNodeView(self.editorView, self.getPos, self.node, side === 'before' ? -1 : 1);
+      },
+      onExitBoundary: function(side) {
+        if (side === 'before') setSelectionBeforeNodeView(self.editorView, self.getPos, self.node);
+        else setSelectionAfterNodeView(self.editorView, self.getPos, self.node);
+      }
+    });
+    this.dom.appendChild(this.preview);
+    if (this.editPreview) this.dom.appendChild(this.editPreview);
+    bindNodeSourceEditorActivation(this.dom, this.sourceEditor);
     this.render();
   }
 
   MathNodeView.prototype.render = function() {
     this.dom.setAttribute('data-latex', this.node.attrs.latex || '');
-    renderMathInto(this.dom, this.node.attrs.latex || '', this.displayMode);
+    renderMathInto(this.preview, this.node.attrs.latex || '', this.displayMode);
+    if (this.editPreview) renderMathInto(this.editPreview, this.node.attrs.latex || '', false);
+    this.dom.classList.toggle('is-error', this.preview.classList.contains('is-error'));
+    setSourceEditorValue(this.sourceEditor, mathSourceEditorValue(this.node.attrs.latex || '', this.displayMode));
+    autoSizeNodeSourceEditor(this.sourceEditor);
   };
 
   MathNodeView.prototype.update = function(node) {
@@ -18814,7 +19652,11 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     return true;
   };
 
-  MathNodeView.prototype.ignoreMutation = function() { return true; };
+  MathNodeView.prototype.stopEvent = stopNodeSourceEditorEvent;
+  MathNodeView.prototype.selectNode = selectAtomSourceNode;
+  MathNodeView.prototype.deselectNode = deselectAtomSourceNode;
+  MathNodeView.prototype.ignoreMutation = function(mutation) { return ignoreNodeSourceEditorMutation(mutation) || true; };
+  MathNodeView.prototype.destroy = function() { destroyNodeSourceEditor(this.sourceEditor); };
 
   function renderMermaidFallback(target, source, message) {
     clearDom(target);
@@ -18833,25 +19675,53 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     if (scratch && scratch.parentNode) scratch.parentNode.removeChild(scratch);
   }
 
-  function MermaidNodeView(node) {
+  function MermaidNodeView(node, editorView, getPos) {
     this.node = node;
+    this.editorView = editorView;
+    this.getPos = getPos;
     this.renderToken = 0;
     this.dom = document.createElement('figure');
     this.dom.className = 'mermaid-diagram pme-mermaid-node';
     atomDomAttrs(this.dom, node.type.name);
     this.caption = document.createElement('figcaption');
     this.caption.textContent = 'Mermaid';
+    this.caption.setAttribute('contenteditable', 'false');
+    var self = this;
+    this.sourceEditor = createNodeSourceEditor({
+      multiline: true,
+      className: 'pme-node-source-editor--mermaid',
+      label: 'Mermaid source',
+      value: node.attrs.source || '',
+      onInput: function(value) {
+        updateNodeViewAttrs(self.editorView, self.getPos, self.node, { source: normalizeNewlines(value) });
+      },
+      onConfirm: function() {
+        setSelectionAfterNodeView(self.editorView, self.getPos, self.node);
+      },
+      onDeleteBoundary: function(side) {
+        deleteNodeView(self.editorView, self.getPos, self.node, side === 'before' ? -1 : 1);
+      },
+      onExitBoundary: function(side) {
+        if (side === 'before') setSelectionBeforeNodeView(self.editorView, self.getPos, self.node);
+        else setSelectionAfterNodeView(self.editorView, self.getPos, self.node);
+      }
+    });
     this.target = document.createElement('div');
     this.target.className = 'mermaid-render-target';
+    this.target.setAttribute('contenteditable', 'false');
     this.dom.appendChild(this.caption);
     this.dom.appendChild(this.target);
+    bindNodeSourceEditorActivation(this.dom, this.sourceEditor);
     this.render();
   }
 
   MermaidNodeView.prototype.render = function() {
-    var source = normalizeNewlines(this.node.attrs.source || '').replace(/\n+$/g, '');
+    var sourceText = normalizeNewlines(this.node.attrs.source || '');
+    var source = sourceText.replace(/\n+$/g, '');
     var renderToken = this.renderToken += 1;
     this.dom.setAttribute('data-source', source);
+    setSourceEditorValue(this.sourceEditor, sourceText);
+    autoSizeNodeSourceEditor(this.sourceEditor);
     this.target.className = 'mermaid-render-target';
     this.target.setAttribute('data-mermaid-source', source);
     this.target.textContent = 'Rendering...';
@@ -18901,7 +19771,11 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     return true;
   };
 
-  MermaidNodeView.prototype.ignoreMutation = function() { return true; };
+  MermaidNodeView.prototype.stopEvent = stopNodeSourceEditorEvent;
+  MermaidNodeView.prototype.selectNode = selectAtomSourceNode;
+  MermaidNodeView.prototype.deselectNode = deselectAtomSourceNode;
+  MermaidNodeView.prototype.ignoreMutation = function(mutation) { return ignoreNodeSourceEditorMutation(mutation) || true; };
+  MermaidNodeView.prototype.destroy = function() { destroyNodeSourceEditor(this.sourceEditor); };
 
   function headingEntries(doc) {
     var entries = [];
@@ -18920,15 +19794,18 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     clearDom(dom);
     var title = document.createElement('strong');
     title.textContent = '目次';
+    title.setAttribute('contenteditable', 'false');
     dom.appendChild(title);
     var entries = headingEntries(doc);
     if (!entries.length) {
       var empty = document.createElement('p');
       empty.textContent = '見出しがありません';
+      empty.setAttribute('contenteditable', 'false');
       dom.appendChild(empty);
       return;
     }
     var list = document.createElement('ol');
+    list.setAttribute('contenteditable', 'false');
     entries.forEach(function(entry) {
       var item = document.createElement('li');
       item.className = 'level-' + Math.max(1, Math.min(6, entry.level));
@@ -18949,29 +19826,62 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     dom.appendChild(list);
   }
 
-  function TocNodeView(node, editorView) {
+  function TocNodeView(node, editorView, getPos) {
     this.node = node;
     this.editorView = editorView;
+    this.getPos = getPos;
     this.dom = document.createElement('nav');
     this.dom.className = 'toc pme-toc-node';
     this.dom.setAttribute('data-toc-block', 'true');
     atomDomAttrs(this.dom, node.type.name);
+    var self = this;
+    this.sourceEditor = createNodeSourceEditor({
+      multiline: false,
+      className: 'pme-node-source-editor--toc',
+      label: 'TOC marker source',
+      value: '[toc]',
+      onConfirm: function(value) {
+        if (/^\s*\[toc\]\s*$/i.test(value)) {
+          setSelectionAfterNodeView(self.editorView, self.getPos, self.node);
+        }
+      },
+      onDeleteBoundary: function(side) {
+        deleteNodeView(self.editorView, self.getPos, self.node, side === 'before' ? -1 : 1);
+      },
+      onExitBoundary: function(side) {
+        if (side === 'before') setSelectionBeforeNodeView(self.editorView, self.getPos, self.node);
+        else setSelectionAfterNodeView(self.editorView, self.getPos, self.node);
+      },
+      onCommit: function(value) {
+        if (/^\s*\[toc\]\s*$/i.test(value)) {
+          setSourceEditorValue(self.sourceEditor, '[toc]');
+          return;
+        }
+        replaceNodeViewWithMarkdown(self.editorView, self.getPos, self.node, value);
+      }
+    });
     renderTocInto(this.dom, editorView.state.doc, editorView);
+    bindNodeSourceEditorActivation(this.dom, this.sourceEditor);
   }
 
   TocNodeView.prototype.update = function(node) {
     if (node.type !== this.node.type) return false;
     this.node = node;
+    setSourceEditorValue(this.sourceEditor, '[toc]');
     renderTocInto(this.dom, this.editorView.state.doc, this.editorView);
     return true;
   };
 
-  TocNodeView.prototype.ignoreMutation = function() { return true; };
+  TocNodeView.prototype.stopEvent = stopNodeSourceEditorEvent;
+  TocNodeView.prototype.selectNode = selectAtomSourceNode;
+  TocNodeView.prototype.deselectNode = deselectAtomSourceNode;
+  TocNodeView.prototype.ignoreMutation = function(mutation) { return ignoreNodeSourceEditorMutation(mutation) || true; };
+  TocNodeView.prototype.destroy = function() { destroyNodeSourceEditor(this.sourceEditor); };
 
   function refreshTocNodeViews(editorView) {
     var tocNodes = editorView.dom.querySelectorAll('.pme-toc-node');
     for (var index = 0; index < tocNodes.length; index += 1) {
-      renderTocInto(tocNodes[index], editorView.state.doc, editorView);
+      renderTocInto(tocNodes[index], editorView.state.doc, editorView, tocNodes[index].querySelector('.pme-node-source-editor--toc'));
     }
   }
 
@@ -18989,10 +19899,10 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
 
   function extendedNodeViews() {
     return {
-      math_inline: function(node) { return new MathNodeView(node); },
-      math_display: function(node) { return new MathNodeView(node); },
-      mermaid_block: function(node) { return new MermaidNodeView(node); },
-      toc_block: function(node, editorView) { return new TocNodeView(node, editorView); }
+      math_inline: function(node, editorView, getPos) { return new MathNodeView(node, editorView, getPos); },
+      math_display: function(node, editorView, getPos) { return new MathNodeView(node, editorView, getPos); },
+      mermaid_block: function(node, editorView, getPos) { return new MermaidNodeView(node, editorView, getPos); },
+      toc_block: function(node, editorView, getPos) { return new TocNodeView(node, editorView, getPos); }
     };
   }
 
@@ -19084,7 +19994,8 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       'Mod-z': historyModule.undo,
       'Mod-y': historyModule.redo,
       'Shift-Mod-z': historyModule.redo,
-      'Backspace': commands.chainCommands(joinParagraphAfterListIntoPreviousItem, inputRulesModule.undoInputRule, commands.baseKeymap.Backspace),
+      'Backspace': commands.chainCommands(deleteSelectedOrAdjacentAtomCommand(-1), joinParagraphAfterListIntoPreviousItem, inputRulesModule.undoInputRule, commands.baseKeymap.Backspace),
+      'Delete': commands.chainCommands(deleteSelectedOrAdjacentAtomCommand(1), commands.baseKeymap.Delete),
       'Shift-Enter': commands.chainCommands(commands.newlineInCode, insertHardBreakCommand),
       'ArrowLeft': enterStoredMarksAtInlineBoundaryCommand,
       'ArrowRight': clearStoredMarksAtInlineBoundaryCommand

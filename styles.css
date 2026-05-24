@@ -551,14 +551,141 @@ body.outline-collapsed .sidebar { display: none; }
 .rich-editor .pme-math-node,
 .rich-editor .pme-mermaid-node,
 .rich-editor .pme-toc-node {
+  cursor: text;
   user-select: none;
+}
+
+.rich-editor .pme-node-source-editor,
+.pme-node-source-editor.pme-node-source-popover {
+  box-sizing: border-box;
+  pointer-events: auto;
+  user-select: text;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid color-mix(in srgb, var(--border) 72%, var(--accent));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel-soft) 88%, var(--accent));
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.86rem;
+  line-height: 1.55;
+  padding: 0.42rem 0.55rem;
+  outline: none;
+}
+
+.rich-editor .pme-node-source-editor:focus,
+.pme-node-source-editor.pme-node-source-popover:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.rich-editor textarea.pme-node-source-editor,
+textarea.pme-node-source-editor.pme-node-source-popover {
+  display: block;
+  resize: vertical;
+  overflow: hidden;
+}
+
+.pme-node-source-editor.pme-node-source-popover {
+  box-shadow: var(--shadow);
+}
+
+.pme-node-source-editor.pme-node-source-popover.pme-node-source-editor--math-inline {
+  background: transparent;
+  border-color: transparent;
+  border-radius: 0;
+  box-shadow: none;
+  caret-color: var(--accent);
+  color: var(--text);
+  display: inline-flex;
+  gap: 0;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: 0.92rem;
+  line-height: 1.35;
+  min-width: 0;
+  padding: 0;
+}
+
+.pme-node-source-editor.pme-node-source-popover.pme-node-source-editor--math-inline:focus,
+.pme-node-source-editor.pme-node-source-popover.pme-node-source-editor--math-inline:focus-within {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.pme-node-source-editor--math-inline .pme-node-source-delimiter {
+  color: color-mix(in srgb, var(--muted) 76%, transparent);
+  font-family: var(--mono);
+  font-size: 0.86em;
+  opacity: 0.78;
+  pointer-events: none;
+  user-select: none;
+}
+
+.pme-node-source-editor--math-inline .pme-node-source-editor-input {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  caret-color: var(--accent);
+  color: var(--text);
+  font: inherit;
+  line-height: inherit;
+  margin: 0;
+  min-width: 1ch;
+  outline: none;
+  padding: 0;
+  width: auto;
+}
+
+textarea.pme-node-source-editor.pme-node-source-popover {
+  overflow: auto;
+}
+
+.pme-node-source-editor.pme-node-source-popover:not(.is-source-popover-open) {
+  display: none;
 }
 
 .rich-editor .math-inline.pme-math-node {
   display: inline-flex;
   align-items: baseline;
+  gap: 0;
   min-height: 1.25em;
+  position: relative;
   vertical-align: -0.08em;
+}
+
+.rich-editor .math-inline.pme-math-node .pme-node-source-editor {
+  width: auto;
+  max-width: min(52vw, 32rem);
+  vertical-align: baseline;
+}
+
+.rich-editor .math-inline.pme-math-node.is-editing-source .pme-node-rendered-preview {
+  display: none;
+}
+
+.rich-editor .math-inline.pme-math-node .pme-inline-math-edit-preview {
+  background: color-mix(in srgb, var(--panel-soft) 94%, var(--accent));
+  border: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
+  border-radius: 5px;
+  box-shadow: 0 6px 18px color-mix(in srgb, #000 24%, transparent);
+  display: none;
+  font-size: 0.86em;
+  left: 0;
+  line-height: 1.35;
+  padding: 0.08rem 0.24rem;
+  pointer-events: none;
+  position: absolute;
+  top: calc(100% + 0.65rem);
+  white-space: nowrap;
+  z-index: 4;
+}
+
+.rich-editor .math-inline.pme-math-node.is-editing-source .pme-inline-math-edit-preview {
+  display: inline-block;
 }
 
 .rich-editor .math-display.pme-math-node {
@@ -567,8 +694,23 @@ body.outline-collapsed .sidebar { display: none; }
   padding: 0.75rem 1rem;
 }
 
+.rich-editor .math-display.pme-math-node .pme-node-rendered-preview {
+  margin-bottom: 0.65rem;
+}
+
+.rich-editor .pme-mermaid-node .pme-node-source-editor {
+  margin: 0.55rem 0 0.75rem;
+}
+
+.rich-editor .pme-toc-node .pme-node-source-editor {
+  display: block;
+  width: min(100%, 12rem);
+  margin: 0.45rem 0 0.65rem;
+}
+
 .rich-editor .math-inline.pme-math-node.is-error,
-.rich-editor .math-display.pme-math-node.is-error {
+.rich-editor .math-display.pme-math-node.is-error,
+.rich-editor .pme-node-rendered-preview.is-error {
   color: var(--danger);
   font-family: var(--mono);
   white-space: pre-wrap;
@@ -584,6 +726,18 @@ body.outline-collapsed .sidebar { display: none; }
 
 .rich-editor .is-editing-source {
   cursor: default;
+  outline: none;
+}
+
+.rich-editor .pme-math-node.is-editing-source,
+.rich-editor .pme-mermaid-node.is-editing-source,
+.rich-editor .pme-toc-node.is-editing-source {
+  outline: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  outline-offset: 4px;
+}
+
+.rich-editor .math-inline.pme-math-node.is-editing-source {
+  min-width: 1ch;
   outline: none;
 }
 
@@ -690,6 +844,77 @@ body.outline-collapsed .sidebar { display: none; }
 
 .rich-editor .pme-inline-source-token--after {
   margin-left: 0.06rem;
+}
+
+.rich-editor .pme-link-href-editor {
+  align-items: baseline;
+  display: inline-flex;
+  gap: 0.02rem;
+  margin-left: 0.06rem;
+  vertical-align: baseline;
+  cursor: text;
+}
+
+.rich-editor .pme-link-href-editor .pme-inline-source-token {
+  pointer-events: none;
+}
+
+.rich-editor .pme-link-href-value {
+  color: color-mix(in srgb, var(--muted) 82%, transparent);
+  font-family: var(--mono);
+  font-size: 0.78em;
+  line-height: 1;
+  max-width: min(18rem, 42vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-decoration: none;
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+
+.pme-link-href-popover {
+  align-items: baseline;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--border));
+  border-radius: 0.4rem;
+  box-shadow: 0 10px 28px color-mix(in srgb, #000 24%, transparent);
+  display: none;
+  gap: 0.04rem;
+  padding: 0.16rem 0.24rem;
+}
+
+.pme-link-href-popover.is-open {
+  display: inline-flex;
+}
+
+.pme-link-href-popover .pme-inline-source-token {
+  color: color-mix(in srgb, var(--muted) 76%, transparent);
+  font-family: var(--mono);
+  font-size: 0.78em;
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+}
+
+.rich-editor .pme-link-href-input,
+.pme-link-href-popover .pme-link-href-input {
+  background: color-mix(in srgb, var(--panel-soft) 82%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--border));
+  border-radius: 0.25rem;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.78em;
+  line-height: 1.25;
+  max-width: min(24rem, 48vw);
+  min-width: 3.5rem;
+  padding: 0.02rem 0.22rem;
+}
+
+.rich-editor .pme-link-href-input:focus,
+.pme-link-href-popover .pme-link-href-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 24%, transparent);
+  outline: none;
 }
 
 .rich-inline-atom {
