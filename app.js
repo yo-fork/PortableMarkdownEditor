@@ -605,7 +605,7 @@ flowchart TD
   }
 
   function prosemirrorAtomSourceElement(target) {
-    return nodeElement(target)?.closest?.('.pme-math-node, .pme-mermaid-node, .pme-toc-node') || null;
+    return nodeElement(target)?.closest?.('.pme-image-node, .pme-math-node, .pme-mermaid-node, .pme-toc-node') || null;
   }
 
   function isProseMirrorAtomSourceTarget(target) {
@@ -681,6 +681,8 @@ flowchart TD
       mount: els.rich,
       markdown: state.markdown,
       onChange: handleProseMirrorRichChange,
+      resolveImageSrc: sanitizeImageUrl,
+      imageBlockReason,
     });
     return true;
   }
@@ -706,6 +708,9 @@ flowchart TD
         teardownProseMirrorRichEditor();
         state.proseMirrorRichFallbackReason = 'prosemirror-set-markdown-failed';
         return false;
+      }
+      if (typeof state.proseMirrorRich.refreshImages === 'function') {
+        state.proseMirrorRich.refreshImages();
       }
     } catch (error) {
       teardownProseMirrorRichEditor();
@@ -4141,7 +4146,14 @@ flowchart TD
   }
 
   async function onRichPaste(event) {
-    if (isProseMirrorRichEventContext(event)) return;
+    const imageFiles = imageFilesFromClipboard(event.clipboardData);
+    if (isProseMirrorRichEventContext(event)) {
+      if (imageFiles.length) {
+        event.preventDefault();
+        await insertImageFilesAsAssets(imageFiles, createImageInsertionContext(event), '貼り付け');
+      }
+      return;
+    }
     const control = eventTargetElement(event)?.closest?.('.rich-source-editor, .code-language-input');
     if (control) return;
 
@@ -4152,7 +4164,6 @@ flowchart TD
       return;
     }
 
-    const imageFiles = imageFilesFromClipboard(event.clipboardData);
     if (imageFiles.length) {
       event.preventDefault();
       await insertImageFilesAsAssets(imageFiles, createImageInsertionContext(event), '貼り付け');
@@ -7182,22 +7193,57 @@ flowchart TD
 
     try {
       const text = await readTextFile(file);
-      clearAssetUrls();
       state.markdown = normalizeNewlines(text);
       state.fileName = safeFileName(file.name || 'untitled.md');
+      state.fileHandle = options.fileHandle || null;
+      state.dirty = false;
+      els.source.value = state.markdown;
+
+      if (await attachPreviouslyGrantedDirectoryToOpenedMarkdown(file, options.fileHandle || null)) {
+        return;
+      }
+
+      clearAssetUrls();
       state.directoryHandle = null;
       state.directoryName = '';
       state.markdownRelativePath = '';
-      state.fileHandle = options.fileHandle || null;
-      clearPersistedDirectoryHandle();
-      state.dirty = false;
-      els.source.value = state.markdown;
+      await clearPersistedDirectoryHandle();
       renderAll('open');
       persistDraft();
       setStatus(`${state.fileName} を開きました`);
       await requestDirectoryForOpenedMarkdown(file, options.fileHandle || null);
     } catch (_) {
       setStatus('ファイルの読み込みに失敗しました');
+    }
+  }
+
+  async function attachPreviouslyGrantedDirectoryToOpenedMarkdown(file, fileHandle) {
+    if (!fileHandle?.isSameEntry) return false;
+    const directoryHandle = state.directoryHandle || await readPersistedDirectoryHandle();
+    if (!directoryHandle) return false;
+    try {
+      const permission = await queryDirectoryPermission(directoryHandle, 'readwrite');
+      if (permission !== 'granted') return false;
+      const entries = await collectLimitedDirectoryEntries(directoryHandle);
+      const chosen = await findOpenedMarkdownEntry(entries, file, fileHandle);
+      if (!chosen) return false;
+
+      state.markdownRelativePath = normalizeAssetPath(chosen.relativePath || chosen.file.name || state.fileName);
+      state.directoryHandle = directoryHandle;
+      state.pickerStartDirectoryHandle = directoryHandle;
+      state.directoryName = directoryHandle.name || '';
+      state.fileHandle = chosen.handle || fileHandle || null;
+      clearAssetUrls();
+      buildFolderAssetUrls(entries, dirnamePath(state.markdownRelativePath));
+      await persistDirectoryHandle(directoryHandle);
+      await rememberPickerStartDirectory(directoryHandle);
+      renderAll('open-file-existing-folder');
+      persistDraft();
+      setStatus(`${state.fileName} を開きました。既存のフォルダ許可を使用しています (${state.directoryName || 'selected folder'})。画像候補: ${state.assetUrls.size}${folderScanStatusSuffix()}`);
+      warnFolderScanLimitIfNeeded();
+      return true;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -12353,7 +12399,7 @@ flowchart TD
       const count = seen.get(base) || 0;
       seen.set(base, count + 1);
       const id = count ? `${base}-${count + 1}` : base;
-      items.push({ id, text, level, start: block.start });
+      items.push({ id, text, level, start: block.start, index: items.length });
       byOffset.set(block.start, id);
     }
     return { items, byOffset };
@@ -12392,8 +12438,7 @@ flowchart TD
       link.textContent = node.text;
       link.addEventListener('click', (event) => {
         event.preventDefault();
-        const target = document.getElementById(node.id);
-        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        navigateToOutlineHeading(node);
       });
       if (node.children.length) {
         const details = document.createElement('details');
@@ -12409,6 +12454,23 @@ flowchart TD
       list.appendChild(item);
     }
     return list;
+  }
+
+  function navigateToOutlineHeading(node) {
+    if (
+      state.mode === 'rich'
+      && isProseMirrorRichActive()
+      && typeof state.proseMirrorRich?.revealHeadingByIndex === 'function'
+      && state.proseMirrorRich.revealHeadingByIndex(node.index)
+    ) {
+      setStatus('アウトラインの見出しへ移動しました');
+      return;
+    }
+    const target = document.getElementById(node.id);
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setStatus('アウトラインの見出しへ移動しました');
+    }
   }
 
   function normalizeCodeLanguage(lang) {

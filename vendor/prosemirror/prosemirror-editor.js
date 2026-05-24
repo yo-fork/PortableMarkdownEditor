@@ -19017,7 +19017,8 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
 
   function isEditableAtomNode(node) {
     if (!node || !node.type) return false;
-    return node.type === schema.nodes.math_inline
+    return node.type === schema.nodes.image
+      || node.type === schema.nodes.math_inline
       || node.type === schema.nodes.math_display
       || node.type === schema.nodes.mermaid_block
       || node.type === schema.nodes.toc_block;
@@ -19312,6 +19313,18 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
           return;
         }
         if (options.multiline && event.key === 'ArrowDown' && cursorIsOnLastSourceLine(input)) {
+          event.preventDefault();
+          options.onExitBoundary('after', control.value, event);
+          hideSourceEditor(control, control.__pmeOwnerDom || null);
+          return;
+        }
+        if (!options.multiline && options.verticalBoundaryExit && event.key === 'ArrowUp') {
+          event.preventDefault();
+          options.onExitBoundary('before', control.value, event);
+          hideSourceEditor(control, control.__pmeOwnerDom || null);
+          return;
+        }
+        if (!options.multiline && options.verticalBoundaryExit && event.key === 'ArrowDown') {
           event.preventDefault();
           options.onExitBoundary('after', control.value, event);
           hideSourceEditor(control, control.__pmeOwnerDom || null);
@@ -19878,6 +19891,152 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
   TocNodeView.prototype.ignoreMutation = function(mutation) { return ignoreNodeSourceEditorMutation(mutation) || true; };
   TocNodeView.prototype.destroy = function() { destroyNodeSourceEditor(this.sourceEditor); };
 
+  function imageFallbackText(src, alt, options) {
+    var label = alt || '画像';
+    var reason = '';
+    if (options && typeof options.imageBlockReason === 'function') {
+      try { reason = options.imageBlockReason(src) || ''; }
+      catch (_) { reason = ''; }
+    }
+    return '画像未表示: ' + label + (reason ? ' (' + reason + ')' : '');
+  }
+
+  function resolveImageNodeSrc(src, options) {
+    if (options && typeof options.resolveImageSrc === 'function') {
+      try { return options.resolveImageSrc(src) || ''; }
+      catch (_) { return ''; }
+    }
+    return src || '';
+  }
+
+  function markdownImageLabel(value) {
+    return String(value || '').replace(/[\]\r\n]/g, ' ').trim();
+  }
+
+  function markdownImageTarget(value) {
+    var target = String(value || '').trim();
+    if (!target) return '';
+    if (/[\s()<>]/.test(target)) return '<' + target.replace(/[<>]/g, '') + '>';
+    return target;
+  }
+
+  function imageSourceEditorValue(node) {
+    var attrs = node && node.attrs || {};
+    var source = '![' + markdownImageLabel(attrs.alt || '') + '](' + markdownImageTarget(attrs.src || '');
+    if (attrs.title) source += ' "' + String(attrs.title).replace(/"/g, '\\"').replace(/[\r\n]/g, ' ') + '"';
+    return source + ')';
+  }
+
+  function parseImageSourceEditorValue(value) {
+    var source = String(value || '').trim();
+    var match = source.match(/^!\[([^\]\n]*)\]\((?:<([^>\n]+)>|([^\s)\n]+))(?:\s+"((?:\\"|[^"\n])*)")?\)$/);
+    if (!match) return null;
+    var src = match[2] || match[3] || '';
+    if (!src) return null;
+    return {
+      src: src,
+      alt: match[1] || null,
+      title: match[4] ? match[4].replace(/\\"/g, '"') : null
+    };
+  }
+
+  function updateImageNodeViewSource(nodeView, value) {
+    var attrs = parseImageSourceEditorValue(value);
+    if (!attrs) {
+      setSourceEditorValue(nodeView.sourceEditor, imageSourceEditorValue(nodeView.node));
+      return false;
+    }
+    var changed = updateNodeViewAttrs(nodeView.editorView, nodeView.getPos, nodeView.node, attrs);
+    if (!changed) {
+      setSourceEditorValue(nodeView.sourceEditor, imageSourceEditorValue(nodeView.node));
+    }
+    return true;
+  }
+
+  function ImageNodeView(node, editorView, getPos, options) {
+    this.node = node;
+    this.editorView = editorView;
+    this.getPos = getPos;
+    this.options = options || {};
+    this.dom = document.createElement('span');
+    this.dom.className = 'pme-image-node';
+    this.dom.setAttribute('data-pme-atom-node', 'image');
+    this.dom.setAttribute('contenteditable', 'false');
+    this.dom.draggable = true;
+    this.dom.__pmeImageNodeView = this;
+    var self = this;
+    this.sourceEditor = createNodeSourceEditor({
+      multiline: false,
+      verticalBoundaryExit: true,
+      className: 'pme-node-source-editor--image',
+      label: 'image Markdown source',
+      value: imageSourceEditorValue(node),
+      onConfirm: function(value) {
+        updateImageNodeViewSource(self, value);
+        setSelectionAfterNodeView(self.editorView, self.getPos, self.node);
+      },
+      onDeleteBoundary: function(side) {
+        deleteNodeView(self.editorView, self.getPos, self.node, side === 'before' ? -1 : 1);
+      },
+      onExitBoundary: function(side) {
+        if (side === 'before') setSelectionBeforeNodeView(self.editorView, self.getPos, self.node);
+        else setSelectionAfterNodeView(self.editorView, self.getPos, self.node);
+      },
+      onCommit: function(value) {
+        updateImageNodeViewSource(self, value);
+      }
+    });
+    this.render();
+    bindNodeSourceEditorActivation(this.dom, this.sourceEditor);
+  }
+
+  ImageNodeView.prototype.render = function() {
+    var src = this.node.attrs.src || '';
+    var alt = this.node.attrs.alt || '';
+    var title = this.node.attrs.title || '';
+    var resolved = resolveImageNodeSrc(src, this.options);
+    this.dom.textContent = '';
+    this.dom.setAttribute('data-markdown-src', src);
+    if (resolved) {
+      var image = document.createElement('img');
+      image.src = resolved;
+      image.alt = alt;
+      if (title) image.title = title;
+      image.setAttribute('data-markdown-src', src);
+      this.dom.classList.remove('is-blocked-image');
+      this.dom.appendChild(image);
+      return;
+    }
+    var fallback = document.createElement('span');
+    fallback.className = 'blocked-image';
+    fallback.setAttribute('data-markdown-src', src);
+    fallback.setAttribute('data-markdown-alt', alt || '画像');
+    fallback.textContent = imageFallbackText(src, alt, this.options);
+    this.dom.classList.add('is-blocked-image');
+    this.dom.appendChild(fallback);
+  };
+
+  ImageNodeView.prototype.update = function(node) {
+    if (node.type !== this.node.type) return false;
+    this.node = node;
+    setSourceEditorValue(this.sourceEditor, imageSourceEditorValue(node));
+    this.render();
+    return true;
+  };
+
+  ImageNodeView.prototype.stopEvent = stopNodeSourceEditorEvent;
+  ImageNodeView.prototype.selectNode = selectAtomSourceNode;
+  ImageNodeView.prototype.deselectNode = deselectAtomSourceNode;
+  ImageNodeView.prototype.ignoreMutation = function(mutation) { return ignoreNodeSourceEditorMutation(mutation) || true; };
+  ImageNodeView.prototype.destroy = function() { destroyNodeSourceEditor(this.sourceEditor); };
+
+  function refreshImageNodeViews(editorView) {
+    var imageNodes = editorView.dom.querySelectorAll('.pme-image-node');
+    for (var index = 0; index < imageNodes.length; index += 1) {
+      if (imageNodes[index].__pmeImageNodeView) imageNodes[index].__pmeImageNodeView.render();
+    }
+  }
+
   function refreshTocNodeViews(editorView) {
     var tocNodes = editorView.dom.querySelectorAll('.pme-toc-node');
     for (var index = 0; index < tocNodes.length; index += 1) {
@@ -19897,8 +20056,9 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     });
   }
 
-  function extendedNodeViews() {
+  function extendedNodeViews(options) {
     return {
+      image: function(node, editorView, getPos) { return new ImageNodeView(node, editorView, getPos, options); },
       math_inline: function(node, editorView, getPos) { return new MathNodeView(node, editorView, getPos); },
       math_display: function(node, editorView, getPos) { return new MathNodeView(node, editorView, getPos); },
       mermaid_block: function(node, editorView, getPos) { return new MermaidNodeView(node, editorView, getPos); },
@@ -20036,6 +20196,41 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
   function textSelectionMarkdown(viewInstance) {
     var selection = viewInstance.state.selection;
     return viewInstance.state.doc.textBetween(selection.from, selection.to, '\n');
+  }
+
+  function headingPositionByIndex(doc, index) {
+    if (!Number.isInteger(index) || index < 0) return null;
+    var current = 0;
+    var found = null;
+    doc.descendants(function(node, pos) {
+      if (found != null) return false;
+      if (node.type !== schema.nodes.heading) return true;
+      if (current === index) {
+        found = pos;
+        return false;
+      }
+      current += 1;
+      return true;
+    });
+    return found;
+  }
+
+  function revealHeadingByIndex(editorView, index) {
+    var pos = headingPositionByIndex(editorView.state.doc, index);
+    if (pos == null) return false;
+    var node = editorView.state.doc.nodeAt(pos);
+    if (!node || node.type !== schema.nodes.heading) return false;
+    var selectionPos = Math.min(pos + 1, pos + node.nodeSize - 1);
+    var tr = editorView.state.tr.setSelection(state.TextSelection.create(editorView.state.doc, selectionPos)).scrollIntoView();
+    editorView.dispatch(tr);
+    var headingDom = editorView.nodeDOM(pos);
+    if (headingDom && typeof headingDom.scrollIntoView === 'function') {
+      window.requestAnimationFrame(function() {
+        headingDom.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    }
+    editorView.focus();
+    return true;
   }
 
   function sliceFromMarkdown(markdownText, inline) {
@@ -20178,7 +20373,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       handleClick: setSelectionFromSingleClick,
       handlePaste: handleMarkdownPlainTextPaste,
       clipboardTextParser: markdownClipboardTextParser,
-      nodeViews: extendedNodeViews(),
+      nodeViews: extendedNodeViews(options || {}),
       attributes: {
         'aria-label': 'リッチMarkdown編集',
         class: 'pme-prosemirror-editor'
@@ -20196,6 +20391,11 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       unsupportedReason: unsupportedMarkdownReason,
       markdown: function() { return serializeMarkdown(editorView.state.doc); },
       selectedText: function() { return textSelectionMarkdown(editorView); },
+      refreshImages: function() {
+        if (destroyed) return false;
+        refreshImageNodeViews(editorView);
+        return true;
+      },
       setMarkdown: function(markdownText) {
         if (destroyed) return false;
         if (unsupportedMarkdownReason(markdownText)) return false;
@@ -20209,6 +20409,10 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       },
       focus: function() { if (!destroyed) editorView.focus(); },
       hasFocus: function() { return !destroyed && editorView.hasFocus(); },
+      revealHeadingByIndex: function(index) {
+        if (destroyed) return false;
+        return revealHeadingByIndex(editorView, index);
+      },
       applyFormat: function(format) {
         switch (format) {
           case 'bold': return run(commands.toggleMark(schema.marks.strong));
