@@ -17,6 +17,7 @@ const requiredFiles = [
   'vendor/codemirror6/import-map.json',
   'vendor/codemirror6/package-lock.json',
   'vendor/codemirror6/source-editor.js',
+  'vendor/codemirror6/source-editor.bundle.js',
   'vendor/prosemirror/prosemirror-editor.js',
   'vendor/prosemirror/package-lock.json',
   'vendor/prosemirror/licenses',
@@ -37,8 +38,8 @@ assert.match(index, /vendor\/highlight\/styles\/github-dark\.min\.css/);
 assert.match(index, /vendor\/mermaid\/mermaid\.min\.js/);
 assert.match(index, /vendor\/katex\/katex\.min\.js/);
 assert.match(index, /vendor\/katex\/katex\.min\.css/);
-assert.match(index, /vendor\/codemirror6\/node_modules\/@codemirror\/state\/dist\/index\.js/);
-assert.match(index, /vendor\/codemirror6\/node_modules\/@codemirror\/view\/dist\/index\.js/);
+assert.match(index, /vendor\/codemirror6\/source-editor\.bundle\.js/);
+assert.doesNotMatch(index, /type="importmap"/);
 assert.match(index, /vendor\/prosemirror\/prosemirror-editor\.js/);
 assert.doesNotMatch(index, /https?:\/\/.*(?:markdown-it|highlight|mermaid|katex|jsdelivr|unpkg|cdnjs)/i);
 

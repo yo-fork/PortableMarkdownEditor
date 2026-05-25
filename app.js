@@ -159,6 +159,7 @@ flowchart TD
     setStatus('準備完了');
     restorePersistedSettingsDirectoryHandle();
     restorePersistedDirectoryHandle();
+    restorePickerStartDirectoryHandle();
   }
 
   function cacheElements() {
@@ -346,12 +347,21 @@ flowchart TD
     const db = await openFsaDatabase();
     try {
       const handle = await idbRequest(db.transaction(FSA_STORE_NAME, 'readonly').objectStore(FSA_STORE_NAME).get(FSA_PICKER_START_HANDLE_KEY));
-      state.pickerStartDirectoryHandle = handle || null;
+      if (!state.pickerStartDirectoryHandle) state.pickerStartDirectoryHandle = handle || null;
       return state.pickerStartDirectoryHandle;
     } catch (_) {
       return null;
     } finally {
       db.close();
+    }
+  }
+
+  async function restorePickerStartDirectoryHandle() {
+    try {
+      await readPickerStartDirectoryHandle();
+      return Boolean(state.pickerStartDirectoryHandle);
+    } catch (_) {
+      return false;
     }
   }
 
@@ -457,33 +467,39 @@ flowchart TD
   function initializeCodeMirrorSourceEditor() {
     if (!els.source || state.codeMirrorSource || state.codeMirrorSourceLoading) return;
     state.codeMirrorSourceLoading = true;
-    import('./vendor/codemirror6/source-editor.js')
-      .then((module) => {
-        const createEditor = module?.createPortableMarkdownSourceEditor;
-        if (typeof createEditor !== 'function') throw new Error('CodeMirror source editor factory is missing');
-        state.codeMirrorSource = createEditor({
-          textarea: els.source,
-          onChange: handleCodeMirrorSourceChange,
-          onScroll: syncPreviewScroll,
-          onSelectionChange: syncPreviewScroll,
-          onPaste: onMarkdownPaste,
-          onDragOver: onEditorDragOver,
-          onDragLeave: onEditorDragLeave,
-          onDrop: onEditorDrop,
-        });
-        state.codeMirrorSourceReady = true;
-        state.codeMirrorSourceLoading = false;
-        els.source.closest?.('.source-pane')?.classList.add('is-codemirror-ready');
-        syncCodeMirrorSourceFromTextarea('codemirror-init');
-        refreshCodeMirrorSourceEditorSoon();
-      })
-      .catch(() => {
-        state.codeMirrorSource = null;
-        state.codeMirrorSourceReady = false;
-        state.codeMirrorSourceLoading = false;
-        els.source.closest?.('.source-pane')?.classList.remove('is-codemirror-ready');
-        setStatus('CodeMirrorソースエディタを読み込めませんでした。textareaで続行します');
+    const createEditor = window.PMECodeMirrorSourceEditor?.createPortableMarkdownSourceEditor;
+    if (typeof createEditor !== 'function') {
+      state.codeMirrorSource = null;
+      state.codeMirrorSourceReady = false;
+      state.codeMirrorSourceLoading = false;
+      els.source.closest?.('.source-pane')?.classList.remove('is-codemirror-ready');
+      setStatus('CodeMirrorソースエディタを読み込めませんでした。textareaで続行します');
+      return;
+    }
+
+    try {
+      state.codeMirrorSource = createEditor({
+        textarea: els.source,
+        onChange: handleCodeMirrorSourceChange,
+        onScroll: syncPreviewScroll,
+        onSelectionChange: syncPreviewScroll,
+        onPaste: onMarkdownPaste,
+        onDragOver: onEditorDragOver,
+        onDragLeave: onEditorDragLeave,
+        onDrop: onEditorDrop,
       });
+      state.codeMirrorSourceReady = true;
+      els.source.closest?.('.source-pane')?.classList.add('is-codemirror-ready');
+      syncCodeMirrorSourceFromTextarea('codemirror-init');
+      refreshCodeMirrorSourceEditorSoon();
+    } catch (_error) {
+      state.codeMirrorSource = null;
+      state.codeMirrorSourceReady = false;
+      els.source.closest?.('.source-pane')?.classList.remove('is-codemirror-ready');
+      setStatus('CodeMirrorソースエディタを読み込めませんでした。textareaで続行します');
+    } finally {
+      state.codeMirrorSourceLoading = false;
+    }
   }
 
   function isCodeMirrorSourceReady() {
@@ -7089,6 +7105,7 @@ flowchart TD
     clearPersistedDirectoryHandle();
     state.dirty = false;
     els.source.value = state.markdown;
+    syncCodeMirrorSourceFromTextarea('new-document');
     renderAll('new');
     persistDraft();
     setStatus('新規文書を作成しました');
@@ -7096,8 +7113,9 @@ flowchart TD
 
   async function openMarkdownFile() {
     if (window.showOpenFilePicker) {
+      let fileHandle = null;
       try {
-        const [fileHandle] = await showOpenFilePickerFromRecentDirectory({
+        [fileHandle] = await showOpenFilePickerFromRecentDirectory({
           id: 'pme-open-md',
           multiple: false,
           types: [{
@@ -7108,25 +7126,33 @@ flowchart TD
             },
           }],
         });
-        if (!fileHandle) return;
-        const file = await fileHandle.getFile();
-        await openSingleMarkdownFile(file, { fileHandle });
-        return;
       } catch (error) {
-        if (error?.name !== 'AbortError') setStatus('ファイルの読み込みに失敗しました');
+        handlePickerError(error, 'ファイル選択を開始できませんでした');
         return;
       }
+
+      if (!fileHandle) return;
+      try {
+        const file = await fileHandle.getFile();
+        await openSingleMarkdownFile(file, { fileHandle });
+      } catch (error) {
+        warnSafeError('open markdown file read failed', error);
+        setStatus('ファイルの読み込みに失敗しました');
+        return;
+      }
+      return;
     }
 
     els.fileInput.click();
   }
 
   async function showOpenFilePickerFromRecentDirectory(options = {}) {
-    const pickerOptions = await pickerOptionsWithStartDirectory(options, { preferMarkdownDirectory: true });
+    const pickerOptions = pickerOptionsWithCurrentStartDirectory(options, { preferMarkdownDirectory: true });
     try {
       return await window.showOpenFilePicker(pickerOptions);
     } catch (error) {
       if (pickerOptions.startIn && isPickerStartInError(error)) {
+        warnSafeError('open picker startIn failed', error);
         const { startIn, ...fallbackOptions } = pickerOptions;
         return window.showOpenFilePicker(fallbackOptions);
       }
@@ -7135,18 +7161,20 @@ flowchart TD
   }
 
   async function showDirectoryPickerFromRecentDirectory(options = {}, picker = {}) {
-    const pickerOptions = await pickerOptionsWithStartDirectory(options, { preferMarkdownDirectory: true, ...picker });
+    const pickerOptions = pickerOptionsWithCurrentStartDirectory(options, { preferMarkdownDirectory: true, ...picker });
     try {
       return await window.showDirectoryPicker(pickerOptions);
     } catch (error) {
       if (pickerOptions.startIn && isPickerStartInError(error)) {
+        warnSafeError('directory picker startIn failed', error);
         if (picker.startInHandle) {
-          const recentOptions = await pickerOptionsWithStartDirectory(options, { preferMarkdownDirectory: true });
+          const recentOptions = pickerOptionsWithCurrentStartDirectory(options, { preferMarkdownDirectory: true });
           if (recentOptions.startIn && recentOptions.startIn !== pickerOptions.startIn) {
             try {
               return await window.showDirectoryPicker(recentOptions);
             } catch (recentError) {
               if (!isPickerStartInError(recentError)) throw recentError;
+              warnSafeError('directory picker recent startIn failed', recentError);
             }
           }
         }
@@ -7157,25 +7185,40 @@ flowchart TD
     }
   }
 
-  async function pickerOptionsWithStartDirectory(options = {}, picker = {}) {
+  function pickerOptionsWithCurrentStartDirectory(options = {}, picker = {}) {
     const pickerOptions = { ...options };
-    const startIn = picker.startInHandle || await preferredPickerStartDirectory(Boolean(picker.preferMarkdownDirectory));
+    const startIn = picker.startInHandle || currentPickerStartDirectory(Boolean(picker.preferMarkdownDirectory));
     if (startIn) pickerOptions.startIn = startIn;
     return pickerOptions;
   }
 
-  async function preferredPickerStartDirectory(preferMarkdownDirectory) {
-    if (preferMarkdownDirectory && state.directoryHandle && state.markdownRelativePath) {
-      try {
-        return await markdownDirectoryHandle();
-      } catch (_) {}
-    }
+  function currentPickerStartDirectory(preferMarkdownDirectory) {
+    if (preferMarkdownDirectory && state.directoryHandle) return state.directoryHandle;
     if (state.directoryHandle) return state.directoryHandle;
-    return readPickerStartDirectoryHandle();
+    return state.pickerStartDirectoryHandle || null;
   }
 
   function isPickerStartInError(error) {
     return error instanceof TypeError || error?.name === 'TypeError' || /startIn/i.test(String(error?.message || ''));
+  }
+
+  function isPickerAbortError(error) {
+    return error?.name === 'AbortError';
+  }
+
+  function handlePickerError(error, message) {
+    if (isPickerAbortError(error)) return false;
+    warnSafeError(message, error);
+    setStatus(message);
+    return true;
+  }
+
+  function warnSafeError(context, error) {
+    if (!window.console?.warn) return;
+    const name = String(error?.name || 'Error').slice(0, 80);
+    const message = String(error?.message || '').replace(/[A-Za-z]:\\[^\s"'<>]+/g, '[path]').slice(0, 240);
+    const detail = message ? `${name}: ${message}` : name;
+    window.console.warn(`[PME] ${context}: ${detail}`);
   }
 
   async function onFileChosen(event) {
@@ -7193,33 +7236,36 @@ flowchart TD
 
     try {
       const text = await readTextFile(file);
+      const previousDirectoryHandle = state.directoryHandle;
       state.markdown = normalizeNewlines(text);
       state.fileName = safeFileName(file.name || 'untitled.md');
       state.fileHandle = options.fileHandle || null;
       state.dirty = false;
-      els.source.value = state.markdown;
-
-      if (await attachPreviouslyGrantedDirectoryToOpenedMarkdown(file, options.fileHandle || null)) {
-        return;
-      }
-
       clearAssetUrls();
       state.directoryHandle = null;
       state.directoryName = '';
       state.markdownRelativePath = '';
-      await clearPersistedDirectoryHandle();
+      els.source.value = state.markdown;
+      syncCodeMirrorSourceFromTextarea('open-file');
       renderAll('open');
       persistDraft();
       setStatus(`${state.fileName} を開きました`);
+
+      if (await attachPreviouslyGrantedDirectoryToOpenedMarkdown(file, options.fileHandle || null, previousDirectoryHandle)) {
+        return;
+      }
+
+      await clearPersistedDirectoryHandle();
       await requestDirectoryForOpenedMarkdown(file, options.fileHandle || null);
-    } catch (_) {
+    } catch (error) {
+      warnSafeError('open single markdown failed', error);
       setStatus('ファイルの読み込みに失敗しました');
     }
   }
 
-  async function attachPreviouslyGrantedDirectoryToOpenedMarkdown(file, fileHandle) {
+  async function attachPreviouslyGrantedDirectoryToOpenedMarkdown(file, fileHandle, directoryHandleOverride = null) {
     if (!fileHandle?.isSameEntry) return false;
-    const directoryHandle = state.directoryHandle || await readPersistedDirectoryHandle();
+    const directoryHandle = directoryHandleOverride || state.directoryHandle || await readPersistedDirectoryHandle();
     if (!directoryHandle) return false;
     try {
       const permission = await queryDirectoryPermission(directoryHandle, 'readwrite');
@@ -7263,14 +7309,22 @@ flowchart TD
       return false;
     }
 
+    let directoryHandle = null;
     try {
-      const directoryHandle = await showDirectoryPickerFromRecentDirectory(
+      directoryHandle = await showDirectoryPickerFromRecentDirectory(
         { id: 'pme-md-folder', mode: 'readwrite' },
         { startInHandle: fileHandle || null }
       );
+    } catch (error) {
+      handlePickerError(error, 'フォルダ選択を開始できませんでした');
+      return false;
+    }
+
+    try {
       return await attachDirectoryToOpenedMarkdown(file, fileHandle, directoryHandle);
     } catch (error) {
-      if (error?.name !== 'AbortError') setStatus('フォルダの読み込みに失敗しました');
+      warnSafeError('opened markdown folder read failed', error);
+      setStatus('フォルダの読み込みに失敗しました');
       return false;
     }
   }
@@ -7322,13 +7376,21 @@ flowchart TD
 
   async function openFolder() {
     if (window.showDirectoryPicker) {
+      let directoryHandle = null;
       try {
-        const directoryHandle = await showDirectoryPickerFromRecentDirectory({ id: 'pme-open-folder', mode: 'readwrite' });
+        directoryHandle = await showDirectoryPickerFromRecentDirectory({ id: 'pme-open-folder', mode: 'readwrite' });
+      } catch (error) {
+        handlePickerError(error, 'フォルダ選択を開始できませんでした');
+        return;
+      }
+
+      try {
         const entries = await collectLimitedDirectoryEntries(directoryHandle);
         await openFolderEntries(entries, directoryHandle.name || 'selected folder', directoryHandle);
         return;
       } catch (error) {
-        if (error?.name !== 'AbortError') setStatus('フォルダの読み込みに失敗しました');
+        warnSafeError('open folder read failed', error);
+        setStatus('フォルダの読み込みに失敗しました');
         return;
       }
     }
@@ -7344,13 +7406,21 @@ flowchart TD
     }
 
     if (window.showDirectoryPicker) {
+      let directoryHandle = null;
       try {
-        const directoryHandle = await showDirectoryPickerFromRecentDirectory({ id: 'pme-grant-folder', mode: 'readwrite' });
+        directoryHandle = await showDirectoryPickerFromRecentDirectory({ id: 'pme-grant-folder', mode: 'readwrite' });
+      } catch (error) {
+        handlePickerError(error, 'フォルダ選択を開始できませんでした');
+        return;
+      }
+
+      try {
         const entries = await collectLimitedDirectoryEntries(directoryHandle);
         await grantFolderEntriesForCurrentDocument(entries, directoryHandle.name || 'selected folder', directoryHandle);
         return;
       } catch (error) {
-        if (error?.name !== 'AbortError') setStatus('フォルダ許可に失敗しました');
+        warnSafeError('grant folder read failed', error);
+        setStatus('フォルダ許可に失敗しました');
         return;
       }
     }
@@ -7598,6 +7668,7 @@ flowchart TD
       }
       state.dirty = false;
       els.source.value = state.markdown;
+      syncCodeMirrorSourceFromTextarea('open-folder');
       renderAll('open-folder');
       persistDraft();
       const count = state.assetUrls.size;
@@ -9016,6 +9087,7 @@ flowchart TD
     state.lastAutoSaved = null;
     state.richUndoStack = [];
     els.source.value = state.markdown;
+    syncCodeMirrorSourceFromTextarea('local-data-reset');
     renderAll('local-data-reset');
   }
 
@@ -9166,11 +9238,18 @@ flowchart TD
       setStatus('設定フォルダの許可には File System Access API 対応ブラウザが必要です');
       return null;
     }
+    let directoryHandle = null;
     try {
-      const directoryHandle = await showDirectoryPickerFromRecentDirectory(
+      directoryHandle = await showDirectoryPickerFromRecentDirectory(
         { id: 'pme-settings-folder', mode: 'readwrite' },
         { startInHandle: state.settingsDirectoryHandle || null },
       );
+    } catch (error) {
+      handlePickerError(error, '設定フォルダ選択を開始できませんでした');
+      return null;
+    }
+
+    try {
       if (!await ensureDirectoryPermission(directoryHandle, 'readwrite')) {
         setStatus('設定フォルダの書き込み権限が許可されませんでした');
         return null;
@@ -9180,7 +9259,8 @@ flowchart TD
       await persistSettingsDirectoryHandle(directoryHandle);
       return directoryHandle;
     } catch (error) {
-      if (error?.name !== 'AbortError') setStatus('設定フォルダを許可できませんでした');
+      warnSafeError('settings folder grant failed', error);
+      setStatus('設定フォルダを許可できませんでした');
       return null;
     }
   }

@@ -167,6 +167,7 @@
         "vendor/codemirror6/node_modules/",
         "vendor/codemirror6/import-map.json",
         "vendor/codemirror6/source-editor.js",
+        "vendor/codemirror6/source-editor.bundle.js",
         "vendor/codemirror6/package.json",
         "vendor/codemirror6/package-lock.json"
       ],
@@ -1063,6 +1064,11 @@
       "sha256": "89f03e67bb4512ec464fd1d8c5b234be28ef23d13735581f31ae1ebd37e04f3f"
     },
     {
+      "path": "vendor/codemirror6/source-editor.bundle.js",
+      "bytes": 1424823,
+      "sha256": "42a6e0e51e76288b1f94acd56b7920c951c123d31d8477b819bc5a0308452cef"
+    },
+    {
       "path": "vendor/highlight/LICENSE",
       "bytes": 1514,
       "sha256": "6c081431591d9df696c82dc598fe1423765b8a299b200ed00b281afd0f64c490"
@@ -1609,8 +1615,8 @@
     },
     {
       "path": "vendor/prosemirror/prosemirror-editor.js",
-      "bytes": 781727,
-      "sha256": "002d8be786e63272c4697c0891aafce9a0ed9bf6739d092a0d7c378a3dacb61e"
+      "bytes": 791606,
+      "sha256": "3551aef13072732f0c96e615c049c3368ff632b523b8556bad33b2042313f2da"
     }
   ]
 }

@@ -10,8 +10,9 @@ assert.match(index, /Content-Security-Policy/);
 assert.match(index, /default-src 'none'/);
 assert.match(index, /connect-src 'none'/);
 assert.match(index, /script-src 'self'/);
-assert.match(index, /type="importmap"/, 'CodeMirror import map should be local and explicit');
-assert.match(index, /vendor\/codemirror6\/node_modules\/@codemirror\/state\/dist\/index\.js/, 'CodeMirror should resolve from vendored local modules');
+assert.doesNotMatch(index, /script-src[^"]*sha256-/, 'CodeMirror bundle should not require an import-map CSP hash');
+assert.doesNotMatch(index, /type="importmap"/, 'CodeMirror should load through the local classic bundle');
+assert.match(index, /vendor\/codemirror6\/source-editor\.bundle\.js/, 'CodeMirror should load from a vendored local bundle');
 assert.match(index, /style-src 'self' 'unsafe-inline'/);
 assert.doesNotMatch(index, /frame-ancestors/, 'frame-ancestors is ignored in meta CSP and should not be present');
 assert.match(index, /img-src 'self' data: blob:/);
@@ -54,6 +55,19 @@ assert.match(app, /function\s+requestDirectoryForOpenedMarkdown/, 'opened Markdo
 assert.match(app, /async function\s+grantFolderForCurrentDocument/, 'folder permission should be attachable to the current document without reloading contents');
 assert.match(app, /async function\s+grantFolderEntriesForCurrentDocument/, 'folder permission attachment should reuse current Markdown state');
 assert.match(app, /captureCurrentMarkdownFromEditor\(\)/, 'granting folder access should capture current edits before attaching folder access');
+assert.doesNotMatch(app, /await\s+pickerOptionsWithStartDirectory/, 'file pickers must not await startIn restoration before opening native pickers');
+assert.match(app, /function\s+pickerOptionsWithCurrentStartDirectory/, 'native picker startIn should be built from synchronous in-memory state');
+assert.match(app, /async function\s+restorePickerStartDirectoryHandle/, 'previous picker start directories should be restored outside click-time picker startup');
+assert.match(app, /function\s+handlePickerError[\s\S]+AbortError/, 'picker cancellation should remain separate from picker startup failures');
+assert.match(app, /ファイル選択を開始できませんでした/, 'file picker startup failures should have a distinct status');
+assert.match(app, /フォルダ選択を開始できませんでした/, 'folder picker startup failures should have a distinct status');
+assert.match(app, /window\.console\.warn\(\`\[PME\]/, 'picker and local file failures should log safe name/message diagnostics');
+{
+  const pickerStartHelper = app.match(/function\s+pickerOptionsWithCurrentStartDirectory[\s\S]+?\n  \}/)?.[0] || '';
+  assert.doesNotMatch(pickerStartHelper, /await|readPickerStartDirectoryHandle|indexedDB|markdownDirectoryHandle/, 'click-time picker startIn helper must stay synchronous');
+  const currentDirectoryHelper = app.match(/function\s+currentPickerStartDirectory[\s\S]+?\n  \}/)?.[0] || '';
+  assert.doesNotMatch(currentDirectoryHelper, /await|readPickerStartDirectoryHandle|indexedDB|markdownDirectoryHandle/, 'click-time picker directory selection must not restore handles asynchronously');
+}
 assert.match(app, /function\s+initializeCodeMirrorSourceEditor/, 'source editor should initialize the local CodeMirror wrapper');
 assert.match(app, /function\s+sourceMarkdownValue/, 'source reads should go through the CodeMirror-aware source value helper');
 assert.match(app, /function\s+replaceSourceRange/, 'source writes should go through the CodeMirror-aware range replacement helper');

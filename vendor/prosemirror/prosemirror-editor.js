@@ -17969,6 +17969,250 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     };
   }
 
+  function activeTableRect(editorState) {
+    if (!editorState || !tableModule.isInTable(editorState)) return null;
+    try { return tableModule.selectedRect(editorState); }
+    catch (_error) { return null; }
+  }
+
+  function normalizeMarkdownTableTransaction(transaction) {
+    var table = schema.nodes.table;
+    var tableHeader = schema.nodes.table_header;
+    var tableCell = schema.nodes.table_cell;
+    if (!transaction || !transaction.doc || !table || !tableHeader || !tableCell) return transaction;
+    var changes = [];
+    transaction.doc.descendants(function(node, pos) {
+      if (node.type !== table) return true;
+      node.forEach(function(row, rowOffset, rowIndex) {
+        row.forEach(function(cell, cellOffset) {
+          var targetType = rowIndex === 0 ? tableHeader : tableCell;
+          if (cell.type !== targetType) {
+            changes.push({
+              pos: pos + 1 + rowOffset + 1 + cellOffset,
+              type: targetType,
+              attrs: cell.attrs
+            });
+          }
+        });
+      });
+      return false;
+    });
+    changes.forEach(function(change) {
+      var node = transaction.doc.nodeAt(change.pos);
+      if (node && node.type !== change.type) transaction.setNodeMarkup(change.pos, change.type, change.attrs);
+    });
+    return transaction;
+  }
+
+  function tableCommandWithMarkdownNormalization(command) {
+    return function(editorState, dispatch, editorView) {
+      if (!activeTableRect(editorState)) return false;
+      if (!dispatch) return command(editorState, null, editorView);
+      return command(editorState, function(transaction) {
+        normalizeMarkdownTableTransaction(transaction);
+        dispatch(transaction.scrollIntoView());
+      }, editorView);
+    };
+  }
+
+  function deleteSelectedTableRowsCommand(editorState, dispatch, editorView) {
+    var rect = activeTableRect(editorState);
+    if (!rect) return false;
+    if (rect.bottom - rect.top >= rect.map.height) {
+      return tableModule.deleteTable(editorState, dispatch, editorView);
+    }
+    return tableCommandWithMarkdownNormalization(tableModule.deleteRow)(editorState, dispatch, editorView);
+  }
+
+  function deleteSelectedTableColumnsCommand(editorState, dispatch, editorView) {
+    var rect = activeTableRect(editorState);
+    if (!rect) return false;
+    if (rect.right - rect.left >= rect.map.width) {
+      return tableModule.deleteTable(editorState, dispatch, editorView);
+    }
+    return tableCommandWithMarkdownNormalization(tableModule.deleteColumn)(editorState, dispatch, editorView);
+  }
+
+  function setSelectedTableColumnsAlignCommand(align) {
+    return function(editorState, dispatch) {
+      var rect = activeTableRect(editorState);
+      if (!rect) return false;
+      if (dispatch) {
+        var transaction = editorState.tr;
+        var seen = {};
+        for (var column = rect.left; column < rect.right; column += 1) {
+          for (var row = 0; row < rect.map.height; row += 1) {
+            var cellOffset = rect.map.map[row * rect.map.width + column];
+            if (seen[cellOffset]) continue;
+            seen[cellOffset] = true;
+            var cell = rect.table.nodeAt(cellOffset);
+            if (!cell) continue;
+            transaction.setNodeMarkup(
+              rect.tableStart + cellOffset,
+              null,
+              extendObject(cell.attrs, { align: align || null })
+            );
+          }
+        }
+        normalizeMarkdownTableTransaction(transaction);
+        dispatch(transaction.scrollIntoView());
+      }
+      return true;
+    };
+  }
+
+  function tableToolbarCommand(action) {
+    switch (action) {
+      case 'add-row-before': return tableCommandWithMarkdownNormalization(tableModule.addRowBefore);
+      case 'add-row-after': return tableCommandWithMarkdownNormalization(tableModule.addRowAfter);
+      case 'add-column-before': return tableCommandWithMarkdownNormalization(tableModule.addColumnBefore);
+      case 'add-column-after': return tableCommandWithMarkdownNormalization(tableModule.addColumnAfter);
+      case 'delete-row': return deleteSelectedTableRowsCommand;
+      case 'delete-column': return deleteSelectedTableColumnsCommand;
+      case 'delete-table': return tableModule.deleteTable;
+      case 'align-left': return setSelectedTableColumnsAlignCommand('left');
+      case 'align-center': return setSelectedTableColumnsAlignCommand('center');
+      case 'align-right': return setSelectedTableColumnsAlignCommand('right');
+      default: return null;
+    }
+  }
+
+  function tableToolbarTableElement(editorView) {
+    var rect = activeTableRect(editorView.state);
+    if (!rect) return null;
+    var tableDom = editorView.nodeDOM(rect.tableStart - 1);
+    if (tableDom && tableDom.nodeType === 1) {
+      if (tableDom.matches && tableDom.matches('table')) return tableDom;
+      var nestedTable = tableDom.querySelector && tableDom.querySelector('table');
+      if (nestedTable) return nestedTable;
+    }
+    var domPoint = editorView.domAtPos(editorView.state.selection.from);
+    var element = domPoint && (domPoint.node.nodeType === 1 ? domPoint.node : domPoint.node.parentElement);
+    return element && element.closest ? element.closest('table') : null;
+  }
+
+  function createTableToolbarButton(label, action, title) {
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.dataset.tableAction = action;
+    button.title = title || label;
+    return button;
+  }
+
+  function createTableToolbarDom() {
+    var toolbar = document.createElement('div');
+    toolbar.className = 'pme-table-toolbar';
+    toolbar.hidden = true;
+    toolbar.setAttribute('role', 'toolbar');
+    toolbar.setAttribute('aria-label', '表操作');
+    [
+      ['+行上', 'add-row-before', '上に行を追加'],
+      ['+行下', 'add-row-after', '下に行を追加'],
+      ['+列左', 'add-column-before', '左に列を追加'],
+      ['+列右', 'add-column-after', '右に列を追加'],
+      ['行削除', 'delete-row', '行を削除'],
+      ['列削除', 'delete-column', '列を削除'],
+      ['表削除', 'delete-table', '表を削除'],
+      ['左揃え', 'align-left', '選択列を左揃え'],
+      ['中央揃え', 'align-center', '選択列を中央揃え'],
+      ['右揃え', 'align-right', '選択列を右揃え']
+    ].forEach(function(item) {
+      toolbar.appendChild(createTableToolbarButton(item[0], item[1], item[2]));
+    });
+    return toolbar;
+  }
+
+  function positionTableToolbar(toolbar, tableElement) {
+    if (!toolbar || !tableElement || !tableElement.isConnected) return false;
+    toolbar.hidden = false;
+    toolbar.classList.add('is-open');
+    toolbar.style.visibility = 'hidden';
+    toolbar.style.maxWidth = Math.max(240, window.innerWidth - 16) + 'px';
+    var tableRect = tableElement.getBoundingClientRect();
+    var toolbarRect = toolbar.getBoundingClientRect();
+    var maxLeft = Math.max(8, window.innerWidth - toolbarRect.width - 8);
+    var left = Math.min(Math.max(8, tableRect.left), maxLeft);
+    var top = tableRect.top - toolbarRect.height - 8;
+    if (top < 8) {
+      var maxTop = Math.max(8, window.innerHeight - toolbarRect.height - 8);
+      top = Math.min(Math.max(8, tableRect.bottom + 8), maxTop);
+    }
+    toolbar.style.left = left + 'px';
+    toolbar.style.top = top + 'px';
+    toolbar.style.visibility = '';
+    return true;
+  }
+
+  function TableToolbarView(editorView) {
+    var self = this;
+    this.editorView = editorView;
+    this.dom = createTableToolbarDom();
+    this.frame = 0;
+    this.onPointerDown = function(event) {
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    this.onClick = function(event) {
+      var target = event.target && event.target.closest ? event.target.closest('button[data-table-action]') : null;
+      if (!target || !self.dom.contains(target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      var command = tableToolbarCommand(target.dataset.tableAction);
+      if (!command) return;
+      command(self.editorView.state, self.editorView.dispatch, self.editorView);
+      self.editorView.focus();
+      self.schedulePosition();
+    };
+    this.onViewportChange = function() { self.schedulePosition(); };
+    this.dom.addEventListener('pointerdown', this.onPointerDown);
+    this.dom.addEventListener('click', this.onClick);
+    document.body.appendChild(this.dom);
+    window.addEventListener('resize', this.onViewportChange);
+    document.addEventListener('scroll', this.onViewportChange, true);
+    this.schedulePosition();
+  }
+
+  TableToolbarView.prototype.update = function(editorView) {
+    this.editorView = editorView;
+    this.schedulePosition();
+  };
+
+  TableToolbarView.prototype.schedulePosition = function() {
+    var self = this;
+    if (this.frame) return;
+    this.frame = window.requestAnimationFrame(function() {
+      self.frame = 0;
+      self.position();
+    });
+  };
+
+  TableToolbarView.prototype.position = function() {
+    var tableElement = tableToolbarTableElement(this.editorView);
+    if (!tableElement || !positionTableToolbar(this.dom, tableElement)) {
+      this.dom.hidden = true;
+      this.dom.classList.remove('is-open');
+    }
+  };
+
+  TableToolbarView.prototype.destroy = function() {
+    if (this.frame) window.cancelAnimationFrame(this.frame);
+    this.dom.removeEventListener('pointerdown', this.onPointerDown);
+    this.dom.removeEventListener('click', this.onClick);
+    window.removeEventListener('resize', this.onViewportChange);
+    document.removeEventListener('scroll', this.onViewportChange, true);
+    this.dom.remove();
+  };
+
+  var tableToolbarPluginKey = new state.PluginKey('pmeTableToolbar');
+
+  function tableToolbarPlugin() {
+    return new state.Plugin({
+      key: tableToolbarPluginKey,
+      view: function(editorView) { return new TableToolbarView(editorView); }
+    });
+  }
+
   function insertHardBreakCommand(editorState, dispatch) {
     var hardBreak = schema.nodes.hard_break;
     if (!hardBreak || !editorState.selection.$from.parent.inlineContent) return false;
@@ -20184,6 +20428,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
         editableTrailingParagraphPlugin(),
         inlineVisualAffordancePlugin(),
         tocRefreshPlugin(),
+        tableToolbarPlugin(),
         keymapModule.keymap(keys),
         keymapModule.keymap(commands.baseKeymap),
         dropcursor.dropCursor(),

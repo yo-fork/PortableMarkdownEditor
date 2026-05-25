@@ -1623,6 +1623,44 @@ textarea.pme-node-source-editor.pme-node-source-popover {
   z-index: 2;
 }
 
+.pme-table-toolbar {
+  align-items: center;
+  background: color-mix(in srgb, var(--panel) 94%, var(--text) 6%);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  box-shadow: var(--shadow);
+  box-sizing: border-box;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0.35rem;
+  position: fixed;
+  z-index: 80;
+}
+
+.pme-table-toolbar[hidden] {
+  display: none;
+}
+
+.pme-table-toolbar button {
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 0.35rem;
+  color: var(--text);
+  cursor: pointer;
+  font: 700 0.74rem/1 var(--sans);
+  min-height: 1.9rem;
+  padding: 0.42rem 0.5rem;
+  white-space: nowrap;
+}
+
+.pme-table-toolbar button:hover,
+.pme-table-toolbar button:focus-visible {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  outline: none;
+}
+
 .markdown-body img, .rich-editor img {
   max-width: 100%;
   border-radius: 0.85rem;
