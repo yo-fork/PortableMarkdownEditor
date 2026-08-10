@@ -21,6 +21,8 @@ $zipPath = Join-Path $distParent 'PortableMarkdownEditor-win-x64.zip'
 $releaseRoot = Join-Path $repoRoot 'release'
 $publishedZipPath = Join-Path $releaseRoot 'PortableMarkdownEditor-win-x64.zip'
 $checksumPath = Join-Path $releaseRoot 'SHA256SUMS.txt'
+$publishedLicensePath = Join-Path $releaseRoot 'LICENSE'
+$publishedNoticesPath = Join-Path $releaseRoot 'THIRD-PARTY-NOTICES.txt'
 $requiredWebView2Version = '1.0.2903.40'
 
 if ($Publish -and $SkipZip) {
@@ -107,6 +109,8 @@ $zipPath = Assert-GeneratedPath $zipPath
 $releaseRoot = Assert-GeneratedPath $releaseRoot
 $publishedZipPath = Assert-GeneratedPath $publishedZipPath
 $checksumPath = Assert-GeneratedPath $checksumPath
+$publishedLicensePath = Assert-GeneratedPath $publishedLicensePath
+$publishedNoticesPath = Assert-GeneratedPath $publishedNoticesPath
 
 $toolchain = Find-WebView2Toolchain
 Write-Host "WebView2 SDK: $($toolchain.Version)"
@@ -229,6 +233,8 @@ if ($Publish) {
     $publishedHash = Get-Sha256Hex $publishedZipPath
     $checksumLine = "$publishedHash  $([IO.Path]::GetFileName($publishedZipPath))`n"
     [IO.File]::WriteAllText($checksumPath, $checksumLine, [Text.Encoding]::ASCII)
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination $publishedLicensePath -Force
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'native\THIRD-PARTY-NOTICES.txt') -Destination $publishedNoticesPath -Force
 }
 
 Write-Host ''
@@ -239,4 +245,6 @@ if (!$SkipZip) {
 if ($Publish) {
     Write-Host "Published ZIP: $publishedZipPath"
     Write-Host "SHA-256: $checksumPath"
+    Write-Host "License: $publishedLicensePath"
+    Write-Host "Third-party notices: $publishedNoticesPath"
 }

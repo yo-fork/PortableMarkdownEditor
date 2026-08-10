@@ -17,3 +17,7 @@ Windows 11には通常、必要な.NET FrameworkとWebView2 Runtimeが含まれ�
 起動しない場合は、表示されたエラーメッセージを確認してください。
 
 ZIPのSHA-256は `SHA256SUMS.txt` に記載しています。
+
+MIT Licenseは `LICENSE`、同梱ライブラリのライセンス通知は `THIRD-PARTY-NOTICES.txt` でも確認できます。
+
+これらの法的文書はZIP内にも同じ内容で収録しています。

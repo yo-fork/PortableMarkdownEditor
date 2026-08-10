@@ -20,6 +20,8 @@ Visual Studio、Visual Studio Installer、MSBuildは、利用するWindows端末
 
 配布ZIPのSHA-256は [`release/SHA256SUMS.txt`](release/SHA256SUMS.txt) で確認できます。
 
+MIT Licenseと第三者ライセンス通知は、配布ZIP内に加えて [`release/LICENSE`](release/LICENSE) と [`release/THIRD-PARTY-NOTICES.txt`](release/THIRD-PARTY-NOTICES.txt) にも配置しています。
+
 ## Windowsアプリ版の機能
 
 インストーラー、管理者権限、ユーザー登録、ログインは不要です。
@@ -95,6 +97,8 @@ Windowsアプリ版の動作条件は次のとおりです。
 ```powershell
 .\BuildPortableWindows.cmd -Publish
 ```
+
+`-Publish`は配布ZIPとSHA-256に加え、MIT Licenseと第三者ライセンス通知も `release/` へ同期します。
 
 ## ブラウザ版
 

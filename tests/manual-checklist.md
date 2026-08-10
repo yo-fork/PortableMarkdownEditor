@@ -48,6 +48,10 @@ Run these checks without npm, package managers, CDN, or network access.
 18. Open the security dialog, use `下書きを削除`, reload the page, and confirm the previous edited draft is not restored.
 19. Open the security dialog, use `設定をリセット`, and confirm theme, display mode, and allowed link domains return to their initial state.
 20. Open a Markdown file with relative images through a granted folder, then use `フォルダ権限の記録を削除`. Reload and confirm relative images are not displayed again until the folder is granted again.
+21. In rich mode, place the caret in an empty paragraph and press `Ctrl+K`. Confirm a selected, visible `code` placeholder appears and typing replaces it as inline code.
+22. Open a fenced code block in rich mode, change its language field, and confirm the Markdown fence info string updates without losing code text.
+23. Move the caret to the end of a rich link and press `ArrowRight`. Confirm the URL editor opens without clicking and a long URL wraps without clipping.
+24. Open link insertion, image insertion, and an existing rich image source editor with long targets. Confirm each target can be read and edited without horizontal clipping.
 
 ## Windows portable app
 
@@ -68,3 +72,4 @@ Run these checks without npm, package managers, CDN, or network access.
 15. Open Print and confirm the Windows system print dialog appears.
 16. Move the complete portable folder to another writable location and confirm it starts without installation or administrator privileges.
 17. On a test PC without WebView2 Runtime, confirm startup fails visibly instead of silently; install-free operation requires the runtime to already exist.
+18. Confirm the release ZIP contains `LICENSE` and `THIRD-PARTY-NOTICES.txt`, and the same legal files are present beside the ZIP under `release/`.

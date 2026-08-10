@@ -8,14 +8,14 @@
   <title>Portable Markdown Editor</title>
   <link rel="stylesheet" href="./vendor/highlight/styles/github-dark.min.css">
   <link rel="stylesheet" href="./vendor/katex/katex.min.css">
-  <link rel="stylesheet" href="./styles.css?v=task-shortcuts-5">
+  <link rel="stylesheet" href="./styles.css?v=rich-edit-controls-6">
   <script src="./vendor/markdown-it/markdown-it.min.js" defer></script>
   <script src="./vendor/highlight/highlight.min.js" defer></script>
   <script src="./vendor/mermaid/mermaid.min.js" defer></script>
   <script src="./vendor/katex/katex.min.js" defer></script>
-  <script src="./vendor/prosemirror/prosemirror-editor.js?v=task-shortcuts-2" defer></script>
+  <script src="./vendor/prosemirror/prosemirror-editor.js?v=rich-edit-controls-6" defer></script>
   <script src="./vendor/codemirror6/source-editor.bundle.js?v=table-toolbar-1" defer></script>
-  <script src="./app.js?v=task-shortcuts-5" defer></script>
+  <script src="./app.js?v=rich-edit-controls-6" defer></script>
 </head>
 <body data-mode="rich">
   <a class="skip-link" href="#mainWorkspace">本文へ移動</a>
@@ -206,7 +206,7 @@
       </label>
       <label class="dialog-field">
         <span id="inlineInsertTargetLabel">URL</span>
-        <input id="inlineInsertTarget" type="text" autocomplete="off" spellcheck="false" placeholder="./README.md">
+        <textarea id="inlineInsertTarget" rows="3" wrap="soft" autocomplete="off" spellcheck="false" placeholder="./README.md"></textarea>
       </label>
       <menu>
         <button type="button" data-action="cancel-inline-insert">キャンセル</button>

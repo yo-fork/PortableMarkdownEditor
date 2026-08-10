@@ -1615,8 +1615,8 @@
     },
     {
       "path": "vendor/prosemirror/prosemirror-editor.js",
-      "bytes": 802169,
-      "sha256": "e698c68acc24c0b3cdbec60c20feb8edae85b086298d66f238bb682cd887746d"
+      "bytes": 812247,
+      "sha256": "126458ffd8b136b436e3494cd043a686e23c5281c6ad3cb88f902c22d8d5b394"
     }
   ]
 }

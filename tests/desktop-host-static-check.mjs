@@ -9,6 +9,7 @@ const windowCode = read('../native/MainWindow.xaml.cs');
 const fileService = read('../native/PortableFileService.cs');
 const windowXaml = read('../native/MainWindow.xaml');
 const buildScript = read('../tools/Build-PortableWindows.ps1');
+const releaseCheck = read('./Check-ReleasePackage.ps1');
 const notice = read('../native/THIRD-PARTY-NOTICES.txt');
 const nativeChecks = read('./native/PortableFileServiceChecks.cs');
 const portableReadme = read('../native/README-WINDOWS.txt');
@@ -81,7 +82,11 @@ assert.match(buildScript, /\[switch\]\$Publish/);
 assert.match(buildScript, /function Get-Sha256Hex/);
 assert.match(buildScript, /Security\.Cryptography\.SHA256/);
 assert.match(buildScript, /release[^\n]+PortableMarkdownEditor-win-x64\.zip/i);
+assert.match(buildScript, /publishedLicensePath[\s\S]+Copy-Item[^\n]+LICENSE/);
+assert.match(buildScript, /publishedNoticesPath[\s\S]+Copy-Item[^\n]+THIRD-PARTY-NOTICES\.txt/);
 assert.doesNotMatch(buildScript, /\b(?:npm|npx|pnpm|yarn|pip|uv|nuget|dotnet)\s+(?:install|add|restore|sync)\b/i);
+assert.match(releaseCheck, /publishedLicensePath[\s\S]+Published legal file differs from its source/);
+assert.match(releaseCheck, /publishedNoticesPath[\s\S]+Published legal file differs from its source/);
 
 assert.match(notice, /Microsoft\.Web\.WebView2 1\.0\.2903\.40/);
 assert.match(notice, /Redistribution and use in source and binary forms/);
@@ -101,8 +106,10 @@ assert.match(portableReadme, /data\\WebView2/);
 assert.match(portableReadme, /Visual Studio[^\n]+不要/);
 assert.match(projectReadme, /release\/PortableMarkdownEditor-win-x64\.zip/);
 assert.match(projectReadme, /BuildPortableWindows\.cmd[^\n]+開発者向け/);
+assert.match(projectReadme, /release\/LICENSE/);
 assert.match(releaseReadme, /PortableMarkdownEditor\.exe/);
 assert.match(releaseReadme, /BuildPortableWindows\.cmd[^\n]+実行しない/);
+assert.match(releaseReadme, /THIRD-PARTY-NOTICES\.txt/);
 
 console.log('desktop host static checks passed');
 

@@ -19112,9 +19112,17 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
   }
 
   var activeLinkHrefPopover = null;
+  var linkHrefArrowExit = null;
 
   function linkHrefPopoverInput(popover) {
     return popover && popover.querySelector ? popover.querySelector('.pme-link-href-input') : null;
+  }
+
+  function autoSizeLinkHrefInput(input) {
+    if (!input || input.nodeName !== 'TEXTAREA') return;
+    var viewportHeight = global.innerHeight || document.documentElement.clientHeight || 768;
+    input.style.height = 'auto';
+    input.style.height = Math.min(Math.max(72, input.scrollHeight), Math.max(120, Math.floor(viewportHeight * 0.4))) + 'px';
   }
 
   function ensureLinkHrefPopover() {
@@ -19123,14 +19131,15 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     popover = document.createElement('span');
     var before = document.createElement('span');
     var after = document.createElement('span');
-    var input = document.createElement('input');
+    var input = document.createElement('textarea');
     popover.className = 'pme-link-href-popover';
     before.className = 'pme-inline-source-token pme-inline-source-token--link-url-before';
     before.textContent = '](';
     after.className = 'pme-inline-source-token pme-inline-source-token--link-url-after';
     after.textContent = ')';
     input.className = 'pme-link-href-input';
-    input.type = 'text';
+    input.rows = 3;
+    input.wrap = 'soft';
     input.setAttribute('aria-label', 'link URL');
     input.setAttribute('spellcheck', 'false');
     input.setAttribute('autocomplete', 'off');
@@ -19140,7 +19149,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     popover.appendChild(after);
     document.body.appendChild(popover);
     input.addEventListener('input', function() {
-      input.size = Math.max(4, Math.min(48, input.value.length + 1));
+      autoSizeLinkHrefInput(input);
       if (!activeLinkHrefPopover) return;
       updateLinkHref(activeLinkHrefPopover.editorView, activeLinkHrefPopover.getPos, activeLinkHrefPopover.range, input.value);
       positionLinkHrefPopover();
@@ -19164,19 +19173,40 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     return popover;
   }
 
+  function linkHrefAnchorForRange(editorView, range) {
+    if (!editorView || !range) return null;
+    var selector = '.pme-link-href-editor[data-link-from="' + range.from + '"][data-link-to="' + range.to + '"]';
+    var widget = editorView.dom.querySelector(selector);
+    if (widget) return widget;
+    try {
+      var domAt = editorView.domAtPos(Math.max(range.from, range.to - 1));
+      var node = domAt && domAt.node;
+      var element = node && node.nodeType === 1 ? node : node && node.parentElement;
+      return element && element.closest ? element.closest('a') : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
   function positionLinkHrefPopover() {
     if (!activeLinkHrefPopover || !activeLinkHrefPopover.anchor || !activeLinkHrefPopover.popover) return;
     var anchor = activeLinkHrefPopover.anchor;
     var popover = activeLinkHrefPopover.popover;
+    if (!anchor || !anchor.isConnected) {
+      anchor = linkHrefAnchorForRange(activeLinkHrefPopover.editorView, activeLinkHrefPopover.range) || anchor;
+      activeLinkHrefPopover.anchor = anchor;
+    }
+    if (!anchor || typeof anchor.getBoundingClientRect !== 'function') return;
     var rect = anchor.getBoundingClientRect();
     var viewportWidth = global.innerWidth || document.documentElement.clientWidth || 1024;
+    var viewportHeight = global.innerHeight || document.documentElement.clientHeight || 768;
     var margin = 12;
     var width = Math.min(Math.max(popover.offsetWidth || 180, 120), viewportWidth - margin * 2);
     var left = clampNumber(rect.left, margin, viewportWidth - width - margin);
     var top = rect.top + (rect.height - (popover.offsetHeight || rect.height)) / 2;
     popover.style.position = 'fixed';
     popover.style.left = left + 'px';
-    popover.style.top = Math.max(margin, top) + 'px';
+    popover.style.top = clampNumber(top, margin, viewportHeight - (popover.offsetHeight || rect.height) - margin) + 'px';
     popover.style.zIndex = '1000';
   }
 
@@ -19185,15 +19215,20 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     var active = activeLinkHrefPopover;
     activeLinkHrefPopover = null;
     if (active.popover) active.popover.classList.remove('is-open');
-    if (refocusEditor && active.editorView) active.editorView.focus();
+    if (refocusEditor && active.editorView) {
+      active.editorView.dispatch(clearStoredMarks(active.editorView.state.tr));
+      linkHrefArrowExit = { editorView: active.editorView, pos: active.range.to };
+      active.editorView.focus();
+    }
   }
 
   function showLinkHrefPopover(editorView, getPos, range, mark, anchor) {
     var popover = ensureLinkHrefPopover();
     var input = linkHrefPopoverInput(popover);
     if (!input) return false;
+    linkHrefArrowExit = null;
     input.value = String(mark.attrs && mark.attrs.href || '');
-    input.size = Math.max(4, Math.min(48, input.value.length + 1));
+    autoSizeLinkHrefInput(input);
     activeLinkHrefPopover = {
       editorView: editorView,
       getPos: getPos,
@@ -19223,6 +19258,8 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       var after = document.createElement('span');
       var value = document.createElement('span');
       wrapper.className = 'pme-link-href-editor ProseMirror-widget';
+      wrapper.setAttribute('data-link-from', String(range.from));
+      wrapper.setAttribute('data-link-to', String(range.to));
       before.className = 'pme-inline-source-token pme-inline-source-token--link-url-before';
       before.textContent = '](';
       after.className = 'pme-inline-source-token pme-inline-source-token--link-url-after';
@@ -19303,6 +19340,26 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     var from = $from.start() + children[startIndex].offset;
     var to = $from.start() + children[endIndex].offset + children[endIndex].node.nodeSize;
     return from < to ? { from: from, to: to } : null;
+  }
+
+  function enterLinkHrefEditorAtBoundaryCommand(editorState, dispatch, editorView) {
+    var selection = editorState.selection;
+    if (!editorView || !selection || !selection.empty || !selection.$from.parent.inlineContent) return false;
+    if (linkHrefArrowExit) {
+      var shouldExit = linkHrefArrowExit.editorView === editorView && linkHrefArrowExit.pos === selection.from;
+      linkHrefArrowExit = null;
+      if (shouldExit) return false;
+    }
+    var range = linkMarkRangeAtPosition(editorState.doc, selection.from);
+    if (!range) return false;
+    if (selection.from < range.to - 1) {
+      if (dispatch) dispatch(editorState.tr.setSelection(state.TextSelection.create(editorState.doc, selection.from + 1)).scrollIntoView());
+      return true;
+    }
+    var anchor = linkHrefAnchorForRange(editorView, range);
+    if (!anchor) return false;
+    if (dispatch) showLinkHrefPopover(editorView, function() { return range.to; }, range, range.mark, anchor);
+    return true;
   }
 
   function inlineAffordanceMark(editorState) {
@@ -19594,7 +19651,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
   }
 
   function createNodeSourceEditor(options) {
-    var control = options.inlineTokens ? document.createElement('span') : document.createElement(options.multiline ? 'textarea' : 'input');
+    var control = options.inlineTokens ? document.createElement('span') : document.createElement(options.multiline || options.wrapLongValue ? 'textarea' : 'input');
     control.className = 'pme-node-source-editor ' + (options.className || '');
     var valueInput = control;
     if (options.inlineTokens) {
@@ -19621,8 +19678,12 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
           valueInput.value = latexFromMathSourceEditorValue(nextValue, false);
         }
       });
-    } else if (!options.multiline) {
+    } else if (!options.multiline && !options.wrapLongValue) {
       control.type = 'text';
+    }
+    if (options.wrapLongValue && control.nodeName === 'TEXTAREA') {
+      control.rows = 3;
+      control.wrap = 'soft';
     }
     control.setAttribute('aria-label', options.label || 'source');
     control.setAttribute('spellcheck', 'false');
@@ -19650,7 +19711,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       control.addEventListener(type, keepControlEvent);
     });
     control.addEventListener('input', function(event) {
-      if (options.multiline || control.__pmeValueInput) autoSizeNodeSourceEditor(control);
+      if (options.multiline || options.wrapLongValue || control.__pmeValueInput) autoSizeNodeSourceEditor(control);
       if (typeof options.onInput === 'function') options.onInput(control.value, event);
       if (control.classList.contains('is-source-popover-open')) scheduleNodeSourceEditorPopoverPosition();
     });
@@ -19816,8 +19877,10 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       control.style.top = clampNumber(inlineTop, margin, viewportHeight - inlineRect.height - margin) + 'px';
       return;
     }
-    var maxEditorWidth = control.nodeName === 'INPUT' ? 320 : 520;
-    var preferredWidth = Math.max(240, Math.min(rect.width || 360, maxEditorWidth, availableWidth));
+    var isImageEditor = control.classList && control.classList.contains('pme-node-source-editor--image');
+    var maxEditorWidth = isImageEditor ? 800 : (control.nodeName === 'INPUT' ? 320 : 520);
+    var contentWidth = isImageEditor ? String(control.value || '').length * 8.5 + 48 : 0;
+    var preferredWidth = Math.max(240, Math.min(Math.max(rect.width || 360, contentWidth), maxEditorWidth, availableWidth));
     var anchorRight = clampNumber(rect.right - margin, margin + preferredWidth, viewportWidth - margin);
     var left = clampNumber(anchorRight - preferredWidth, margin, viewportWidth - preferredWidth - margin);
     control.style.position = 'fixed';
@@ -20351,6 +20414,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     var self = this;
     this.sourceEditor = createNodeSourceEditor({
       multiline: false,
+      wrapLongValue: true,
       verticalBoundaryExit: true,
       className: 'pme-node-source-editor--image',
       label: 'image Markdown source',
@@ -20522,8 +20586,81 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     if (this.checkbox) this.checkbox.removeEventListener('change', this.onCheckboxChange);
   };
 
+  function safeCodeBlockLanguage(value) {
+    var match = String(value || '').trim().match(/^[A-Za-z0-9_+.-]{1,32}/);
+    return match ? match[0] : '';
+  }
+
+  function CodeBlockNodeView(node, editorView, getPos) {
+    this.node = node;
+    this.editorView = editorView;
+    this.getPos = getPos;
+    this.dom = document.createElement('pre');
+    this.dom.className = 'code-block pme-code-block';
+    this.languageInput = document.createElement('input');
+    this.languageInput.className = 'code-language-input pme-code-language-input';
+    this.languageInput.type = 'text';
+    this.languageInput.setAttribute('list', 'codeLanguageOptions');
+    this.languageInput.setAttribute('aria-label', 'コードブロックの言語');
+    this.languageInput.setAttribute('placeholder', 'text');
+    this.languageInput.setAttribute('spellcheck', 'false');
+    this.languageInput.setAttribute('autocomplete', 'off');
+    this.languageInput.setAttribute('autocapitalize', 'off');
+    this.languageInput.setAttribute('contenteditable', 'false');
+    this.contentDOM = document.createElement('code');
+    this.dom.appendChild(this.languageInput);
+    this.dom.appendChild(this.contentDOM);
+    var self = this;
+    this.onLanguageInput = function() {
+      var raw = String(self.languageInput.value || '');
+      var normalized = raw.replace(/[^A-Za-z0-9_+.-]/g, '').slice(0, 32);
+      if (raw !== normalized) {
+        var cursor = Math.min(normalized.length, self.languageInput.selectionStart || normalized.length);
+        self.languageInput.value = normalized;
+        if (typeof self.languageInput.setSelectionRange === 'function') self.languageInput.setSelectionRange(cursor, cursor);
+      }
+      updateNodeViewAttrs(self.editorView, self.getPos, self.node, { params: normalized });
+    };
+    this.onLanguageKeyDown = function(event) {
+      if (event.key !== 'Enter' && event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      self.languageInput.blur();
+      self.editorView.focus();
+    };
+    this.languageInput.addEventListener('input', this.onLanguageInput);
+    this.languageInput.addEventListener('keydown', this.onLanguageKeyDown);
+    this.update(node);
+  }
+
+  CodeBlockNodeView.prototype.update = function(node) {
+    if (node.type !== this.node.type) return false;
+    this.node = node;
+    var params = String(node.attrs && node.attrs.params || '');
+    if (params) this.dom.setAttribute('data-params', params);
+    else this.dom.removeAttribute('data-params');
+    var language = safeCodeBlockLanguage(params);
+    if (this.languageInput.value !== language) this.languageInput.value = language;
+    return true;
+  };
+
+  CodeBlockNodeView.prototype.stopEvent = function(event) {
+    return Boolean(event && (event.target === this.languageInput || this.languageInput.contains(event.target)));
+  };
+
+  CodeBlockNodeView.prototype.ignoreMutation = function(mutation) {
+    return Boolean(mutation && (mutation.target === this.languageInput || this.languageInput.contains(mutation.target)
+      || (mutation.type === 'attributes' && mutation.target === this.dom)));
+  };
+
+  CodeBlockNodeView.prototype.destroy = function() {
+    this.languageInput.removeEventListener('input', this.onLanguageInput);
+    this.languageInput.removeEventListener('keydown', this.onLanguageKeyDown);
+  };
+
   function extendedNodeViews(options) {
     return {
+      code_block: function(node, editorView, getPos) { return new CodeBlockNodeView(node, editorView, getPos); },
       list_item: function(node, editorView, getPos) { return new TaskListItemNodeView(node, editorView, getPos); },
       image: function(node, editorView, getPos) { return new ImageNodeView(node, editorView, getPos, options); },
       math_inline: function(node, editorView, getPos) { return new MathNodeView(node, editorView, getPos); },
@@ -20632,7 +20769,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       'Delete': commands.chainCommands(deleteSelectedOrAdjacentAtomCommand(1), commands.baseKeymap.Delete),
       'Shift-Enter': commands.chainCommands(commands.newlineInCode, insertHardBreakCommand),
       'ArrowLeft': enterStoredMarksAtInlineBoundaryCommand,
-      'ArrowRight': clearStoredMarksAtInlineBoundaryCommand
+      'ArrowRight': commands.chainCommands(enterLinkHrefEditorAtBoundaryCommand, clearStoredMarksAtInlineBoundaryCommand)
     };
     if (listItem) {
       keys.Enter = commands.chainCommands(
@@ -20784,6 +20921,72 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     return true;
   }
 
+  function applyInlineCodeFormatCommand(editorState, dispatch) {
+    var markType = schema.marks.code;
+    var selection = editorState.selection;
+    if (!markType || !selection) return false;
+    var activeCode = markFromSet(activeMarksForVisualAffordance(editorState), markType);
+    if (!selection.empty || activeCode) {
+      return commands.toggleMark(markType)(editorState, dispatch);
+    }
+    if (!selection.$from.parent.inlineContent) return false;
+    if (dispatch) {
+      var codeMark = markType.create();
+      var placeholder = schema.text('code', [codeMark]);
+      var from = selection.from;
+      var tr = editorState.tr.replaceSelectionWith(placeholder, false);
+      tr = tr.setSelection(state.TextSelection.create(tr.doc, from, from + placeholder.nodeSize));
+      tr = tr.setStoredMarks([codeMark]);
+      dispatch(tr.scrollIntoView());
+    }
+    return true;
+  }
+
+  function codeMarkAcrossSelection(doc, from, to) {
+    if (!schema.marks.code || from >= to) return null;
+    var $from = doc.resolve(from);
+    var $to = doc.resolve(to);
+    if (!$from.sameParent($to) || !$from.parent.inlineContent) return null;
+    var codeMark = null;
+    var hasText = false;
+    var valid = true;
+    doc.nodesBetween(from, to, function(node, pos) {
+      if (!node.isText || pos >= to || pos + node.nodeSize <= from) return;
+      hasText = true;
+      var current = schema.marks.code.isInSet(node.marks || []);
+      if (!current || (codeMark && !codeMark.eq(current))) valid = false;
+      else if (!codeMark) codeMark = current;
+    });
+    return hasText && valid ? codeMark : null;
+  }
+
+  function preserveInlineCodeSelectionTextInput(editorView, from, to, text) {
+    var codeMark = codeMarkAcrossSelection(editorView.state.doc, from, to);
+    if (!codeMark) return false;
+    var tr = editorView.state.tr.delete(from, to);
+    if (text) tr = tr.insert(from, schema.text(text, [codeMark]));
+    tr = tr.setSelection(state.TextSelection.create(tr.doc, from + String(text || '').length));
+    tr = tr.setStoredMarks([codeMark]);
+    editorView.dispatch(tr.scrollIntoView());
+    return true;
+  }
+
+  function preserveInlineCodeSelectionBeforeInput(editorView, event) {
+    if (!event || event.inputType !== 'insertText' || typeof event.data !== 'string' || !event.data) return false;
+    var selection = editorView.state.selection;
+    if (!selection || selection.empty || !codeMarkAcrossSelection(editorView.state.doc, selection.from, selection.to)) return false;
+    event.preventDefault();
+    return preserveInlineCodeSelectionTextInput(editorView, selection.from, selection.to, event.data);
+  }
+
+  function preserveInlineCodeSelectionKeyDown(editorView, event) {
+    if (!event || event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || String(event.key || '').length !== 1) return false;
+    var selection = editorView.state.selection;
+    if (!selection || selection.empty || !codeMarkAcrossSelection(editorView.state.doc, selection.from, selection.to)) return false;
+    event.preventDefault();
+    return preserveInlineCodeSelectionTextInput(editorView, selection.from, selection.to, event.key);
+  }
+
   function clearStoredMarksForInlineBoundaryClick(transaction, selection) {
     if (shouldClearStoredMarksAtInlineBoundary(selection)) clearStoredMarks(transaction);
     return transaction;
@@ -20849,6 +21052,9 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
         }
       },
       handleClick: setSelectionFromSingleClick,
+      handleDOMEvents: { beforeinput: preserveInlineCodeSelectionBeforeInput },
+      handleKeyDown: preserveInlineCodeSelectionKeyDown,
+      handleTextInput: preserveInlineCodeSelectionTextInput,
       handlePaste: handleMarkdownPlainTextPaste,
       clipboardTextParser: markdownClipboardTextParser,
       nodeViews: extendedNodeViews(options || {}),
@@ -20895,7 +21101,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
         switch (format) {
           case 'bold': return run(commands.toggleMark(schema.marks.strong));
           case 'italic': return run(commands.toggleMark(schema.marks.em));
-          case 'code': return run(commands.toggleMark(schema.marks.code));
+          case 'code': return run(applyInlineCodeFormatCommand);
           case 'paragraph': return run(commands.setBlockType(schema.nodes.paragraph));
           case 'h1': return run(commands.setBlockType(schema.nodes.heading, { level: 1 }));
           case 'h2': return run(commands.setBlockType(schema.nodes.heading, { level: 2 }));

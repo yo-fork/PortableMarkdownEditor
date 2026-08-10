@@ -7,6 +7,8 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $zipPath = Join-Path $repoRoot 'release\PortableMarkdownEditor-win-x64.zip'
 $checksumPath = Join-Path $repoRoot 'release\SHA256SUMS.txt'
+$publishedLicensePath = Join-Path $repoRoot 'release\LICENSE'
+$publishedNoticesPath = Join-Path $repoRoot 'release\THIRD-PARTY-NOTICES.txt'
 
 function Get-StreamSha256Hex {
     param([Parameter(Mandatory = $true)][IO.Stream]$Stream)
@@ -32,9 +34,21 @@ function Get-FileSha256Hex {
     }
 }
 
-foreach ($requiredPath in @($zipPath, $checksumPath)) {
+foreach ($requiredPath in @($zipPath, $checksumPath, $publishedLicensePath, $publishedNoticesPath)) {
     if (!(Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "Release file was not found: $requiredPath"
+    }
+}
+
+$releaseSourceCopies = @{
+    $publishedLicensePath = (Join-Path $repoRoot 'LICENSE')
+    $publishedNoticesPath = (Join-Path $repoRoot 'native\THIRD-PARTY-NOTICES.txt')
+}
+foreach ($publishedPath in $releaseSourceCopies.Keys) {
+    $publishedHash = Get-FileSha256Hex $publishedPath
+    $sourceHash = Get-FileSha256Hex $releaseSourceCopies[$publishedPath]
+    if ($publishedHash -ne $sourceHash) {
+        throw "Published legal file differs from its source: $publishedPath"
     }
 }
 

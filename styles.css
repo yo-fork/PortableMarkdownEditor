@@ -602,6 +602,11 @@ textarea.pme-node-source-editor.pme-node-source-popover {
   box-shadow: var(--shadow);
 }
 
+.pme-node-source-editor.pme-node-source-popover.pme-node-source-editor--image {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .pme-node-source-editor.pme-node-source-popover.pme-node-source-editor--math-inline {
   background: transparent;
   border-color: transparent;
@@ -884,7 +889,7 @@ textarea.pme-node-source-editor.pme-node-source-popover {
 }
 
 .pme-link-href-popover {
-  align-items: baseline;
+  align-items: flex-start;
   background: color-mix(in srgb, var(--panel) 92%, transparent);
   border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--border));
   border-radius: 0.4rem;
@@ -892,6 +897,7 @@ textarea.pme-node-source-editor.pme-node-source-popover {
   display: none;
   gap: 0.04rem;
   padding: 0.16rem 0.24rem;
+  width: min(56rem, calc(100vw - 1.5rem));
 }
 
 .pme-link-href-popover.is-open {
@@ -905,10 +911,12 @@ textarea.pme-node-source-editor.pme-node-source-popover {
   line-height: 1;
   pointer-events: none;
   user-select: none;
+  padding-top: 0.42rem;
 }
 
 .rich-editor .pme-link-href-input,
 .pme-link-href-popover .pme-link-href-input {
+  box-sizing: border-box;
   background: color-mix(in srgb, var(--panel-soft) 82%, transparent);
   border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--border));
   border-radius: 0.25rem;
@@ -916,9 +924,14 @@ textarea.pme-node-source-editor.pme-node-source-popover {
   font-family: var(--mono);
   font-size: 0.78em;
   line-height: 1.25;
-  max-width: min(24rem, 48vw);
+  max-width: none;
   min-width: 3.5rem;
+  min-height: 4.5rem;
   padding: 0.02rem 0.22rem;
+  overflow-wrap: anywhere;
+  resize: vertical;
+  white-space: pre-wrap;
+  width: 100%;
 }
 
 .rich-editor .pme-link-href-input:focus,
@@ -1848,6 +1861,10 @@ body[data-mode="preview"] .markdown-body {
   border: 1px solid var(--border);
 }
 
+#inlineInsertDialog .dialog-card {
+  width: min(94vw, 64rem);
+}
+
 dialog { border: 0; border-radius: 1rem; background: transparent; }
 dialog::backdrop { background: rgba(15, 23, 42, 0.58); backdrop-filter: blur(4px); }
 .dialog-card h2 { margin-top: 0; }
@@ -1904,7 +1921,8 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.58); backdrop-filter: blur(4px
 }
 
 .dialog-field select,
-.dialog-field input {
+.dialog-field input,
+.dialog-field textarea {
   width: 100%;
   border: 1px solid var(--border);
   border-radius: 0.7rem;
@@ -1915,11 +1933,21 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.58); backdrop-filter: blur(4px
   outline: none;
 }
 
-.dialog-field input { font-family: var(--mono); }
+.dialog-field input,
+.dialog-field textarea { font-family: var(--mono); }
+
+.dialog-field textarea {
+  box-sizing: border-box;
+  min-height: 5rem;
+  overflow-wrap: anywhere;
+  resize: vertical;
+  white-space: pre-wrap;
+}
 
 .dialog-textarea:focus,
 .dialog-field select:focus,
-.dialog-field input:focus { border-color: var(--accent); }
+.dialog-field input:focus,
+.dialog-field textarea:focus { border-color: var(--accent); }
 
 .markdown-entry-list {
   display: grid;
