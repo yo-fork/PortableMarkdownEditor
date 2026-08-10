@@ -41,6 +41,8 @@ assert.match(windowXaml, /<wv2:WebView2/);
 assert.match(windowCode, /SetVirtualHostNameToFolderMapping\(AppHost,[\s\S]+DenyCors/);
 assert.match(windowCode, /AddWebResourceRequestedFilter\([\s\S]+DocumentHost[\s\S]+CoreWebView2WebResourceContext\.Image/);
 assert.match(windowCode, /Core_WebResourceRequested[\s\S]+ReadDocumentImage[\s\S]+CreateWebResourceResponse/);
+assert.match(windowCode, /using \(CoreWebView2Deferral deferral = eventArgs\.GetDeferral\(\)\)/);
+assert.doesNotMatch(windowCode, /deferral\.Complete\(\)/);
 assert.doesNotMatch(windowCode, /SetVirtualHostNameToFolderMapping\(\s*DocumentHost/);
 assert.match(windowCode, /AreHostObjectsAllowed = false/);
 assert.match(windowCode, /if \(!IsAppSource\(eventArgs\.Source\)\)/);

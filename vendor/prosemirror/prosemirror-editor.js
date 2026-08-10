@@ -17716,7 +17716,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       token.map = [startLine, nextLine + 1];
       state.line = nextLine + 1;
       return true;
-    });
+    }, { alt: ['paragraph', 'reference', 'blockquote', 'list'] });
   }
 
   function isEscapedMarkdownCharacter(text, index) {

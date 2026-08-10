@@ -346,6 +346,7 @@ assert.doesNotMatch(proseMirrorBundle, /WebSocket/, 'ProseMirror bundle must not
 assert.doesNotMatch(proseMirrorBundle, /\bWorker\b/, 'ProseMirror bundle must not contain Worker');
 assert.match(proseMirrorBundle, /normalizeMarkdown/, 'ProseMirror bundle should expose a Markdown round-trip diagnostic');
 assert.match(proseMirrorBundle, /image\.addEventListener\('error',[\s\S]+renderBlocked/, 'ProseMirror images should replace failed loads with a reasoned placeholder');
+assert.match(proseMirrorBundle, /pme_math_display[\s\S]+alt:\s*\['paragraph'/, 'display math should interrupt an immediately preceding paragraph');
 
 const MarkdownIt = require('../vendor/markdown-it/markdown-it.min.js');
 const proseMirrorContext = {
@@ -406,6 +407,29 @@ assert.equal(
     '$$',
   ].join('\n'),
   'multiline display math must keep a leading + line inside the formula',
+);
+assert.equal(
+  proseMirrorContext.window.PMEProseMirror.normalizeMarkdown([
+    '各回帰式は次の形である。',
+    '$$',
+    String.raw`\log D_{a,h,d}`,
+    String.raw`=\beta_{0,a,h}`,
+    String.raw`+ \sum_{j=1}^{p}\beta_{j,a,h}X_{j,a,h,d}`,
+    '$$',
+    'ここで、各記号を定義する。',
+  ].join('\n')),
+  [
+    '各回帰式は次の形である。',
+    '',
+    '$$',
+    String.raw`\log D_{a,h,d}`,
+    String.raw`=\beta_{0,a,h}`,
+    String.raw`+ \sum_{j=1}^{p}\beta_{j,a,h}X_{j,a,h,d}`,
+    '$$',
+    '',
+    'ここで、各記号を定義する。',
+  ].join('\n'),
+  'display math should interrupt a preceding paragraph without requiring a blank source line',
 );
 assert.equal(
   proseMirrorContext.window.PMEProseMirror.normalizeMarkdown([

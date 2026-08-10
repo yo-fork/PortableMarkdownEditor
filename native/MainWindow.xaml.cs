@@ -204,10 +204,6 @@ namespace PortableMarkdownEditor.Desktop
                     {
                     }
                 }
-                finally
-                {
-                    deferral.Complete();
-                }
             }
         }
 

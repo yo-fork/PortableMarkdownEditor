@@ -58,12 +58,12 @@ Run these checks without npm, package managers, CDN, or network access.
 5. Edit the document, use Save As into a temporary test folder, and confirm the output is UTF-8 without a BOM.
 6. Close or replace a modified document and confirm the native unsaved-change warning appears.
 7. Insert the same PNG/JPEG/GIF/WebP image twice and confirm both files are saved under `MarkdownFileName.assets/` with non-colliding names.
-8. Reopen the Markdown file and confirm its relative assets image renders through the native validated image response.
+8. Reopen the Markdown file and confirm its relative assets image renders through the native validated image response and the app remains open afterward.
 9. Open a document containing a `C:\...` image path that points inside the document folder. Confirm the image renders and switching rich/source modes does not change `\` into `%5C`.
 10. Confirm an absolute image path outside the document folder remains a reasoned placeholder.
 11. Open `samples/math-syntax-gallery.md` and confirm `$...$`, `\(...\)`, `$$...$$`, and `\[...\]` render in rich, split, and preview modes.
 12. Confirm `\$100`, inline code, and fenced code in the math gallery do not become formulas.
-13. Confirm a multiline display formula whose opening line contains content keeps a following `+ ` line inside the formula in rich mode.
+13. Confirm a multiline display formula immediately following paragraph text without a blank line remains a formula in rich mode and keeps a following `+ ` line inside the formula.
 14. Export HTML and link-domain settings and confirm both use native Windows save dialogs.
 15. Open Print and confirm the Windows system print dialog appears.
 16. Move the complete portable folder to another writable location and confirm it starts without installation or administrator privileges.
