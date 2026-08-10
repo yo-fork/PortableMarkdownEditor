@@ -1,0 +1,27 @@
+Portable Markdown Editor for Windows x64
+
+PortableMarkdownEditor.exe をダブルクリックすると起動します。
+
+インストール、管理者権限、ユーザー登録、ログインは不要です。
+
+このフォルダ内のEXE、DLL、appフォルダを分離せずに使ってください。
+
+動作にはWindows 10またはWindows 11、.NET Framework 4.8以降、Microsoft Edge WebView2 Evergreen Runtimeが必要です。
+
+WebView2 Runtimeが導入されていないPCでは起動できません。
+
+MarkdownはUTF-8の .md、.markdown、.txt に対応し、1ファイル10MBを上限とします。
+
+保存時は改行をLFへ正規化し、BOMなしUTF-8で書き込みます。
+
+画像はPNG、JPEG、GIF、WebPに対応し、1ファイル25MBを上限とします。
+
+挿入画像はMarkdownファイルと同じ場所の MarkdownFileName.assets フォルダへ保存します。
+
+下書きとWebView2プロファイルは、初回起動時にこのフォルダの data\WebView2 以下へ作成します。
+
+下書きを維持したまま移動する場合は、dataフォルダも一緒に移してください。
+
+別PCでは、コード署名されていないアプリとしてWindows SmartScreenが警告する可能性があります。
+
+本アプリのライセンスはLICENSE、WebView2 SDKのライセンスはTHIRD-PARTY-NOTICES.txtを確認してください。

@@ -13,6 +13,9 @@
   const MAX_HIGHLIGHT_CHARS = 120000;
   const MAX_FOLDER_SCAN_FILES = 5000;
   const MAX_FOLDER_SCAN_DEPTH = 8;
+  const DESKTOP_APP_HOST = 'portable-markdown-editor.local';
+  const DESKTOP_DOCUMENT_HOST = 'document.portable-markdown-editor.local';
+  const DESKTOP_ASSET_REQUEST_TIMEOUT_MS = 45000;
   const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
   const IMAGE_EXTENSION_PATTERN = /\.(?:png|jpe?g|gif|webp)(?:[?#].*)?$/i;
   const VENDOR_TOC_MARKER = 'PME_TOC_MARKER_7B4E2D8C';
@@ -62,8 +65,9 @@
 
 | 項目 | 内容 |
 | --- | --- |
-| 動作 | ブラウザでHTMLを開くだけ |
-| 保存 | ユーザー操作によるダウンロード |
+| Windowsアプリ | ネイティブ画面からファイルを直接操作 |
+| ブラウザ版 | HTMLを開くだけで動作 |
+| 保存 | Windowsダイアログ、またはブラウザの明示操作 |
 | 通信 | なし |
 
 ## チェックリスト
@@ -117,6 +121,11 @@ flowchart TD
     richInputUsedSourceTransaction: false,
     richTransactionBlank: null,
     richLineBreakInputOffset: null,
+    desktopHost: detectDesktopHost(),
+    desktopDocumentReady: false,
+    desktopAssetRequests: new Map(),
+    desktopLastReportedDirty: null,
+    desktopLastReportedFileName: '',
     scrollSyncLock: false,
     mermaidPan: null,
     allowedLinkDomains: [],
@@ -149,6 +158,7 @@ flowchart TD
     cacheElements();
     restoreSettings();
     restoreDraft();
+    if (state.desktopHost) state.markdownRelativePath = '';
     bindEvents();
     applyTheme();
     initializeVendorLibraries();
@@ -156,10 +166,180 @@ flowchart TD
     initializeCodeMirrorSourceEditor();
     applyMode(state.mode, { preserveScroll: false });
     renderAll('init');
-    setStatus('準備完了');
-    restorePersistedSettingsDirectoryHandle();
-    restorePersistedDirectoryHandle();
-    restorePickerStartDirectoryHandle();
+    if (state.desktopHost) {
+      initializeDesktopBridge();
+      setStatus('Windowsアプリに接続しました');
+    } else {
+      setStatus('準備完了');
+      restorePersistedSettingsDirectoryHandle();
+      restorePersistedDirectoryHandle();
+      restorePickerStartDirectoryHandle();
+    }
+  }
+
+  function detectDesktopHost() {
+    const currentLocation = window.location;
+    return Boolean(
+      window.chrome?.webview?.postMessage
+      && currentLocation?.protocol === 'https:'
+      && currentLocation?.hostname === DESKTOP_APP_HOST
+      && /(?:^|[?&])desktop=1(?:&|$)/.test(currentLocation.search || '')
+    );
+  }
+
+  function initializeDesktopBridge() {
+    document.body.dataset.desktopHost = 'true';
+    window.chrome.webview.addEventListener('message', onDesktopHostMessage);
+    postDesktopMessage({
+      type: 'desktop.ready',
+      dirty: state.dirty,
+      fileName: state.fileName,
+    });
+    notifyDesktopDocumentState(true);
+  }
+
+  function postDesktopMessage(message) {
+    if (!state.desktopHost) return false;
+    try {
+      window.chrome.webview.postMessage(message);
+      return true;
+    } catch (_) {
+      setStatus('Windowsアプリとの通信に失敗しました');
+      return false;
+    }
+  }
+
+  function requestDesktopCommand(command) {
+    if (!state.desktopHost) return false;
+    postDesktopMessage({ type: 'desktop.command', command });
+    return true;
+  }
+
+  function notifyDesktopDocumentState(force = false) {
+    if (!state.desktopHost) return;
+    if (
+      !force
+      && state.desktopLastReportedDirty === state.dirty
+      && state.desktopLastReportedFileName === state.fileName
+    ) return;
+    state.desktopLastReportedDirty = state.dirty;
+    state.desktopLastReportedFileName = state.fileName;
+    postDesktopMessage({
+      type: 'desktop.documentState',
+      dirty: state.dirty,
+      fileName: state.fileName,
+    });
+  }
+
+  function onDesktopHostMessage(event) {
+    const message = parseDesktopHostMessage(event?.data);
+    if (!message) return;
+    switch (message.type) {
+      case 'host.loadDocument':
+        applyDesktopDocument(message, 'ファイルを開きました');
+        break;
+      case 'host.newDocument':
+        applyDesktopDocument(message, '新規文書を作成しました');
+        break;
+      case 'host.requestSnapshot':
+        sendDesktopDocumentSnapshot(message.requestId);
+        break;
+      case 'host.documentSaved':
+        applyDesktopSavedState(message);
+        break;
+      case 'host.assetSaved':
+        resolveDesktopAssetRequest(message);
+        break;
+      case 'host.error':
+        rejectDesktopAssetRequest(message);
+        setStatus(String(message.message || 'Windows側の処理に失敗しました'));
+        break;
+      case 'host.status':
+        setStatus(String(message.message || ''));
+        break;
+      default:
+        break;
+    }
+  }
+
+  function parseDesktopHostMessage(value) {
+    if (value && typeof value === 'object') return value;
+    if (typeof value !== 'string' || value.length > 12 * 1024 * 1024) return null;
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function applyDesktopDocument(message, statusMessage) {
+    clearAssetUrls();
+    state.directoryHandle = null;
+    state.directoryName = '';
+    state.fileHandle = null;
+    state.desktopDocumentReady = message.hasDocumentFolder === true;
+    state.markdown = stripRichCaretTokens(normalizeNewlines(String(message.markdown || '')));
+    state.fileName = safeFileName(message.fileName || 'untitled.md');
+    state.markdownRelativePath = state.desktopDocumentReady ? state.fileName : '';
+    state.dirty = message.dirty === true;
+    els.source.value = state.markdown;
+    syncCodeMirrorSourceFromTextarea('desktop-document');
+    renderAll('desktop-document');
+    persistDraft();
+    notifyDesktopDocumentState(true);
+    setStatus(statusMessage);
+  }
+
+  function sendDesktopDocumentSnapshot(requestId) {
+    if (typeof requestId !== 'string' || requestId.length > 100) return;
+    captureCurrentMarkdownFromEditor();
+    postDesktopMessage({
+      type: 'desktop.documentSnapshot',
+      requestId,
+      markdown: state.markdown,
+      fileName: state.fileName,
+    });
+  }
+
+  function applyDesktopSavedState(message) {
+    state.fileName = safeFileName(message.fileName || state.fileName || 'untitled.md');
+    state.desktopDocumentReady = message.hasDocumentFolder === true;
+    state.markdownRelativePath = state.desktopDocumentReady ? state.fileName : '';
+    state.dirty = false;
+    renderPreview();
+    state.proseMirrorRich?.refreshImages?.();
+    persistDraft();
+    updateStatusBar();
+    notifyDesktopDocumentState(true);
+    setStatus(`${state.fileName} を保存しました`);
+  }
+
+  function resolveDesktopAssetRequest(message) {
+    const request = state.desktopAssetRequests.get(message.requestId);
+    if (!request) return;
+    const markdownPath = normalizeAssetPath(message.markdownPath || '');
+    if (!markdownPath || isUnsafeRelativePath(markdownPath) || !hasRasterImageExtension(markdownPath)) {
+      rejectDesktopAssetRequest({
+        requestId: message.requestId,
+        message: 'Windows側から安全な画像パスを受け取れませんでした',
+      });
+      return;
+    }
+    window.clearTimeout(request.timer);
+    state.desktopAssetRequests.delete(message.requestId);
+    request.resolve({
+      fileName: safeFileName(message.fileName || 'image.png'),
+      markdownPath,
+    });
+  }
+
+  function rejectDesktopAssetRequest(message) {
+    const request = state.desktopAssetRequests.get(message.requestId);
+    if (!request) return;
+    window.clearTimeout(request.timer);
+    state.desktopAssetRequests.delete(message.requestId);
+    request.reject(new Error(String(message.message || '画像の保存に失敗しました')));
   }
 
   function cacheElements() {
@@ -459,7 +639,7 @@ flowchart TD
     els.rich.addEventListener('click', onRichClick);
 
     window.addEventListener('beforeunload', (event) => {
-      if (!state.dirty) return;
+      if (state.desktopHost || !state.dirty) return;
       event.preventDefault();
       event.returnValue = '';
     });
@@ -4606,6 +4786,11 @@ flowchart TD
   }
 
   async function ensureImageAssetWriteAccess(actionLabel = '画像挿入') {
+    if (state.desktopHost) {
+      if (state.desktopDocumentReady) return true;
+      setStatus(`${actionLabel}: 先にMarkdownファイルを保存してください`);
+      return false;
+    }
     if (!hasImageAssetFolderContext(actionLabel)) return false;
     if (!await ensureDirectoryPermission(state.directoryHandle, 'readwrite')) {
       setStatus(`${actionLabel}: 画像保存に必要なフォルダ書き込み権限がありません`);
@@ -4634,6 +4819,7 @@ flowchart TD
   }
 
   async function saveImageFileToAssets(file) {
+    if (state.desktopHost) return saveImageFileToDesktopAssets(file);
     const markdownDirHandle = await markdownDirectoryHandle();
     const assetsDirName = markdownAssetsDirName();
     const assetsDirHandle = await markdownDirHandle.getDirectoryHandle(assetsDirName, { create: true });
@@ -4648,6 +4834,40 @@ flowchart TD
     const markdownPath = normalizeAssetPath(`${assetsDirName}/${allocated.fileName}`);
     setAssetUrl(markdownPath, file);
     return { fileName: allocated.fileName, markdownPath };
+  }
+
+  async function saveImageFileToDesktopAssets(file) {
+    if (!state.desktopDocumentReady) throw new Error('先にMarkdownファイルを保存してください');
+    const requestId = `asset-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const buffer = await file.arrayBuffer();
+    const dataBase64 = arrayBufferToBase64(buffer);
+    const result = new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        state.desktopAssetRequests.delete(requestId);
+        reject(new Error('画像保存がタイムアウトしました'));
+      }, DESKTOP_ASSET_REQUEST_TIMEOUT_MS);
+      state.desktopAssetRequests.set(requestId, { resolve, reject, timer });
+    });
+    if (!postDesktopMessage({
+      type: 'desktop.saveAsset',
+      requestId,
+      fileName: safeFileName(file.name || 'image.png'),
+      mimeType: String(file.type || ''),
+      dataBase64,
+    })) {
+      rejectDesktopAssetRequest({ requestId, message: 'Windowsアプリへ画像を渡せませんでした' });
+    }
+    return result;
+  }
+
+  function arrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    const chunkSize = 0x8000;
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + chunkSize));
+    }
+    return btoa(binary);
   }
 
   async function markdownDirectoryHandle() {
@@ -7095,6 +7315,7 @@ flowchart TD
   }
 
   function newDocument() {
+    if (requestDesktopCommand('new')) return;
     if (!confirmDocumentReplacement('新規文書')) return;
     clearAssetUrls();
     state.markdown = '# 無題\n\nここにMarkdownを書いてください。\n';
@@ -7118,6 +7339,7 @@ flowchart TD
   }
 
   async function openMarkdownFile() {
+    if (requestDesktopCommand('open')) return;
     if (window.showOpenFilePicker) {
       let fileHandle = null;
       try {
@@ -7715,6 +7937,11 @@ flowchart TD
   }
 
   function hasImageAssetFolderContext(actionLabel = '画像挿入') {
+    if (state.desktopHost) {
+      if (state.desktopDocumentReady) return true;
+      setStatus(`${actionLabel}: 先にMarkdownファイルを保存してください`);
+      return false;
+    }
     if (!window.isSecureContext) {
       setStatus(`${actionLabel}: 画像をassetsフォルダに保存するには、localhostなどの安全なHTTP環境で開いてください`);
       return false;
@@ -7727,6 +7954,7 @@ flowchart TD
   }
 
   async function saveMarkdown() {
+    if (requestDesktopCommand('save')) return;
     if (await saveMarkdownToOpenedFile()) return;
     downloadMarkdown();
   }
@@ -7770,14 +7998,24 @@ flowchart TD
   }
 
   function exportHtml() {
-    const html = buildExportHtml(state.markdown, state.fileName);
+    captureCurrentMarkdownFromEditor();
     const base = stripExtension(state.fileName || 'document');
+    if (state.desktopHost) {
+      postDesktopMessage({
+        type: 'desktop.exportHtml',
+        fileName: `${base}.html`,
+        html: buildExportHtml(state.markdown, state.fileName),
+      });
+      return;
+    }
+    const html = buildExportHtml(state.markdown, state.fileName);
     downloadBlob(`${base}.html`, html, 'text/html;charset=utf-8');
     setStatus('安全化済みHTMLを書き出しました');
   }
 
   function printPreview() {
     renderPreview();
+    if (requestDesktopCommand('print')) return;
     window.print();
   }
 
@@ -9218,6 +9456,14 @@ flowchart TD
   }
 
   function exportSettingsFile() {
+    if (state.desktopHost) {
+      postDesktopMessage({
+        type: 'desktop.exportSettings',
+        fileName: CONFIG_SETTINGS_FILE_NAME,
+        content: settingsFileText(),
+      });
+      return;
+    }
     downloadBlob(CONFIG_SETTINGS_FILE_NAME, settingsFileText(), 'application/json;charset=utf-8');
     setStatus(`外部リンク許可ドメイン設定を書き出しました: ${state.allowedLinkDomains.length}件`);
   }
@@ -9334,6 +9580,7 @@ flowchart TD
   function markDirty() {
     state.dirty = true;
     updateStatusBar();
+    notifyDesktopDocumentState();
   }
 
   function scheduleRender(reason = 'edit') {
@@ -11644,11 +11891,27 @@ flowchart TD
     const words = countWords(state.markdown);
     els.stats.textContent = `${chars.toLocaleString()}文字 / ${words.toLocaleString()}語`;
     els.fileNameLabel.textContent = state.fileName;
-    const dirtyText = state.dirty ? '未保存' : '保存済み';
+    const dirtyText = state.dirty
+      ? '未保存'
+      : state.desktopHost && !state.desktopDocumentReady
+        ? '未保存文書'
+        : '保存済み';
     const autoText = state.lastAutoSaved ? formatTime(state.lastAutoSaved) : '未保存';
-    const folderAccess = state.directoryHandle ? ' / FSAフォルダ' : state.markdownRelativePath ? ' / フォルダ入力' : '';
+    const folderAccess = state.desktopDocumentReady
+      ? ' / Windowsファイル'
+      : state.directoryHandle
+        ? ' / FSAフォルダ'
+        : state.markdownRelativePath
+          ? ' / フォルダ入力'
+          : '';
     els.saveState.textContent = `${dirtyText} / 自動保存: ${autoText}${folderAccess}`;
-    document.body.dataset.folderAccess = state.directoryHandle ? 'fsa' : state.markdownRelativePath ? 'input' : 'none';
+    document.body.dataset.folderAccess = state.desktopDocumentReady
+      ? 'desktop'
+      : state.directoryHandle
+        ? 'fsa'
+        : state.markdownRelativePath
+          ? 'input'
+          : 'none';
   }
 
   function setStatus(message) {
@@ -13706,6 +13969,7 @@ ${body}
     if (isRelativeImageReference(decoded)) {
       const normalized = normalizeAssetPath(decoded);
       if (isUnsafeRelativePath(normalized)) return '安全でない相対パスです';
+      if (state.desktopHost && !state.desktopDocumentReady) return '先にMarkdownファイルを保存すると相対画像を表示できます';
       if (!state.markdownRelativePath) return 'フォルダが許可されていないため、Markdownファイル基準の相対画像を読めません';
       return '許可済みフォルダ内に画像ファイルが見つかりません';
     }
@@ -13729,10 +13993,20 @@ ${body}
   function resolveFolderAssetUrl(value) {
     const key = normalizeAssetPath(value);
     if (!key || isUnsafeRelativePath(key)) return '';
+    if (state.desktopHost && state.desktopDocumentReady) return desktopDocumentAssetUrl(key);
     return state.assetUrls.get(key)
       || state.assetUrls.get(key.replace(/^\.\//, ''))
       || state.assetUrls.get(`./${key}`)
       || '';
+  }
+
+  function desktopDocumentAssetUrl(value) {
+    const decoded = decodeLocalImagePath(value).replace(/\\/g, '/');
+    const parts = decoded.split('/').filter((part) => part && part !== '.');
+    if (!parts.length || parts.includes('..')) return '';
+    if (parts.some((part) => /[\u0000-\u001F\u007F]/.test(part))) return '';
+    const encoded = parts.map((part) => encodeURIComponent(part)).join('/');
+    return `https://${DESKTOP_DOCUMENT_HOST}/${encoded}`;
   }
 
   function hasRasterImageExtension(value) {

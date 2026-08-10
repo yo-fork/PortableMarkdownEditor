@@ -117,7 +117,7 @@ assert.match(app, /function\s+snapshotRichDeleteFromKeydown/, 'rich delete opera
 assert.match(app, /フォルダが許可されていない/, 'missing folder permission should be explained to the user');
 assert.match(app, /addEventListener\('drop', onEditorDrop\)/, 'editors should accept dropped image files');
 assert.match(app, /addEventListener\('paste', onMarkdownPaste\)/, 'source editor should handle pasted image files');
-assert.match(app, /dataset\.folderAccess = state\.directoryHandle \? 'fsa'/, 'UI should expose when the current folder came from File System Access API');
+assert.match(app, /dataset\.folderAccess = state\.desktopDocumentReady[\s\S]+state\.directoryHandle[\s\S]+\? 'fsa'/, 'UI should expose desktop and File System Access API folder sources separately');
 assert.match(app, /function\s+restorePersistedDirectoryHandle/, 'File System Access directory handles should be restorable after reopening');
 assert.match(app, /window\.indexedDB\.open\(FSA_DB_NAME,\s*1\)/, 'persisted File System Access handles should use local IndexedDB only');
 assert.match(app, /persistDirectoryHandle\(directoryHandle\)/, 'opened File System Access directory handle should be persisted for reopen');

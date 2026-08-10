@@ -2,32 +2,101 @@
 
 Windowsでインストールせずに使える、完全ローカル実行のMarkdownエディタです。
 
-* `index.html` をブラウザで開くだけで起動します。
-* CDN、アプリ実行時のnpm実行、外部配信JavaScript、外部配信CSS、外部API通信は使いません。必要なブラウザ用ライブラリは `vendor/` に固定して同梱します。
-* リッチ編集は vendored ProseMirror、Markdownソース編集は vendored CodeMirror 6 を使い、ローカル同梱ファイルだけを読み込みます。
-* シームレスなリッチ編集、ソース編集、分割プレビュー、プレビュー専用、集中モードを切り替えられます。
-* 初期表示はリッチ編集モードです。
-* Markdownの読み込み、保存、HTML出力、HTMLコピー、PDF/印刷に対応します。File System Access API でフォルダを許可している場合、保存ボタンは開いているMarkdownファイルへ上書き保存します。未許可時は従来どおりダウンロード保存します。
-* Markdownと画像を含むフォルダを開くと、相対画像パスをMarkdownファイルの場所基準で表示します。対応ブラウザでは File System Access API のフォルダ選択を使い、未対応環境では従来のフォルダ入力にフォールバックします。
-* すでに編集中のMarkdownに対しては、「フォルダ許可」から本文を読み直さずにフォルダ参照だけ接続できます。
-* File System Access API 対応ブラウザでは、「ファイルから開く」「フォルダから開く」「フォルダ許可」のダイアログ開始位置に、現在のMarkdownファイルのディレクトリまたは前回選択したフォルダを使います。
-* フォルダを開く場合の走査は最大5,000ファイル、最大8階層までです。上限を超えた部分は読み飛ばし、警告ダイアログと画面下部のステータスに表示します。
-* File System Access API でフォルダを開いている場合、`Ctrl+V` や画像ファイルのドラッグアンドドロップで、Markdownファイル名に対応した `ファイル名.assets/` フォルダへ画像を保存し、相対参照として挿入できます。フォルダ未許可時は画像保存や相対画像表示ができない理由を画面上に表示します。
-* Markdown内のHTMLは実行せず文字として扱います。
-* 完全ローカル性を優先し、外部リンクは許可ドメイン制、`javascript:` など危険なリンク、遠隔画像、SVG data画像はブロックします。許可ドメインはlocalStorageに保存し、JSON設定ファイルから読み込み/書き出しできます。File System Access API対応ブラウザでは、許可した設定フォルダの `portable-markdown-editor-settings.json` を起動時に自動読み込みし、同じファイルへ上書き保存できます。
+推奨するWindowsアプリ版と、従来のブラウザ版を同じ編集基盤で提供します。
 
-## 使い方
+Windowsアプリ版では、WPFがファイル操作と印刷を担当し、同梱WebView2がProseMirror、CodeMirror、Mermaid、KaTeXを使った編集画面を表示します。
 
-推奨ブラウザは Microsoft Edge または Google Chrome です。File System Access API を使った上書き保存、フォルダ許可、画像assets保存はChromium系ブラウザでの利用を前提にしています。
+CDN、外部配信JavaScript、外部配信CSS、外部API通信は使いません。
+
+## 推奨: Windowsアプリ版
+
+`dist/PortableMarkdownEditor/PortableMarkdownEditor.exe` をダブルクリックすると起動します。
+
+インストーラー、管理者権限、ユーザー登録、ログインは不要です。
+
+初回起動時も、Webサイトのフォルダ権限を許可する操作はありません。
+
+ファイル選択と保存先選択にはWindows標準ダイアログを使います。
+
+これはOSに対するユーザーの選択操作であり、Webサイトの認証や永続的なフォルダ権限付与ではありません。
+
+Windowsアプリ版では、次の操作をネイティブ側が担当します。
+
+* Markdownの新規作成、読み込み、上書き保存、名前を付けて保存を行います。
+* 未保存の文書を閉じる場合や別文書へ切り替える場合に確認します。
+* HTMLと外部リンク許可設定をWindows標準ダイアログから書き出します。
+* Windowsの印刷画面を開き、プリンターまたはMicrosoft Print to PDFへ出力します。
+* 選択、貼り付け、ドラッグアンドドロップした画像を `MarkdownFileName.assets/` へ保存します。
+* 開いているMarkdownファイルの場所を基準として、相対画像を表示します。
+
+WebViewへはMarkdown本文、表示用ファイル名、限定された命令だけを渡します。
+
+実ファイルの絶対パスや任意のファイルアクセスAPIはWebViewへ渡しません。
+
+### 動作条件
+
+Windowsアプリ版の動作条件は次のとおりです。
+
+* Windows 10またはWindows 11のx64環境。
+* .NET Framework 4.8以降。
+* Microsoft Edge WebView2 Evergreen Runtime。
+
+現在のWindows 10/11ではWebView2 Runtimeが導入済みであることが多いものの、未導入環境では別途Runtimeが必要です。
+
+完全な単一EXEではなく、EXE、WebView2 SDK DLL、ローカルWeb資産をまとめたポータブルフォルダとして配布します。
+
+固定版WebView2 Runtimeは容量が大きいため同梱していません。
+
+アプリの下書きとWebView2プロファイルは、EXEと同じ場所の `data/WebView2/` に保存します。
+
+アプリを別の場所へ移す場合は、下書きを維持するなら `data/` も一緒に移してください。
+
+### Windowsアプリのビルド
+
+プロジェクト直下で次を実行します。
+
+```powershell
+.\BuildPortableWindows.cmd
+```
+
+ビルドスクリプトは、導入済みのVisual Studio Build Tools、WebView2 SDK、.NET Frameworkを検出します。
+
+パッケージマネージャー、依存関係の復元、ネットワーク取得は実行しません。
+
+.NET Framework 4.8 Targeting Packがある場合はそれを使い、ない場合は導入済みの.NET Framework 4.8ランタイムアセンブリを使います。
+
+再現性を重視するビルド環境では、Visual Studio Build ToolsのMSBuild、.NET Framework 4.8 Targeting Pack、同一バージョンのWebView2 Core/WPF/Loaderを用意してください。
+
+生成物は次の場所に出力します。
+
+* ポータブルフォルダ: `dist/PortableMarkdownEditor/`
+* 配布ZIP: `dist/PortableMarkdownEditor-win-x64.zip`
+
+ビルド時にはネイティブのファイル処理検査も実行します。
+
+検査内容は、UTF-8の往復、BOMなし保存、画像署名とMIMEの一致、assetsファイル名の重複回避、Windows予約名の無害化です。
+
+## ブラウザ版
+
+ブラウザ版は、Visual StudioやWebView2 SDKを使わずに実行できます。
+
+推奨ブラウザはMicrosoft EdgeまたはGoogle Chromeです。
 
 1. ZIPを展開します。
 2. `OpenMarkdownEditor.cmd` または `index.html` をダブルクリックします。
-3. 「ファイルから開く」でMarkdownファイルを読み込み、「保存」でMarkdownとして保存します。フォルダ許可済みなら元ファイルへ上書きし、未許可ならダウンロード保存します。
-4. 相対画像をMarkdownファイル基準で表示・挿入したい場合は、「フォルダから開く」からMarkdownと画像を含むフォルダを選びます。編集中内容を維持したまま権限だけ付けたい場合は「フォルダ許可」を使います。対応ブラウザでは画像貼り付け/ドロップ時に `ファイル名.assets/` へ保存します。
-5. 外部リンクを有効にしたい場合は、「リンク許可」からドメインを1行ずつ登録します。同じ画面から `allowedLinkDomains` を含むJSON設定ファイルの読み込みと書き出しもできます。「設定フォルダ許可」で任意の `config` フォルダなどを許可すると、次回起動時に `portable-markdown-editor-settings.json` を自動読み込みできます。
-6. PDF化は「PDF/印刷」から Windows の「Microsoft Print to PDF」を選びます。
+3. 「ファイルから開く」でMarkdownを読み込みます。
+4. 元ファイルへの上書き、相対画像の表示、assets画像保存を使う場合は「フォルダから開く」または「フォルダ許可」で対象フォルダを許可します。
+5. 「保存」で、フォルダ許可済みなら元ファイルへ上書きし、未許可ならダウンロード保存します。
 
-通常は `index.html` を直接ダブルクリックして使えます。必要に応じてローカルHTTPで確認する場合は、プロジェクト直下で次のように起動し、EdgeまたはChromeで `http://127.0.0.1:8773/index.html` を開きます。
+ブラウザ版の上書き保存とassets画像保存にはFile System Access APIを使います。
+
+未対応ブラウザでは、フォルダ入力とダウンロード保存へフォールバックします。
+
+フォルダ走査は最大5,000ファイル、最大8階層に制限します。
+
+上限を超えた部分は読み飛ばし、警告ダイアログとステータスに表示します。
+
+必要に応じてローカルHTTPで確認する場合は、プロジェクト直下で次を実行し、`http://127.0.0.1:8773/index.html` を開きます。
 
 ```powershell
 py -m http.server 8773 --bind 127.0.0.1
@@ -39,11 +108,28 @@ py -m http.server 8773 --bind 127.0.0.1
 python -m http.server 8773 --bind 127.0.0.1
 ```
 
+## 主な機能
+
+* vendored ProseMirrorによるリッチ編集と、vendored CodeMirror 6によるMarkdownソース編集を切り替えます。
+* リッチ、分割、ソース、プレビュー、集中の5モードを備えます。
+* Markdown、Mermaid図、KaTeX数式、コードハイライトをローカル同梱ライブラリだけで処理します。
+* Markdown内のraw HTMLは実行せず、文字として扱います。
+* 外部リンクは許可ドメイン制とし、危険なスキームをリンク化しません。
+* 遠隔画像、SVG data画像、ローカル絶対パス画像をブロックします。
+* PNG、JPEG、GIF、WebPの相対画像とassets画像保存に対応します。
+* 下書きと表示設定をローカルに自動保存します。
+
+Windowsアプリ版ではMarkdownを10MB以下、挿入画像を1ファイル25MB以下に制限します。
+
+MarkdownファイルはUTF-8として読み込み、BOMなしUTF-8で保存します。
+
 ## ショートカット
 
 |キー|操作|
 |-|-|
+|`Ctrl + N`|新規作成、Windowsアプリ版のみ|
 |`Ctrl + S`|Markdown保存|
+|`Ctrl + Shift + S`|名前を付けて保存、Windowsアプリ版のみ|
 |`Ctrl + O`|Markdownを開く|
 |`Ctrl + P`|PDF/印刷|
 |`Ctrl + B`|太字|
@@ -52,33 +138,46 @@ python -m http.server 8773 --bind 127.0.0.1
 
 ## 対応Markdown
 
-見出し、段落、引用、箇条書き、番号リスト、チェックリスト、表、コードブロック、インラインコード、太字、斜体、打ち消し線、リンク、PNG/JPEG/GIF/WebPのdata URL画像、許可済みフォルダ内の相対画像参照、assetsフォルダへの画像貼り付け/ドロップ、折りたたみ可能な目次 `\[toc]` に対応しています。
+見出し、段落、引用、箇条書き、番号リスト、チェックリスト、表、コードブロック、インラインコード、太字、斜体、打ち消し線、リンク、画像、折りたたみ可能な目次 `[toc]` に対応します。
 
-Markdown解析、リッチ編集、ソース編集、コードハイライト、Mermaid図、KaTeX数式は、`vendor/` に同梱したブラウザ用ライブラリをローカルから読み込んで処理します。`js`, `ts`, `python`, `html`, `css`, `json`, `bash`, `powershell`, `sql`, `yaml` などの主要言語、`mermaid` コードブロック、`$...$` / `$$...$$` / `\(...\)` / `\[...\]` の数式に対応します。
+`js`、`ts`、`python`、`html`、`css`、`json`、`bash`、`powershell`、`sql`、`yaml` などの主要言語をハイライトします。
+
+`mermaid` コードブロックと、`$...$`、`$$...$$`、`\(...\)`、`\[...\]` の数式に対応します。
 
 ## 開発時の検査
 
-アプリの実行にNode.jsは不要ですが、開発時の自動検査にはNode.jsを使います。
+アプリの実行にNode.jsは不要ですが、Web側の開発時検査にはNode.jsを使います。
+
 依存関係の追加やパッケージマネージャーの実行は不要です。
 
-プロジェクト直下で `RunChecks.cmd` を実行すると、構文検査、セキュリティ検査、描画検査、同梱ライブラリの整合性検査を順に実行します。
+プロジェクト直下で `RunChecks.cmd` を実行すると、構文、セキュリティ、デスクトップ境界、描画、同梱ライブラリの整合性を検査します。
+
+Windows配布物の実ビルドとネイティブファイル処理検査は `BuildPortableWindows.cmd` が担当します。
 
 ブラウザでの確認項目は [`tests/manual-checklist.md`](tests/manual-checklist.md) に記載しています。
+
 同梱ライブラリの簡易確認は、ローカルHTTPサーバーで [`tests/browser-selftest.html`](tests/browser-selftest.html) を開いて実行できます。
+
+Windowsアプリ版の構成と信頼境界は [`docs/windows-portable-app.md`](docs/windows-portable-app.md) に記載しています。
 
 ## セキュリティ設計
 
-詳しくは [`SECURITY.md`](SECURITY.md) と [`docs/security-model.md`](docs/security-model.md) を参照してください。
+詳しくは [`SECURITY.md`](SECURITY.md)、[`docs/security-model.md`](docs/security-model.md)、[`docs/windows-portable-app.md`](docs/windows-portable-app.md) を参照してください。
 
-主な防御方針は次の通りです。
+主な防御方針は次のとおりです。
 
-* アプリ本体に Content Security Policy を設定し、外部通信、外部埋め込み、フォーム送信を禁止。
-* raw HTMLはMarkdownとして解釈せず、エスケープして表示。
-* リンクURLは許可制。相対リンク、アンカー、ユーザーが許可したドメインの `http`/`https` のみリンク化し、危険なスキームはリンク化しない。
-* 画像は PNG/JPEG/GIF/WebP のみ許可。挿入画像は `MarkdownFileName.assets/` に保存して相対参照し、File System Access APIで許可したMarkdownファイル基準の相対パスだけを表示します。`file:` URL、Windowsドライブパス、UNCパス、遠隔画像は直接読み込まず、ネットワークドライブ上の画像も許可したフォルダ内の相対パスとして扱います。
-* `eval`、`new Function`、Web Worker、fetch/XHRは不使用。同梱ライブラリも `script-src 'self'` の範囲でだけ読み込みます。
-* vendorファイルは手動で確認・更新し、アプリ実行時にnpmやネットワーク取得は行いません。
+* Content Security Policyで外部通信、外部埋め込み、フォーム送信を禁止します。
+* raw HTMLを無効化し、リンクと画像のURLを別々に検証します。
+* WindowsホストはWebView2のホストオブジェクトを無効化し、限定したJSONメッセージだけを受け付けます。
+* WebViewからのメッセージは、固定したアプリオリジンから届いた場合だけ処理します。
+* Windowsホストは実ファイルパスをWebViewへ送らず、開いている文書フォルダを相対画像専用の仮想ホストへ割り当てます。
+* 画像は拡張子だけでなくバイト署名とMIMEを照合し、任意の保存名や上書きを許可しません。
+* `eval`、`new Function`、Web Worker、fetch、XHRを使いません。
 
 ## ライセンス
 
-MIT Licenseです。個人利用・商用利用を問わず、利用、複製、改変、再配布、販売を許可する扱いです。詳細は [`LICENSE`](LICENSE) を確認してください。
+本プロジェクトはMIT Licenseです。
+
+詳細は [`LICENSE`](LICENSE) を確認してください。
+
+Windows配布物に含めるWebView2 SDKのライセンスは [`native/THIRD-PARTY-NOTICES.txt`](native/THIRD-PARTY-NOTICES.txt) に収録しています。

@@ -112,6 +112,17 @@
 
 * { box-sizing: border-box; }
 
+body[data-desktop-host="true"] [data-action="new"],
+body[data-desktop-host="true"] [data-action="open"],
+body[data-desktop-host="true"] [data-action="open-folder"],
+body[data-desktop-host="true"] [data-action="grant-folder"],
+body[data-desktop-host="true"] [data-action="save-md"],
+body[data-desktop-host="true"] [data-action="print"],
+body[data-desktop-host="true"] [data-action="grant-settings-folder"],
+body[data-desktop-host="true"] [data-action="save-settings-file"] {
+  display: none;
+}
+
 html, body {
   width: 100%;
   min-height: 100%;
