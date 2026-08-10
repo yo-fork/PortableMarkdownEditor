@@ -137,6 +137,9 @@ assert.match(app, /async function\s+openSingleMarkdownFile\(file, options = \{\}
 assert.match(app, /async function\s+openFolderEntries[\s\S]+els\.source\.value = state\.markdown;[\s\S]+syncCodeMirrorSourceFromTextarea\('open-folder'\);[\s\S]+renderAll\('open-folder'\);/, 'opening from a folder should sync CodeMirror before rendering the new document');
 assert.match(app, /function\s+renderProseMirrorRich/, 'app.js should integrate the vendored ProseMirror rich editor');
 assert.match(app, /resolveImageSrc:\s*sanitizeImageUrl[\s\S]+imageBlockReason/, 'ProseMirror rich editor should use the app image resolver instead of raw relative image URLs');
+assert.match(app, /function\s+requestDesktopImageReferenceAliases/, 'desktop mode should request restricted aliases for document-local absolute image references');
+assert.match(app, /function\s+installMarkdownItMath/, 'preview rendering should parse inline math before Markdown escaping');
+assert.match(app, /function\s+inlineMathTokenAt/, 'preview and fallback rendering should share inline math delimiter checks');
 assert.match(app, /state\.proseMirrorRich\.refreshImages\(\)/, 'ProseMirror rich editor should refresh image node views when folder asset mappings change');
 assert.match(app, /async function\s+openSingleMarkdownFile\(file, options = \{\}\)[\s\S]+attachPreviouslyGrantedDirectoryToOpenedMarkdown\(file, options\.fileHandle \|\| null, previousDirectoryHandle\)[\s\S]+clearPersistedDirectoryHandle\(\)/, 'opening a file should try an already-granted folder before clearing folder access');
 assert.match(app, /async function\s+attachPreviouslyGrantedDirectoryToOpenedMarkdown\(file, fileHandle, directoryHandleOverride = null\)[\s\S]+fileHandle\?\.isSameEntry[\s\S]+queryDirectoryPermission\(directoryHandle, 'readwrite'\)[\s\S]+findOpenedMarkdownEntry\(entries, file, fileHandle\)/, 'file open should reuse an existing folder only when the file handle is verified inside that granted folder');
@@ -177,6 +180,9 @@ assert.doesNotMatch(codeMirrorBundle, /\bWorker\b/, 'CodeMirror bundle must not 
 
 const proseMirrorBundle = read('vendor/prosemirror/prosemirror-editor.js');
 assert.match(proseMirrorBundle, /global\.PMEProseMirror/, 'ProseMirror bundle should expose one local global');
+assert.match(proseMirrorBundle, /function\s+preserveMarkdownLocalPaths/, 'ProseMirror Markdown parsing should preserve readable Windows image paths');
+assert.match(proseMirrorBundle, /function\s+inlineMathMatchAt/, 'ProseMirror inline math parsing should use strict shared delimiter checks');
+assert.match(proseMirrorBundle, /var delimiter = [^;]+\\\\\[/, 'ProseMirror display math parsing should recognize bracket delimiters');
 assert.match(proseMirrorBundle, /function\s+ImageNodeView\(node, editorView, getPos, options\)[\s\S]+data-pme-atom-node', 'image'[\s\S]+this\.render\(\)/, 'ProseMirror rich editor should render images through a node view');
 assert.match(proseMirrorBundle, /function\s+resolveImageNodeSrc\(src, options\)[\s\S]+options\.resolveImageSrc\(src\)/, 'ProseMirror image node views should resolve Markdown image src values through the app callback');
 assert.match(proseMirrorBundle, /ImageNodeView\.prototype\.render[\s\S]+image\.src = resolved[\s\S]+blocked-image[\s\S]+imageFallbackText/, 'ProseMirror image node views should show resolved images or blocked-image placeholders');
@@ -365,6 +371,21 @@ assert.equal(
   proseMirrorContext.window.PMEProseMirror.normalizeMarkdown('[x](a(b)c)'),
   '[x](a\\(b\\)c)',
   'link targets should escape parentheses without leaking bundle placeholders',
+);
+assert.equal(
+  proseMirrorContext.window.PMEProseMirror.normalizeMarkdown(String.raw`![img](<C:\Users\rokuh\Documents\sample image.png>)`),
+  String.raw`![img](<C:\Users\rokuh\Documents\sample image.png>)`,
+  'Windows image paths should not turn backslashes into percent encoding during rich-mode round trips',
+);
+assert.equal(
+  proseMirrorContext.window.PMEProseMirror.normalizeMarkdown(String.raw`Inline \(x^2+y^2\) and $z=1$`),
+  'Inline $x^2+y^2$ and $z=1$',
+  'both inline math delimiter styles should survive rich-mode normalization',
+);
+assert.equal(
+  proseMirrorContext.window.PMEProseMirror.normalizeMarkdown(String.raw`\[x^2+y^2\]`),
+  '$$\nx^2+y^2\n$$',
+  'bracket display math should survive rich-mode normalization',
 );
 const extendedRoundTrip = proseMirrorContext.window.PMEProseMirror.normalizeMarkdown([
   '# Extended PM',

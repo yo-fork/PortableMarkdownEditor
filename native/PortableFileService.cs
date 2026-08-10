@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
@@ -195,6 +196,87 @@ namespace PortableMarkdownEditor.Desktop
             throw new IOException("画像の保存名を確保できませんでした。");
         }
 
+        internal static Dictionary<string, string> ResolveDocumentImageReferences(
+            string documentPath,
+            IEnumerable<string> references)
+        {
+            Dictionary<string, string> aliases
+                = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (references == null)
+            {
+                return aliases;
+            }
+
+            string fullDocumentPath = RequireDocumentPath(documentPath, true);
+            string documentDirectory = Path.GetDirectoryName(fullDocumentPath);
+            if (string.IsNullOrEmpty(documentDirectory))
+            {
+                return aliases;
+            }
+
+            string directoryPrefix = documentDirectory.TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            foreach (string reference in references.Where(value => !string.IsNullOrWhiteSpace(value)).Take(64))
+            {
+                if (reference.Length > 4096)
+                {
+                    continue;
+                }
+
+                string candidate;
+                try
+                {
+                    candidate = DecodeLocalImageReference(reference);
+                    if (!Path.IsPathRooted(candidate))
+                    {
+                        continue;
+                    }
+                    candidate = Path.GetFullPath(candidate);
+                }
+                catch (Exception exception) when (
+                    exception is ArgumentException
+                    || exception is NotSupportedException
+                    || exception is UriFormatException)
+                {
+                    continue;
+                }
+
+                if (!candidate.StartsWith(directoryPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                bool supported;
+                try
+                {
+                    supported = File.Exists(candidate) && IsSupportedRasterImageFile(candidate);
+                }
+                catch (Exception exception) when (
+                    exception is IOException
+                    || exception is UnauthorizedAccessException
+                    || exception is System.Security.SecurityException)
+                {
+                    continue;
+                }
+                if (!supported)
+                {
+                    continue;
+                }
+
+                string relativePath = candidate.Substring(directoryPrefix.Length)
+                    .Replace(Path.DirectorySeparatorChar, '/')
+                    .Replace(Path.AltDirectorySeparatorChar, '/');
+                if (relativePath.Length == 0 || relativePath.Split('/').Contains(".."))
+                {
+                    continue;
+                }
+                aliases[reference] = relativePath;
+            }
+
+            return aliases;
+        }
+
         private static string RequireDocumentPath(string path, bool mustExist)
         {
             if (string.IsNullOrWhiteSpace(path))
@@ -222,6 +304,60 @@ namespace PortableMarkdownEditor.Desktop
         private static int MaximumBase64Length(int byteCount)
         {
             return checked(((byteCount + 2) / 3) * 4 + 8);
+        }
+
+        private static string DecodeLocalImageReference(string value)
+        {
+            string decoded = value ?? string.Empty;
+            if (decoded.IndexOf('%') >= 0)
+            {
+                decoded = Uri.UnescapeDataString(decoded);
+            }
+
+            Uri fileUri;
+            if (Uri.TryCreate(decoded, UriKind.Absolute, out fileUri) && fileUri.IsFile)
+            {
+                return fileUri.LocalPath;
+            }
+            return decoded;
+        }
+
+        private static bool IsSupportedRasterImageFile(string path)
+        {
+            string extension = Path.GetExtension(path).ToLowerInvariant();
+            if (extension != ".png"
+                && extension != ".jpg"
+                && extension != ".jpeg"
+                && extension != ".gif"
+                && extension != ".webp")
+            {
+                return false;
+            }
+
+            FileInfo info = new FileInfo(path);
+            if (info.Length == 0 || info.Length > MaxAssetBytes)
+            {
+                return false;
+            }
+
+            byte[] header = new byte[Math.Min(16, checked((int)info.Length))];
+            using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                int offset = 0;
+                while (offset < header.Length)
+                {
+                    int read = stream.Read(header, offset, header.Length - offset);
+                    if (read == 0)
+                    {
+                        return false;
+                    }
+                    offset += read;
+                }
+            }
+
+            string detected = DetectImageExtension(header);
+            return detected == extension
+                || detected == ".jpg" && extension == ".jpeg";
         }
 
         private static bool HasUtf8Bom(byte[] data)

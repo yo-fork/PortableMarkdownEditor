@@ -282,6 +282,9 @@ namespace PortableMarkdownEditor.Desktop
                     case "desktop.saveAsset":
                         HandleAssetSave(message);
                         break;
+                    case "desktop.resolveImageReferences":
+                        await HandleImageReferenceResolutionAsync(message);
+                        break;
                     case "desktop.exportHtml":
                         await RunOperationAsync(() => SaveHtmlExportAsync(message));
                         break;
@@ -372,6 +375,31 @@ namespace PortableMarkdownEditor.Desktop
             {
                 SendHostError(requestId, SafeAssetErrorMessage(exception));
             }
+        }
+
+        private async Task HandleImageReferenceResolutionAsync(Dictionary<string, object> message)
+        {
+            string requestId = GetString(message, "requestId");
+            if (!IsValidRequestId(requestId))
+            {
+                return;
+            }
+
+            string[] references = GetStringArray(message, "references", 64, 4096);
+            Dictionary<string, string> aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrEmpty(_documentPath) && references.Length > 0)
+            {
+                string documentPath = _documentPath;
+                aliases = await Task.Run(
+                    () => PortableFileService.ResolveDocumentImageReferences(documentPath, references));
+            }
+
+            SendHostMessage(new Dictionary<string, object>
+            {
+                { "type", "host.imageReferencesResolved" },
+                { "requestId", requestId },
+                { "aliases", aliases },
+            });
         }
 
         private async Task ExecuteEditorCommandAsync(string command)
@@ -782,6 +810,34 @@ namespace PortableMarkdownEditor.Desktop
 
             bool parsed;
             return bool.TryParse(Convert.ToString(value), out parsed) && parsed;
+        }
+
+        private static string[] GetStringArray(
+            Dictionary<string, object> message,
+            string key,
+            int maximumItems,
+            int maximumItemLength)
+        {
+            object value;
+            object[] items = message != null && message.TryGetValue(key, out value)
+                ? value as object[]
+                : null;
+            if (items == null || items.Length == 0)
+            {
+                return new string[0];
+            }
+
+            List<string> values = new List<string>();
+            int count = Math.Min(items.Length, maximumItems);
+            for (int index = 0; index < count; index += 1)
+            {
+                string item = Convert.ToString(items[index]) ?? string.Empty;
+                if (item.Length > 0 && item.Length <= maximumItemLength)
+                {
+                    values.Add(item);
+                }
+            }
+            return values.ToArray();
         }
 
         private static bool IsValidRequestId(string value)

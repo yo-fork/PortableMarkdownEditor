@@ -59,7 +59,11 @@ Run these checks without npm, package managers, CDN, or network access.
 6. Close or replace a modified document and confirm the native unsaved-change warning appears.
 7. Insert the same PNG/JPEG/GIF/WebP image twice and confirm both files are saved under `MarkdownFileName.assets/` with non-colliding names.
 8. Reopen the Markdown file and confirm its relative assets image renders through the document virtual host.
-9. Export HTML and link-domain settings and confirm both use native Windows save dialogs.
-10. Open Print and confirm the Windows system print dialog appears.
-11. Move the complete portable folder to another writable location and confirm it starts without installation or administrator privileges.
-12. On a test PC without WebView2 Runtime, confirm startup fails visibly instead of silently; install-free operation requires the runtime to already exist.
+9. Open a document containing a `C:\...` image path that points inside the document folder. Confirm the image renders and switching rich/source modes does not change `\` into `%5C`.
+10. Confirm an absolute image path outside the document folder remains a reasoned placeholder.
+11. Open `samples/math-syntax-gallery.md` and confirm `$...$`, `\(...\)`, `$$...$$`, and `\[...\]` render in rich, split, and preview modes.
+12. Confirm `\$100`, inline code, and fenced code in the math gallery do not become formulas.
+13. Export HTML and link-domain settings and confirm both use native Windows save dialogs.
+14. Open Print and confirm the Windows system print dialog appears.
+15. Move the complete portable folder to another writable location and confirm it starts without installation or administrator privileges.
+16. On a test PC without WebView2 Runtime, confirm startup fails visibly instead of silently; install-free operation requires the runtime to already exist.

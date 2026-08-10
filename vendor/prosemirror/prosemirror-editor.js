@@ -17645,12 +17645,39 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     });
   }
 
+  function decodeMarkdownLocalPath(value) {
+    var source = String(value || '');
+    if (!/%[0-9A-Fa-f]{2}/.test(source)) return source;
+    try { return decodeURIComponent(source); }
+    catch (_) {
+      return source.replace(/%5c/gi, '\\').replace(/%2f/gi, '/').replace(/%20/gi, ' ');
+    }
+  }
+
+  function shouldPreserveMarkdownLocalPath(value) {
+    var decoded = decodeMarkdownLocalPath(value);
+    return decoded.indexOf('\\') >= 0
+      || /^[A-Za-z]:[\\/]/.test(decoded)
+      || /^file:/i.test(decoded);
+  }
+
+  function preserveMarkdownLocalPaths(tokenizer) {
+    var normalizeLink = tokenizer.normalizeLink.bind(tokenizer);
+    tokenizer.normalizeLink = function(value) {
+      return shouldPreserveMarkdownLocalPath(value) ? decodeMarkdownLocalPath(value) : normalizeLink(value);
+    };
+  }
+
   function addMathBlockRule(tokenizer) {
     tokenizer.block.ruler.before('fence', 'pme_math_display', function(state, startLine, endLine, silent) {
       var start = state.bMarks[startLine] + state.tShift[startLine];
       var max = state.eMarks[startLine];
       var line = state.src.slice(start, max);
-      var inlineMatch = line.match(/^\s*\$\$\s*([\s\S]*?)\s*\$\$\s*$/);
+      var delimiter = /^\s*\$\$/.test(line) ? '$$' : /^\s*\\\[/.test(line) ? '\\[' : '';
+      if (!delimiter) return false;
+      var inlineMatch = delimiter === '$$'
+        ? line.match(/^\s*\$\$\s*([\s\S]*?)\s*\$\$\s*$/)
+        : line.match(/^\s*\\\[\s*([\s\S]*?)\s*\\\]\s*$/);
       if (inlineMatch && inlineMatch[1]) {
         if (silent) return true;
         var inlineToken = state.push('math_display', '', 0);
@@ -17659,12 +17686,14 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
         state.line = startLine + 1;
         return true;
       }
-      if (!/^\s*\$\$\s*$/.test(line)) return false;
+      var openingPattern = delimiter === '$$' ? /^\s*\$\$\s*$/ : /^\s*\\\[\s*$/;
+      var closingPattern = delimiter === '$$' ? /^\s*\$\$\s*$/ : /^\s*\\\]\s*$/;
+      if (!openingPattern.test(line)) return false;
       var nextLine = startLine + 1;
       while (nextLine < endLine) {
         var nextStart = state.bMarks[nextLine] + state.tShift[nextLine];
         var nextMax = state.eMarks[nextLine];
-        if (/^\s*\$\$\s*$/.test(state.src.slice(nextStart, nextMax))) break;
+        if (closingPattern.test(state.src.slice(nextStart, nextMax))) break;
         nextLine += 1;
       }
       if (nextLine >= endLine) return false;
@@ -17677,36 +17706,56 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     });
   }
 
+  function isEscapedMarkdownCharacter(text, index) {
+    var slashes = 0;
+    for (var cursor = index - 1; cursor >= 0 && text.charAt(cursor) === '\\'; cursor -= 1) slashes += 1;
+    return slashes % 2 === 1;
+  }
+
+  function inlineMathMatchAt(source, start) {
+    if (source.slice(start, start + 2) === '\\(' && !isEscapedMarkdownCharacter(source, start)) {
+      var parenClose = source.indexOf('\\)', start + 2);
+      while (parenClose >= 0 && isEscapedMarkdownCharacter(source, parenClose)) {
+        parenClose = source.indexOf('\\)', parenClose + 2);
+      }
+      if (parenClose < 0) return null;
+      var parenValue = source.slice(start + 2, parenClose);
+      if (!parenValue || parenValue.indexOf('\n') >= 0 || /^\s|\s$/.test(parenValue)) return null;
+      return { value: parenValue, end: parenClose + 2 };
+    }
+
+    if (source.charAt(start) !== '$'
+      || source.charAt(start + 1) === '$'
+      || /\s/.test(source.charAt(start + 1))
+      || isEscapedMarkdownCharacter(source, start)) return null;
+    var close = start + 1;
+    while (close < source.length) {
+      close = source.indexOf('$', close);
+      if (close < 0) return null;
+      if (!isEscapedMarkdownCharacter(source, close)
+        && source.charAt(close - 1) !== '$'
+        && source.charAt(close + 1) !== '$'
+        && !/\s/.test(source.charAt(close - 1))) {
+        var value = source.slice(start + 1, close);
+        if (value && value.indexOf('\n') < 0) return { value: value, end: close + 1 };
+      }
+      close += 1;
+    }
+    return null;
+  }
+
   function addMathInlineRule(tokenizer) {
     tokenizer.inline.ruler.before('escape', 'pme_math_inline', function(state, silent) {
       var start = state.pos;
       var source = state.src;
-      if (source.slice(start, start + 2) === '\\(') {
-        var close = source.indexOf('\\)', start + 2);
-        if (close < 0 || close === start + 2) return false;
-        if (!silent) {
-          var parenToken = state.push('math_inline', '', 0);
-          parenToken.content = source.slice(start + 2, close);
-        }
-        state.pos = close + 2;
-        return true;
+      var match = inlineMathMatchAt(source, start);
+      if (!match) return false;
+      if (!silent) {
+        var token = state.push('math_inline', '', 0);
+        token.content = match.value;
       }
-      if (source.charAt(start) !== '$' || source.charAt(start + 1) === '$') return false;
-      var index = start + 1;
-      while (index < source.length) {
-        var found = source.indexOf('$', index);
-        if (found < 0) return false;
-        if (found > start + 1 && source.charAt(found - 1) !== '\\' && source.charAt(found + 1) !== '$') {
-          if (!silent) {
-            var token = state.push('math_inline', '', 0);
-            token.content = source.slice(start + 1, found);
-          }
-          state.pos = found + 1;
-          return true;
-        }
-        index = found + 1;
-      }
-      return false;
+      state.pos = match.end;
+      return true;
     });
   }
 
@@ -17734,6 +17783,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
 
   function createMarkdownItTokenizer() {
     var tokenizer = MarkdownIt('commonmark', { html: false });
+    preserveMarkdownLocalPaths(tokenizer);
     tokenizer.enable('table');
     addTocBlockRule(tokenizer);
     addMathBlockRule(tokenizer);
@@ -17751,6 +17801,16 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       tr: { block: 'table_row' },
       th: { block: 'table_header', getAttrs: tableCellAttrsFromToken },
       td: { block: 'table_cell', getAttrs: tableCellAttrsFromToken },
+      image: {
+        node: 'image',
+        getAttrs: function(token) {
+          return {
+            src: decodeMarkdownLocalPath(token.attrGet('src') || ''),
+            title: token.attrGet('title') || null,
+            alt: token.children[0] && token.children[0].content || null
+          };
+        }
+      },
       math_inline: {
         node: 'math_inline',
         getAttrs: function(token) { return { latex: token.content || '' }; }
@@ -17837,6 +17897,13 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       table_row: function(state, node) { state.renderContent(node); },
       table_cell: function(state, node) { state.renderInline(node); },
       table_header: function(state, node) { state.renderInline(node); },
+      image: function(state, node) {
+        var target = markdownImageTarget(node.attrs.src || '');
+        var title = node.attrs.title
+          ? ' "' + String(node.attrs.title).replace(/"/g, '\\"').replace(/[\r\n]/g, ' ') + '"'
+          : '';
+        state.write('![' + state.esc(node.attrs.alt || '') + '](' + target + title + ')');
+      },
       math_inline: function(state, node) {
         state.write('$' + escapeInlineMath(node.attrs.latex) + '$');
       },

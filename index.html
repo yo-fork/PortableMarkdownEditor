@@ -57,7 +57,7 @@
         <button type="button" data-action="insert-link" title="リンク (Ctrl+K)" aria-keyshortcuts="Control+K">リンク</button>
         <button type="button" data-action="insert-mermaid" title="Mermaid図を挿入">Mermaid</button>
         <button type="button" data-action="insert-image" title="assetsフォルダへ保存して相対参照を挿入">画像挿入</button>
-        <button type="button" data-action="insert-image-ref" title="ローカル/ネットワークドライブ画像を参照">画像参照</button>
+        <button type="button" data-action="insert-image-ref" title="Markdownファイル基準の相対画像パスを参照">画像参照</button>
       </nav>
 
       <div class="view-controls" role="group" aria-label="表示モード">
@@ -144,7 +144,7 @@
         <li>Content Security Policyで通信、埋め込み、フォーム送信、外部スクリプトを禁止。</li>
         <li>Markdown内のHTMLは実行せず、文字としてエスケープ。</li>
         <li>JavaScript URL、危険なプロトコル、外部画像読み込みをブロック。</li>
-        <li>画像はPNG/JPEG/GIF/WebPのみ。挿入画像はassetsフォルダへの相対参照にし、File System Access APIで許可されたフォルダ内の相対パスだけを表示。</li>
+        <li>画像はPNG/JPEG/GIF/WebPのみ。相対パスを基本とし、Windowsアプリ版では文書フォルダ内を指す既存の絶対パスだけを制限付きで解決。</li>
         <li>下書き、設定、リンク許可ドメインはブラウザのlocalStorageに保存。リンク許可ドメインはユーザーが選んだJSON設定ファイルから読み込み、JSONとして書き出せます。許可した設定フォルダは起動時に自動読み込みし、同じJSONへ上書き保存できます。File System Access APIのフォルダハンドルはIndexedDBに保存。</li>
         <li>Markdown保存は、フォルダ許可済みなら開いているMarkdownファイルへ上書きし、未許可時はユーザー操作によるダウンロード保存。</li>
         <li>貼り付け/ドロップ画像は、フォルダ許可済みの場合だけMarkdownファイル横のassetsフォルダへ保存。外部アップロードや同期は行いません。</li>

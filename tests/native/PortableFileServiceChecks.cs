@@ -16,6 +16,7 @@ namespace PortableMarkdownEditor.Desktop
             {
                 CheckDocumentRoundTrip(testRoot);
                 CheckAssetValidationAndAllocation(testRoot);
+                CheckDocumentImageReferenceResolution(testRoot);
                 Console.WriteLine("native file service checks passed");
                 return 0;
             }
@@ -91,6 +92,44 @@ namespace PortableMarkdownEditor.Desktop
             Expect<InvalidDataException>(
                 () => PortableFileService.SaveAsset(documentPath, "bad.png", "image/png", "not-base64"),
                 "malformed base64 was accepted");
+        }
+
+        private static void CheckDocumentImageReferenceResolution(string testRoot)
+        {
+            string documentPath = Path.Combine(testRoot, "validation.md");
+            string imagePath = Path.Combine(testRoot, "validation.assets", "pasted.png");
+            string encodedPath = imagePath.Replace("\\", "%5C");
+            var aliases = PortableFileService.ResolveDocumentImageReferences(
+                documentPath,
+                new[] { imagePath, encodedPath, Path.Combine(testRoot, "missing.png") });
+            Require(
+                aliases[imagePath] == "validation.assets/pasted.png",
+                "document-local absolute image path was not resolved");
+            Require(
+                aliases[encodedPath] == "validation.assets/pasted.png",
+                "percent-encoded document-local image path was not resolved");
+            Require(aliases.Count == 2, "missing image path was resolved unexpectedly");
+
+            string outsidePath = Path.Combine(
+                Path.GetTempPath(),
+                "PortableMarkdownEditor-outside-" + Guid.NewGuid().ToString("N") + ".png");
+            try
+            {
+                File.WriteAllBytes(
+                    outsidePath,
+                    new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00 });
+                var outside = PortableFileService.ResolveDocumentImageReferences(
+                    documentPath,
+                    new[] { outsidePath });
+                Require(outside.Count == 0, "image outside the document folder was resolved");
+            }
+            finally
+            {
+                if (File.Exists(outsidePath))
+                {
+                    File.Delete(outsidePath);
+                }
+            }
         }
 
         private static void Expect<TException>(Action action, string message)

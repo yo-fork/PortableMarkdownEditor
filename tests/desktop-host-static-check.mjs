@@ -45,6 +45,8 @@ assert.match(windowCode, /if \(!IsAppSource\(eventArgs\.Source\)\)/);
 assert.match(windowCode, /Core_NavigationStarting[\s\S]+eventArgs\.Cancel = true/);
 assert.match(windowCode, /Core_PermissionRequested[\s\S]+CoreWebView2PermissionState\.Deny/);
 assert.match(windowCode, /PostWebMessageAsJson/);
+assert.match(windowCode, /desktop\.resolveImageReferences/);
+assert.match(windowCode, /HandleImageReferenceResolutionAsync/);
 assert.doesNotMatch(windowCode, /AddHostObjectToScript/);
 
 assert.match(fileService, /MaxDocumentBytes = 10 \* 1024 \* 1024/);
@@ -55,6 +57,9 @@ assert.match(fileService, /FileAttributes\.ReparsePoint/);
 assert.match(fileService, /UTF8Encoding\(false, true\)/);
 assert.match(fileService, /MoveFileEx/);
 assert.match(fileService, /WriteSettingsExport/);
+assert.match(fileService, /ResolveDocumentImageReferences/);
+assert.match(fileService, /IsSupportedRasterImageFile/);
+assert.match(fileService, /StartsWith\(directoryPrefix, StringComparison\.OrdinalIgnoreCase\)/);
 
 assert.match(buildScript, /vswhere\.exe/);
 assert.match(buildScript, /Microsoft\.Web\.WebView2\.Core\.dll/);
@@ -75,6 +80,8 @@ assert.match(notice, /THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CON
 
 assert.match(nativeChecks, /CheckDocumentRoundTrip/);
 assert.match(nativeChecks, /CheckAssetValidationAndAllocation/);
+assert.match(nativeChecks, /CheckDocumentImageReferenceResolution/);
+assert.match(nativeChecks, /image outside the document folder was resolved/);
 assert.match(nativeChecks, /MIME and image signature mismatch was accepted/);
 
 assert.match(portableReadme, /WebView2 Evergreen Runtime/);

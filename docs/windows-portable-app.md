@@ -52,13 +52,18 @@ WebViewからネイティブ側へ送れる主なメッセージは次のとお�
 * `desktop.documentSnapshot` は、ネイティブ側が要求した現在のMarkdownを返します。
 * `desktop.command` は、新規、開く、保存、別名保存、印刷のいずれかを要求します。
 * `desktop.saveAsset` は、ユーザーが選択した画像をassetsフォルダへ保存するよう要求します。
+* `desktop.resolveImageReferences` は、Markdownに含まれる絶対画像パスを現在の文書フォルダ内に限定して検査するよう要求します。
 * `desktop.exportHtml` と `desktop.exportSettings` は、明示操作で生成した内容の保存を要求します。
 
 ネイティブ側は、送信元が `https://portable-markdown-editor.local/` の場合だけメッセージを処理します。
 
 ホストオブジェクトは無効化しているため、JavaScriptから任意の.NETメソッドを呼べません。
 
-ネイティブ側は、絶対パス、フォルダ列挙結果、汎用ファイル読込関数をWebViewへ公開しません。
+ネイティブ側は、現在の文書パス、フォルダ列挙結果、汎用ファイル読込関数をWebViewへ公開しません。
+
+既存Markdownに絶対画像パスが含まれる場合は、最大64件をネイティブ側で検査します。
+
+現在の文書フォルダ内に実在し、拡張子、ファイル署名、25MBの上限を満たすラスター画像だけを相対パスへ変換して返します。
 
 ## 仮想ホスト
 
@@ -70,7 +75,7 @@ Web側は、安全な相対パスをURLセグメント単位でエンコード�
 
 Content Security Policyは、この文書ホストを `img-src` にだけ追加し、`connect-src`、`script-src`、`object-src` では許可しません。
 
-`..` を含む相対パス、ローカル絶対パス、UNCパス、遠隔画像は従来どおりブロックします。
+`..` を含む相対パス、文書フォルダ外のローカル絶対パス、文書フォルダ外のUNCパス、遠隔画像はブロックします。
 
 ## Windows側の検証
 

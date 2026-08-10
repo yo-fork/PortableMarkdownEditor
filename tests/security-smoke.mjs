@@ -23,6 +23,8 @@ assert.doesNotMatch(index, /https?:\/\/.*\.(js|css)/i, 'no external JS/CSS');
 assert.match(app, /function\s+sanitizeLinkUrl/);
 assert.match(app, /function\s+sanitizeImageUrl/);
 assert.match(app, /function\s+normalizeLocalImageUrl/);
+assert.match(app, /function\s+requestDesktopImageReferenceAliases/);
+assert.match(app, /desktop\.resolveImageReferences/);
 assert.match(app, /function\s+renderMermaidBlock/);
 assert.match(app, /function\s+highlightCode/);
 assert.match(app, /javascript:alert\(1\)/, 'sample malicious link should exist in default markdown');
@@ -425,12 +427,26 @@ assert.match(rendered, /mermaid-diagram/, 'mermaid blocks should render locally'
 assert.match(rendered, /<svg class="mermaid-svg"[^>]+width="\d+"[^>]+height="\d+"/, 'mermaid SVG should have explicit dimensions');
 assert.match(rendered, /mermaid-flow-node-label/, 'local flowchart labels should use readable flowchart text styling');
 assert.doesNotMatch(rendered, /file:\/\/\/Z:\/share\/local%20sample\.webp/, 'Windows drive images should not render as file URLs');
+assert.doesNotMatch(rendered, /%5C/i, 'Windows image paths should not be displayed in percent-encoded form');
+assert.ok(rendered.includes(`data-markdown-src="${drivePath}"`), 'blocked Windows image paths should preserve readable backslashes');
 assert.match(rendered, /ローカル絶対パスは直接読み込みません/, 'Windows drive images should explain that absolute paths are not loaded directly');
 assert.match(rendered, /blocked-image/, 'remote images should remain blocked');
 assert.equal(renderer.sanitizeLinkUrl('javascript:alert(1)'), '');
 assert.equal(renderer.sanitizeImageUrl('https://example.com/a.png'), '');
 assert.equal(renderer.sanitizeImageUrl(uncPath), '');
 assert.equal(renderer.sanitizeImageUrl('C:%5CUsers%5Crokuh%5CDocuments%5Cimage-3.png'), '');
+
+renderer.state.desktopHost = true;
+renderer.state.desktopDocumentReady = true;
+renderer.state.desktopImageAliases.set(drivePath.toLowerCase(), 'images/local sample.webp');
+assert.equal(
+  renderer.sanitizeImageUrl('Z:%5Cshare%5Clocal%20sample.webp'),
+  'https://document.portable-markdown-editor.local/images/local%20sample.webp',
+  'desktop mode should resolve a validated document-local absolute image alias',
+);
+renderer.state.desktopImageAliases.clear();
+renderer.state.desktopHost = false;
+renderer.state.desktopDocumentReady = false;
 
 const branchRendered = renderer.renderMarkdownHtml([
   '```mermaid',

@@ -1,15 +1,21 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import vm from 'node:vm';
+
+const require = createRequire(import.meta.url);
+const MarkdownIt = require('../vendor/markdown-it/markdown-it.min.js');
+const katex = require('../vendor/katex/katex.min.js');
 
 const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
 const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
 const extraGallery = readFileSync(new URL('../samples/mermaid-extra-gallery.md', import.meta.url), 'utf8');
 const advancedGallery = readFileSync(new URL('../samples/mermaid-advanced-gallery.md', import.meta.url), 'utf8');
+const mathGallery = readFileSync(new URL('../samples/math-syntax-gallery.md', import.meta.url), 'utf8');
 const instrumented = app.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml };\n})();');
 const renderer = vm.runInNewContext(instrumented, {
   document: { addEventListener() {} },
-  window: {},
+  window: { markdownit: MarkdownIt, katex },
   localStorage: {},
   URL,
   Blob,
@@ -114,6 +120,21 @@ assert.match(mathBlocks, /class="math-display"/, 'display math blocks render as 
 assert.match(mathBlocks, /data-math-source="x\+1"/, 'single-line display math preserves its source');
 assert.match(mathBlocks, /data-math-source="\\int_0\^1 x\^2 dx = \\frac\{1\}\{3\}"/, 'multi-line display math preserves its source');
 assert.doesNotMatch(mathBlocks, /<p><div class="math-display"/, 'display math should not be nested inside a paragraph');
+
+const inlineMath = renderer.renderMarkdownHtml(String.raw`Dollar $E=mc^2$ and paren \(a^2+b^2=c^2\).`);
+assert.equal((inlineMath.match(/class="math-inline"/g) || []).length, 2, 'both inline math delimiter styles render');
+assert.equal((inlineMath.match(/class="katex"/g) || []).length, 2, 'inline math is rendered by KaTeX before DOM post-processing');
+assert.match(inlineMath, /data-math-source="E=mc\^2"/, 'dollar inline math preserves its source');
+assert.match(inlineMath, /data-math-source="a\^2\+b\^2=c\^2"/, 'paren inline math preserves its source');
+
+const nonMath = renderer.renderMarkdownHtml('Price \\$100 and code `$raw$`.');
+assert.equal((nonMath.match(/class="math-inline"/g) || []).length, 0, 'escaped dollars and code spans do not become math');
+assert.match(nonMath, /<code>\$raw\$<\/code>/, 'code spans preserve math-looking text');
+
+const mathGalleryRendered = renderer.renderMarkdownHtml(mathGallery);
+assert.equal((mathGalleryRendered.match(/class="math-inline"/g) || []).length, 2, 'math gallery covers both inline delimiter styles');
+assert.equal((mathGalleryRendered.match(/class="math-display"/g) || []).length, 4, 'math gallery covers one-line and multiline display delimiter styles');
+assert.ok((mathGalleryRendered.match(/class="katex"/g) || []).length >= 6, 'all gallery formulas render through KaTeX');
 
 const consecutiveMathBlocks = renderer.renderMarkdownHtml([
   '## KaTeX display',

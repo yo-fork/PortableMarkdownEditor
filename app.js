@@ -124,6 +124,9 @@ flowchart TD
     desktopHost: detectDesktopHost(),
     desktopDocumentReady: false,
     desktopAssetRequests: new Map(),
+    desktopImageAliases: new Map(),
+    desktopImageReferencesKey: '',
+    desktopImageReferenceRequestId: '',
     desktopLastReportedDirty: null,
     desktopLastReportedFileName: '',
     scrollSyncLock: false,
@@ -250,6 +253,9 @@ flowchart TD
       case 'host.assetSaved':
         resolveDesktopAssetRequest(message);
         break;
+      case 'host.imageReferencesResolved':
+        applyDesktopImageReferenceAliases(message);
+        break;
       case 'host.error':
         rejectDesktopAssetRequest(message);
         setStatus(String(message.message || 'Windows側の処理に失敗しました'));
@@ -275,6 +281,7 @@ flowchart TD
 
   function applyDesktopDocument(message, statusMessage) {
     clearAssetUrls();
+    resetDesktopImageReferenceAliases();
     state.directoryHandle = null;
     state.directoryName = '';
     state.fileHandle = null;
@@ -307,6 +314,7 @@ flowchart TD
     state.desktopDocumentReady = message.hasDocumentFolder === true;
     state.markdownRelativePath = state.desktopDocumentReady ? state.fileName : '';
     state.dirty = false;
+    resetDesktopImageReferenceAliases();
     renderPreview();
     state.proseMirrorRich?.refreshImages?.();
     persistDraft();
@@ -340,6 +348,66 @@ flowchart TD
     window.clearTimeout(request.timer);
     state.desktopAssetRequests.delete(message.requestId);
     request.reject(new Error(String(message.message || '画像の保存に失敗しました')));
+  }
+
+  function resetDesktopImageReferenceAliases() {
+    state.desktopImageAliases.clear();
+    state.desktopImageReferencesKey = '';
+    state.desktopImageReferenceRequestId = '';
+  }
+
+  function requestDesktopImageReferenceAliases() {
+    if (!state.desktopHost || !state.desktopDocumentReady) return;
+    const references = absoluteImageReferencesFromMarkdown(state.markdown);
+    const key = references.map(desktopImageAliasKey).sort().join('\n');
+    if (key === state.desktopImageReferencesKey) return;
+    state.desktopImageReferencesKey = key;
+    state.desktopImageAliases.clear();
+    if (!references.length) {
+      state.desktopImageReferenceRequestId = '';
+      return;
+    }
+    const requestId = `image-refs-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    state.desktopImageReferenceRequestId = requestId;
+    postDesktopMessage({
+      type: 'desktop.resolveImageReferences',
+      requestId,
+      references,
+    });
+  }
+
+  function applyDesktopImageReferenceAliases(message) {
+    if (!message || message.requestId !== state.desktopImageReferenceRequestId) return;
+    state.desktopImageReferenceRequestId = '';
+    state.desktopImageAliases.clear();
+    const aliases = message.aliases && typeof message.aliases === 'object' ? message.aliases : {};
+    for (const [reference, relativePath] of Object.entries(aliases)) {
+      const normalized = normalizeAssetPath(relativePath);
+      if (!normalized || isUnsafeRelativePath(normalized) || !hasRasterImageExtension(normalized)) continue;
+      state.desktopImageAliases.set(desktopImageAliasKey(reference), normalized);
+    }
+    renderPreview();
+    state.proseMirrorRich?.refreshImages?.();
+  }
+
+  function absoluteImageReferencesFromMarkdown(markdown) {
+    const references = [];
+    const seen = new Set();
+    const pattern = /!\[[^\]\n]*\]\((<[^>\n]+>|[^)\n]+)\)/g;
+    for (const match of String(markdown || '').matchAll(pattern)) {
+      const target = decodeLocalImagePath(parseMarkdownTarget(match[1] || ''));
+      if (!isLocalAbsoluteImageReference(target) || !hasRasterImageExtension(target)) continue;
+      const key = desktopImageAliasKey(target);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      references.push(target);
+      if (references.length >= 64) break;
+    }
+    return references;
+  }
+
+  function desktopImageAliasKey(value) {
+    return decodeLocalImagePath(String(value || '').trim()).replace(/\//g, '\\').toLowerCase();
   }
 
   function cacheElements() {
@@ -9645,6 +9713,7 @@ flowchart TD
   function renderPreview() {
     const html = renderMarkdownHtml(state.markdown);
     safeSetHtml(els.preview, html);
+    requestDesktopImageReferenceAliases();
   }
 
   function renderRich() {
@@ -12178,6 +12247,8 @@ flowchart TD
         return highlightCodeWithVendor(code, normalizeCodeLanguage(lang));
       },
     });
+    preserveMarkdownLocalPaths(md);
+    installMarkdownItMath(md);
     try {
       md.enable(['strikethrough']);
     } catch (_) {}
@@ -12222,7 +12293,7 @@ flowchart TD
 
     md.renderer.rules.image = (tokens, index) => {
       const token = tokens[index];
-      const src = token.attrGet('src') || '';
+      const src = restoreMarkdownLocalPath(token.attrGet('src') || '');
       const safe = sanitizeImageUrl(src);
       const alt = token.content || token.attrGet('alt') || 'no alt';
       if (!safe) return renderBlockedImage(src, alt);
@@ -12299,6 +12370,82 @@ flowchart TD
 
   function defaultMarkdownItRule(tokens, index, options, _env, self) {
     return self.renderToken(tokens, index, options);
+  }
+
+  function preserveMarkdownLocalPaths(md) {
+    if (!md || typeof md.normalizeLink !== 'function') return;
+    const normalizeLink = md.normalizeLink.bind(md);
+    md.normalizeLink = (value) => shouldPreserveMarkdownLocalPath(value)
+      ? restoreMarkdownLocalPath(value)
+      : normalizeLink(value);
+  }
+
+  function shouldPreserveMarkdownLocalPath(value) {
+    const decoded = decodeLocalImagePath(String(value || ''));
+    return decoded.includes('\\')
+      || /^[A-Za-z]:[\\/]/.test(decoded)
+      || /^file:/i.test(decoded);
+  }
+
+  function restoreMarkdownLocalPath(value) {
+    return shouldPreserveMarkdownLocalPath(value) ? decodeLocalImagePath(value) : String(value || '');
+  }
+
+  function installMarkdownItMath(md) {
+    if (!md?.inline?.ruler || !md?.renderer?.rules) return;
+    md.inline.ruler.before('escape', 'pme_math_inline', (inlineState, silent) => {
+      const match = inlineMathTokenAt(inlineState.src, inlineState.pos);
+      if (!match) return false;
+      if (!silent) {
+        const token = inlineState.push('pme_math_inline', '', 0);
+        token.content = match.value;
+      }
+      inlineState.pos = match.end;
+      return true;
+    });
+    md.renderer.rules.pme_math_inline = (tokens, index) => renderInlineMathHtml(tokens[index].content || '');
+  }
+
+  function renderInlineMathHtml(source) {
+    const value = String(source || '');
+    return `<span class="math-inline" data-math-source="${escapeAttribute(value)}" data-math-display="false">${renderKaTeX(value, false)}</span>`;
+  }
+
+  function inlineMathTokenAt(text, start) {
+    const source = String(text || '');
+    if (source.slice(start, start + 2) === '\\(' && !isEscapedCharacter(source, start)) {
+      let close = source.indexOf('\\)', start + 2);
+      while (close >= 0 && isEscapedCharacter(source, close)) close = source.indexOf('\\)', close + 2);
+      if (close < 0) return null;
+      const value = source.slice(start + 2, close);
+      if (!value || value.includes('\n') || /^\s|\s$/.test(value)) return null;
+      return { value, end: close + 2 };
+    }
+
+    if (source[start] !== '$'
+      || source[start + 1] === '$'
+      || /\s/.test(source[start + 1] || '')
+      || isEscapedCharacter(source, start)) return null;
+    let close = start + 1;
+    while (close < source.length) {
+      close = source.indexOf('$', close);
+      if (close < 0) return null;
+      if (!isEscapedCharacter(source, close)
+        && source[close - 1] !== '$'
+        && source[close + 1] !== '$'
+        && !/\s/.test(source[close - 1] || '')) {
+        const value = source.slice(start + 1, close);
+        if (value && !value.includes('\n')) return { value, end: close + 1 };
+      }
+      close += 1;
+    }
+    return null;
+  }
+
+  function isEscapedCharacter(text, index) {
+    let slashes = 0;
+    for (let cursor = index - 1; cursor >= 0 && text[cursor] === '\\'; cursor -= 1) slashes += 1;
+    return slashes % 2 === 1;
   }
 
   function findPreviousOpenToken(tokens, closeIndex) {
@@ -12737,6 +12884,10 @@ flowchart TD
       if (!safe) return hold(`<span class="blocked-link">リンクブロック: ${escapeHtml(label)}</span>`);
       return hold(`<a href="${escapeAttribute(safe)}" data-markdown-href="${escapeAttribute(url)}" rel="noopener noreferrer" target="_blank">${escapeHtml(label)}</a>`);
     });
+
+    text = splitMathSegments(text)
+      .map((part) => part.type === 'math' ? hold(renderInlineMathHtml(part.value)) : part.value)
+      .join('');
 
     text = escapeHtml(text);
     text = text.replace(/~~(.+?)~~/g, '<del>$1</del>');
@@ -13444,7 +13595,7 @@ flowchart TD
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; img-src 'self' data: blob:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none';">
 <title>${title}</title>
 <style>
-body{margin:0;padding:clamp(1rem,4vw,4rem);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.75;color:#111827;background:#fff}main{max-width:920px;margin:auto}h1,h2{border-bottom:1px solid #e5e7eb;padding-bottom:.25rem}pre{overflow:auto;background:#0f172a;color:#e5e7eb;border-radius:.75rem;padding:1rem}code{font-family:Consolas,monospace;background:#f3f4f6;border-radius:.25rem;padding:.1rem .25rem}pre code{background:transparent;padding:0}.code-lang{float:right;color:#94a3b8;font:700 .72rem system-ui}.tok-comment{color:#94a3b8}.tok-string{color:#a7f3d0}.tok-number{color:#fde68a}.tok-keyword{color:#93c5fd}.tok-function{color:#f9a8d4}.tok-property{color:#c4b5fd}.tok-tag{color:#fca5a5}.tok-operator{color:#cbd5e1}blockquote{border-left:.25rem solid #2563eb;margin:1rem 0;padding:.25rem 1rem;background:#eff6ff}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d1d5db;padding:.5rem}.align-left{text-align:left}.align-center{text-align:center}.align-right{text-align:right}img{max-width:100%}.meta{color:#6b7280;font-size:.9rem}.blocked-image,.blocked-link{color:#b42318;border:1px solid #f3b8b1;border-radius:.3rem;padding:.1rem .3rem}.toc{border:1px solid #e5e7eb;border-radius:.75rem;padding:1rem}.toc a{display:block;color:#2563eb;text-decoration:none}.mermaid-diagram{margin:1.25rem 0}.mermaid-diagram figcaption{font-weight:700;color:#475569;margin-bottom:.4rem}.mermaid-svg{width:100%;height:auto;min-height:10rem;max-height:none;border:1px solid #d1d5db;border-radius:.75rem;background:#f8fafc}.mermaid-sequence .mermaid-svg,.mermaid-svg.mindmapDiagram{max-width:min(100%,820px);margin-inline:auto}.mermaid-svg.flowchart{display:block;width:min(100%,560px);margin-inline:auto}.mermaid-svg.flowchart text{font-size:12px!important}.mermaid-fallback pre{margin:0}.mermaid-svg .edgeLabel text,.mermaid-svg .edgeLabel tspan{paint-order:stroke;stroke:#f8fafc;stroke-width:7px;stroke-linejoin:round}.mermaid-node rect,.mermaid-node ellipse,.mermaid-node polygon,.mermaid-seq-participant rect{fill:#fff;stroke:#2563eb;stroke-width:1.5}.mermaid-svg.mindmapDiagram .section-root circle,.mermaid-svg.mindmapDiagram .node-bkg{fill:#fff!important;stroke:#2563eb!important}.mermaid-svg.mindmapDiagram .label .background{fill:#fff!important;opacity:.92!important}.mermaid-svg.mindmapDiagram .edge{stroke:#2563eb!important;stroke-width:2px!important;stroke-opacity:.22}.mermaid-edge path,.mermaid-message path{stroke:#334155;stroke-width:1.6;fill:none}.mermaid-edge-label,.mermaid-message text{font:650 18px system-ui;fill:#475569;text-anchor:middle;paint-order:stroke;stroke:#f8fafc;stroke-width:7px;stroke-linejoin:round}.mermaid-node-label{font:650 16px system-ui;fill:#0f172a}.mermaid-flow-node-label{font:650 24px system-ui;fill:#0f172a}.mermaid-lifeline{stroke:#94a3b8;stroke-dasharray:5 5}.mermaid-note rect{fill:#fef3c7;stroke:#f59e0b}
+body{margin:0;padding:clamp(1rem,4vw,4rem);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.75;color:#111827;background:#fff}main{max-width:920px;margin:auto}h1,h2{border-bottom:1px solid #e5e7eb;padding-bottom:.25rem}pre{overflow:auto;background:#0f172a;color:#e5e7eb;border-radius:.75rem;padding:1rem}code{font-family:Consolas,monospace;background:#f3f4f6;border-radius:.25rem;padding:.1rem .25rem}pre code{background:transparent;padding:0}.code-lang{float:right;color:#94a3b8;font:700 .72rem system-ui}.tok-comment{color:#94a3b8}.tok-string{color:#a7f3d0}.tok-number{color:#fde68a}.tok-keyword{color:#93c5fd}.tok-function{color:#f9a8d4}.tok-property{color:#c4b5fd}.tok-tag{color:#fca5a5}.tok-operator{color:#cbd5e1}blockquote{border-left:.25rem solid #2563eb;margin:1rem 0;padding:.25rem 1rem;background:#eff6ff}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d1d5db;padding:.5rem}.align-left{text-align:left}.align-center{text-align:center}.align-right{text-align:right}img{max-width:100%}.math-inline{display:inline-block}.math-display{display:block;margin:1rem 0;text-align:center}.katex>.katex-mathml{display:inline}.katex>.katex-html{display:none}.meta{color:#6b7280;font-size:.9rem}.blocked-image,.blocked-link{color:#b42318;border:1px solid #f3b8b1;border-radius:.3rem;padding:.1rem .3rem}.toc{border:1px solid #e5e7eb;border-radius:.75rem;padding:1rem}.toc a{display:block;color:#2563eb;text-decoration:none}.mermaid-diagram{margin:1.25rem 0}.mermaid-diagram figcaption{font-weight:700;color:#475569;margin-bottom:.4rem}.mermaid-svg{width:100%;height:auto;min-height:10rem;max-height:none;border:1px solid #d1d5db;border-radius:.75rem;background:#f8fafc}.mermaid-sequence .mermaid-svg,.mermaid-svg.mindmapDiagram{max-width:min(100%,820px);margin-inline:auto}.mermaid-svg.flowchart{display:block;width:min(100%,560px);margin-inline:auto}.mermaid-svg.flowchart text{font-size:12px!important}.mermaid-fallback pre{margin:0}.mermaid-svg .edgeLabel text,.mermaid-svg .edgeLabel tspan{paint-order:stroke;stroke:#f8fafc;stroke-width:7px;stroke-linejoin:round}.mermaid-node rect,.mermaid-node ellipse,.mermaid-node polygon,.mermaid-seq-participant rect{fill:#fff;stroke:#2563eb;stroke-width:1.5}.mermaid-svg.mindmapDiagram .section-root circle,.mermaid-svg.mindmapDiagram .node-bkg{fill:#fff!important;stroke:#2563eb!important}.mermaid-svg.mindmapDiagram .label .background{fill:#fff!important;opacity:.92!important}.mermaid-svg.mindmapDiagram .edge{stroke:#2563eb!important;stroke-width:2px!important;stroke-opacity:.22}.mermaid-edge path,.mermaid-message path{stroke:#334155;stroke-width:1.6;fill:none}.mermaid-edge-label,.mermaid-message text{font:650 18px system-ui;fill:#475569;text-anchor:middle;paint-order:stroke;stroke:#f8fafc;stroke-width:7px;stroke-linejoin:round}.mermaid-node-label{font:650 16px system-ui;fill:#0f172a}.mermaid-flow-node-label{font:650 24px system-ui;fill:#0f172a}.mermaid-lifeline{stroke:#94a3b8;stroke-dasharray:5 5}.mermaid-note rect{fill:#fef3c7;stroke:#f59e0b}
 </style>
 </head>
 <body>
@@ -13853,24 +14004,23 @@ ${body}
   }
 
   function splitMathSegments(text) {
-    const pattern = /(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^\s$][^\n$]*?\$)/g;
+    const source = String(text || '');
     const parts = [];
     let last = 0;
-    for (const match of text.matchAll(pattern)) {
-      if (match.index > last) parts.push({ type: 'text', value: text.slice(last, match.index) });
-      const token = match[0];
-      const display = token.startsWith('$$') || token.startsWith('\\[');
-      const value = token.startsWith('$$')
-        ? token.slice(2, -2)
-        : token.startsWith('\\[')
-          ? token.slice(2, -2)
-          : token.startsWith('\\(')
-            ? token.slice(2, -2)
-            : token.slice(1, -1);
-      parts.push({ type: 'math', value, display });
-      last = match.index + token.length;
+    let cursor = 0;
+    while (cursor < source.length) {
+      const match = inlineMathTokenAt(source, cursor);
+      if (!match) {
+        cursor += 1;
+        continue;
+      }
+      if (cursor > last) parts.push({ type: 'text', value: source.slice(last, cursor) });
+      parts.push({ type: 'math', value: match.value, display: false });
+      cursor = match.end;
+      last = cursor;
     }
-    if (last < text.length) parts.push({ type: 'text', value: text.slice(last) });
+    if (last < source.length) parts.push({ type: 'text', value: source.slice(last) });
+    if (!parts.length) parts.push({ type: 'text', value: source });
     return parts;
   }
 
@@ -13926,7 +14076,12 @@ ${body}
   function normalizeLocalImageUrl(raw) {
     const value = decodeLocalImagePath(String(raw || '').trim().replace(/[\u0000-\u001F\u007F]/g, ''));
     if (!value || value.startsWith('//')) return '';
-    if (isLocalAbsoluteImageReference(value)) return '';
+    if (isLocalAbsoluteImageReference(value)) {
+      const alias = state.desktopHost && state.desktopDocumentReady
+        ? state.desktopImageAliases.get(desktopImageAliasKey(value))
+        : '';
+      return alias ? desktopDocumentAssetUrl(alias) : '';
+    }
     if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) return '';
     return relativeImageUrl(value);
   }
@@ -13965,7 +14120,12 @@ ${body}
     const compact = cleanupUrl(decoded);
     if (!value) return '画像パスが空です';
     if (/^https?:\/\//i.test(compact)) return 'http/https画像はローカル実行と追跡防止のためブロックしています';
-    if (isLocalAbsoluteImageReference(decoded)) return 'ローカル絶対パスは直接読み込みません。フォルダを許可してMarkdown基準の相対パスで参照してください';
+    if (isLocalAbsoluteImageReference(decoded)) {
+      if (state.desktopHost && state.desktopDocumentReady) {
+        return '開いているMarkdownと同じフォルダ内の画像として解決できません。画像挿入でassetsへコピーするか、相対パスへ変更してください';
+      }
+      return 'ローカル絶対パスは直接読み込みません。フォルダを許可してMarkdown基準の相対パスで参照してください';
+    }
     if (isRelativeImageReference(decoded)) {
       const normalized = normalizeAssetPath(decoded);
       if (isUnsafeRelativePath(normalized)) return '安全でない相対パスです';
