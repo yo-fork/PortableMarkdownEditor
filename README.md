@@ -56,6 +56,16 @@ python -m http.server 8773 --bind 127.0.0.1
 
 Markdown解析、リッチ編集、ソース編集、コードハイライト、Mermaid図、KaTeX数式は、`vendor/` に同梱したブラウザ用ライブラリをローカルから読み込んで処理します。`js`, `ts`, `python`, `html`, `css`, `json`, `bash`, `powershell`, `sql`, `yaml` などの主要言語、`mermaid` コードブロック、`$...$` / `$$...$$` / `\(...\)` / `\[...\]` の数式に対応します。
 
+## 開発時の検査
+
+アプリの実行にNode.jsは不要ですが、開発時の自動検査にはNode.jsを使います。
+依存関係の追加やパッケージマネージャーの実行は不要です。
+
+プロジェクト直下で `RunChecks.cmd` を実行すると、構文検査、セキュリティ検査、描画検査、同梱ライブラリの整合性検査を順に実行します。
+
+ブラウザでの確認項目は [`tests/manual-checklist.md`](tests/manual-checklist.md) に記載しています。
+同梱ライブラリの簡易確認は、ローカルHTTPサーバーで [`tests/browser-selftest.html`](tests/browser-selftest.html) を開いて実行できます。
+
 ## セキュリティ設計
 
 詳しくは [`SECURITY.md`](SECURITY.md) と [`docs/security-model.md`](docs/security-model.md) を参照してください。

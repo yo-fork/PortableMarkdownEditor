@@ -212,6 +212,7 @@ flowchart TD
     state.fileName = safeFileName(draft.fileName || 'untitled.md');
     state.markdownRelativePath = normalizeAssetPath(draft.markdownRelativePath || '');
     state.lastAutoSaved = draft.savedAt || null;
+    state.dirty = draft.dirty !== false;
   }
 
   function readJson(key) {
@@ -7094,7 +7095,7 @@ flowchart TD
   }
 
   function newDocument() {
-    if (state.dirty && !confirm('未保存の変更があります。新規作成しますか？')) return;
+    if (!confirmDocumentReplacement('新規文書')) return;
     clearAssetUrls();
     state.markdown = '# 無題\n\nここにMarkdownを書いてください。\n';
     state.fileName = 'untitled.md';
@@ -7109,6 +7110,11 @@ flowchart TD
     renderAll('new');
     persistDraft();
     setStatus('新規文書を作成しました');
+  }
+
+  function confirmDocumentReplacement(nextDocumentLabel) {
+    if (!state.dirty) return true;
+    return confirm(`未保存の変更があります。${nextDocumentLabel}に切り替えますか？`);
   }
 
   async function openMarkdownFile() {
@@ -7233,6 +7239,7 @@ flowchart TD
       setStatus('10MBを超えるファイルは読み込みません');
       return;
     }
+    if (!confirmDocumentReplacement('選択したファイル')) return;
 
     try {
       const text = await readTextFile(file);
@@ -7533,7 +7540,7 @@ flowchart TD
     }
     renderOutline();
     updateStatusBar();
-    document.body.classList.toggle('outline-collapsed', state.outlineCollapsed);
+    applyOutlineVisibility();
   }
 
   function onFolderChosen(event) {
@@ -7648,6 +7655,7 @@ flowchart TD
       setStatus('10MBを超えるファイルは読み込みません');
       return;
     }
+    if (!confirmDocumentReplacement('選択したファイル')) return;
 
     const reader = new FileReader();
     reader.onload = async () => {
@@ -8905,6 +8913,11 @@ flowchart TD
 
   function applyTheme() {
     document.documentElement.dataset.theme = state.theme;
+    const themeButton = document.querySelector('[data-action="toggle-theme"]');
+    if (!themeButton) return;
+    const label = state.theme === 'dark' ? 'ライトテーマに切り替え' : 'ダークテーマに切り替え';
+    themeButton.setAttribute('aria-label', label);
+    themeButton.title = label;
   }
 
   function initializeVendorLibraries() {
@@ -9051,8 +9064,17 @@ flowchart TD
 
   function toggleOutline() {
     state.outlineCollapsed = !state.outlineCollapsed;
-    document.body.classList.toggle('outline-collapsed', state.outlineCollapsed);
+    applyOutlineVisibility();
     persistSettings();
+  }
+
+  function applyOutlineVisibility() {
+    document.body.classList.toggle('outline-collapsed', state.outlineCollapsed);
+    const toggle = document.querySelector('.top-actions [data-action="collapse-outline"]');
+    if (!toggle) return;
+    const visible = !state.outlineCollapsed;
+    toggle.setAttribute('aria-pressed', String(visible));
+    toggle.title = visible ? 'アウトラインを隠す' : 'アウトラインを表示';
   }
 
   function showSecurityDialog() {
@@ -9102,7 +9124,7 @@ flowchart TD
     if (els.allowedDomainsInput) els.allowedDomainsInput.value = '';
     applyTheme();
     initializeVendorLibraries();
-    document.body.classList.remove('outline-collapsed');
+    applyOutlineVisibility();
     applyMode(state.mode, { preserveScroll: false, persist: false });
     renderAll('settings-reset');
     if (options.status !== false) setStatus('設定をリセットしました');
@@ -9341,6 +9363,7 @@ flowchart TD
       markdown: state.markdown,
       fileName: state.fileName,
       markdownRelativePath: state.markdownRelativePath,
+      dirty: state.dirty,
       savedAt: new Date().toISOString(),
     });
     if (ok) {
@@ -9369,7 +9392,7 @@ flowchart TD
     if (reason !== 'rich-input') renderRich();
     renderOutline();
     updateStatusBar();
-    document.body.classList.toggle('outline-collapsed', state.outlineCollapsed);
+    applyOutlineVisibility();
   }
 
   function renderPreview() {

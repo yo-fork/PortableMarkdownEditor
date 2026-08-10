@@ -49,6 +49,8 @@ assert.match(index, /data-action="reset-settings"/, 'settings reset button shoul
 assert.match(index, /data-action="clear-allowed-domains"/, 'allowed domain deletion button should exist');
 assert.match(index, /data-action="clear-folder-permissions"/, 'folder permission record deletion button should exist');
 assert.match(index, /data-action="clear-all-local-data"/, 'all local data deletion button should exist');
+assert.match(index, /class="icon-button" data-action="collapse-outline"[^>]+aria-pressed="true"/, 'the outline should have a persistent topbar toggle after the sidebar is hidden');
+assert.match(index, /data-format="bold"[^>]+aria-label="太字"[^>]+aria-keyshortcuts="Control\+B"/, 'symbol-only formatting buttons should expose descriptive accessible names and shortcuts');
 assert.match(app, /code-language-input/, 'rendered code blocks should expose a language input');
 assert.match(app, /showOpenFilePicker/, 'Open should use File System Access API when available');
 assert.match(app, /function\s+requestDirectoryForOpenedMarkdown/, 'opened Markdown files should be able to request containing folder access');
@@ -101,6 +103,11 @@ assert.match(app, /async function\s+onImageChosen[\s\S]+insertImageFilesAsAssets
 assert.doesNotMatch(app, /readAsDataURL/, 'image picker must not embed selected images as large Data URLs');
 assert.match(app, /createWritable\(\)/, 'assets image insertion should write through File System Access API');
 assert.match(app, /async function\s+saveMarkdownToOpenedFile/, 'save should overwrite the opened Markdown file when File System Access folder permission exists');
+assert.match(app, /function\s+confirmDocumentReplacement[\s\S]+state\.dirty[\s\S]+confirm\(/, 'document replacement should use one unsaved-change confirmation guard');
+assert.match(app, /function\s+restoreDraft[\s\S]+state\.dirty = draft\.dirty !== false/, 'restored and legacy drafts should retain unsaved-change protection');
+assert.match(app, /function\s+persistDraft[\s\S]+dirty:\s*state\.dirty/, 'draft persistence should record whether the document still needs an explicit save');
+assert.match(app, /async function\s+openSingleMarkdownFile[\s\S]+confirmDocumentReplacement\('選択したファイル'\)[\s\S]+readTextFile\(file\)/, 'opening a file should confirm before replacing unsaved content');
+assert.match(app, /async function\s+openFolderEntries[\s\S]+confirmDocumentReplacement\('選択したファイル'\)[\s\S]+new FileReader\(\)/, 'opening a file from a folder should confirm before replacing unsaved content');
 assert.match(app, /function\s+renderBlockedImage/, 'blocked or unresolved images should show an explanatory placeholder');
 assert.match(app, /RICH_INLINE_SOURCE_SELECTOR[\s\S]+\.blocked-image/, 'unresolved image placeholders should participate in inline source editing');
 assert.match(app, /classList\?\.contains\('blocked-image'\)[\s\S]+serializeBlockedImageElement/, 'unresolved image placeholders should restore Markdown image source while editing');
@@ -363,7 +370,8 @@ let objectUrlIndex = 0;
 TestURL.createObjectURL = () => `blob:test-${objectUrlIndex += 1}`;
 TestURL.revokeObjectURL = () => {};
 
-const instrumented = app.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml, sanitizeImageUrl, sanitizeLinkUrl, saveImageFileToAssets, ensureImageAssetWriteAccess, buildFolderAssetUrls, state };\n})();');
+let confirmResult = true;
+const instrumented = app.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml, sanitizeImageUrl, sanitizeLinkUrl, saveImageFileToAssets, ensureImageAssetWriteAccess, buildFolderAssetUrls, confirmDocumentReplacement, state };\n})();');
 const renderer = vm.runInNewContext(instrumented, {
   document: { addEventListener() {} },
   window: { isSecureContext: true },
@@ -371,11 +379,20 @@ const renderer = vm.runInNewContext(instrumented, {
   URL: TestURL,
   Blob,
   navigator: {},
-  confirm() { return true; },
+  confirm() { return confirmResult; },
   prompt() { return ''; },
   alert() {},
   console,
 });
+
+renderer.state.dirty = false;
+confirmResult = false;
+assert.equal(renderer.confirmDocumentReplacement('新規文書'), true, 'clean documents should be replaceable without depending on confirmation');
+renderer.state.dirty = true;
+assert.equal(renderer.confirmDocumentReplacement('新規文書'), false, 'declining confirmation should keep an unsaved document active');
+confirmResult = true;
+assert.equal(renderer.confirmDocumentReplacement('新規文書'), true, 'accepting confirmation should allow document replacement');
+renderer.state.dirty = false;
 
 const caretTokenRendered = renderer.renderMarkdownHtml('**a@PME_CARET_test_123@**');
 assert.doesNotMatch(caretTokenRendered, /PME_CARET/, 'internal rich caret tokens must not render into preview HTML');

@@ -15,7 +15,7 @@
   <script src="./vendor/katex/katex.min.js" defer></script>
   <script src="./vendor/prosemirror/prosemirror-editor.js?v=table-toolbar-1" defer></script>
   <script src="./vendor/codemirror6/source-editor.bundle.js?v=table-toolbar-1" defer></script>
-  <script src="./app.js?v=file-open-reflect-1" defer></script>
+  <script src="./app.js?v=unsaved-outline-2" defer></script>
 </head>
 <body data-mode="rich">
   <a class="skip-link" href="#mainWorkspace">本文へ移動</a>
@@ -32,29 +32,29 @@
 
       <nav class="toolbar" aria-label="ファイル操作">
         <button type="button" data-action="new" title="新規作成">新規</button>
-        <button type="button" data-action="open" title="Markdownファイルを1つ選んで開く">ファイルから開く</button>
+        <button type="button" data-action="open" title="Markdownファイルを1つ選んで開く (Ctrl+O)" aria-keyshortcuts="Control+O">ファイルから開く</button>
         <button type="button" data-action="open-folder" title="フォルダ内のMarkdownを選んで開く">フォルダから開く</button>
         <button type="button" data-action="grant-folder" title="編集中のMarkdownを読み直さずにフォルダだけ許可">フォルダ許可</button>
-        <button type="button" data-action="save-md" title="フォルダ許可時はMarkdownへ上書き保存、未許可時はダウンロード保存">保存</button>
+        <button type="button" data-action="save-md" title="フォルダ許可時はMarkdownへ上書き保存、未許可時はダウンロード保存 (Ctrl+S)" aria-keyshortcuts="Control+S">保存</button>
         <button type="button" data-action="export-html" title="安全化済みHTMLを書き出す">HTML</button>
-        <button type="button" data-action="print" title="PDF化・印刷">PDF/印刷</button>
+        <button type="button" data-action="print" title="PDF化・印刷 (Ctrl+P)" aria-keyshortcuts="Control+P">PDF/印刷</button>
         <button type="button" data-action="copy-html" title="HTMLをクリップボードへコピー">HTMLコピー</button>
         <button type="button" data-action="link-settings" title="外部リンクを許可するドメイン">リンク許可</button>
       </nav>
 
       <nav class="toolbar compact" aria-label="Markdown挿入">
-        <button type="button" data-action="format" data-format="h1" title="見出し1">H1</button>
-        <button type="button" data-action="format" data-format="h2" title="見出し2">H2</button>
-        <button type="button" data-action="format" data-format="bold" title="太字">B</button>
-        <button type="button" data-action="format" data-format="italic" title="斜体">I</button>
-        <button type="button" data-action="format" data-format="code" title="インラインコード">{ }</button>
-        <button type="button" data-action="insert-code-block" title="コードブロック">```</button>
-        <button type="button" data-action="format" data-format="quote" title="引用">&gt;</button>
-        <button type="button" data-action="format" data-format="list" title="箇条書き">•</button>
+        <button type="button" data-action="format" data-format="h1" title="見出し1" aria-label="見出し1">H1</button>
+        <button type="button" data-action="format" data-format="h2" title="見出し2" aria-label="見出し2">H2</button>
+        <button type="button" data-action="format" data-format="bold" title="太字 (Ctrl+B)" aria-label="太字" aria-keyshortcuts="Control+B">B</button>
+        <button type="button" data-action="format" data-format="italic" title="斜体 (Ctrl+I)" aria-label="斜体" aria-keyshortcuts="Control+I">I</button>
+        <button type="button" data-action="format" data-format="code" title="インラインコード" aria-label="インラインコード">{ }</button>
+        <button type="button" data-action="insert-code-block" title="コードブロック" aria-label="コードブロック">```</button>
+        <button type="button" data-action="format" data-format="quote" title="引用" aria-label="引用">&gt;</button>
+        <button type="button" data-action="format" data-format="list" title="箇条書き" aria-label="箇条書き">•</button>
         <button type="button" data-action="format" data-format="table" title="表">表</button>
-        <button type="button" data-action="format" data-format="toc" title="目次">TOC</button>
+        <button type="button" data-action="format" data-format="toc" title="目次" aria-label="目次">TOC</button>
         <button type="button" data-action="format" data-format="math" title="インライン数式">数式</button>
-        <button type="button" data-action="insert-link" title="リンク">リンク</button>
+        <button type="button" data-action="insert-link" title="リンク (Ctrl+K)" aria-keyshortcuts="Control+K">リンク</button>
         <button type="button" data-action="insert-mermaid" title="Mermaid図を挿入">Mermaid</button>
         <button type="button" data-action="insert-image" title="assetsフォルダへ保存して相対参照を挿入">画像挿入</button>
         <button type="button" data-action="insert-image-ref" title="ローカル/ネットワークドライブ画像を参照">画像参照</button>
@@ -75,6 +75,7 @@
       </div>
 
       <div class="top-actions">
+        <button type="button" class="icon-button" data-action="collapse-outline" title="アウトラインを隠す" aria-label="アウトライン表示" aria-pressed="true">☷</button>
         <button type="button" class="icon-button" data-action="toggle-theme" title="ライト/ダーク切り替え" aria-label="ライト/ダーク切り替え">◐</button>
         <button type="button" class="icon-button" data-action="security" title="セキュリティモデル" aria-label="セキュリティモデル">🔒</button>
       </div>
