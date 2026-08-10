@@ -12,6 +12,8 @@ const buildScript = read('../tools/Build-PortableWindows.ps1');
 const notice = read('../native/THIRD-PARTY-NOTICES.txt');
 const nativeChecks = read('./native/PortableFileServiceChecks.cs');
 const portableReadme = read('../native/README-WINDOWS.txt');
+const projectReadme = read('../README.md');
+const releaseReadme = read('../release/README.md');
 
 assert.match(index, /img-src 'self' data: blob: https:\/\/document\.portable-markdown-editor\.local/);
 assert.match(index, /connect-src 'none'/);
@@ -61,6 +63,10 @@ assert.match(buildScript, /WebView2Loader\.dll/);
 assert.match(buildScript, /Assert-GeneratedPath/);
 assert.match(buildScript, /PortableMarkdownEditor\.NativeChecks\.exe/);
 assert.match(buildScript, /README-WINDOWS\.txt/);
+assert.match(buildScript, /\[switch\]\$Publish/);
+assert.match(buildScript, /function Get-Sha256Hex/);
+assert.match(buildScript, /Security\.Cryptography\.SHA256/);
+assert.match(buildScript, /release[^\n]+PortableMarkdownEditor-win-x64\.zip/i);
 assert.doesNotMatch(buildScript, /\b(?:npm|npx|pnpm|yarn|pip|uv|nuget|dotnet)\s+(?:install|add|restore|sync)\b/i);
 
 assert.match(notice, /Microsoft\.Web\.WebView2 1\.0\.2903\.40/);
@@ -73,6 +79,11 @@ assert.match(nativeChecks, /MIME and image signature mismatch was accepted/);
 
 assert.match(portableReadme, /WebView2 Evergreen Runtime/);
 assert.match(portableReadme, /data\\WebView2/);
+assert.match(portableReadme, /Visual Studio[^\n]+不要/);
+assert.match(projectReadme, /release\/PortableMarkdownEditor-win-x64\.zip/);
+assert.match(projectReadme, /BuildPortableWindows\.cmd[^\n]+開発者向け/);
+assert.match(releaseReadme, /PortableMarkdownEditor\.exe/);
+assert.match(releaseReadme, /BuildPortableWindows\.cmd[^\n]+実行しない/);
 
 console.log('desktop host static checks passed');
 

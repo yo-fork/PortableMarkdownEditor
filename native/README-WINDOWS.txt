@@ -4,6 +4,10 @@ PortableMarkdownEditor.exe をダブルクリックすると起動します。
 
 インストール、管理者権限、ユーザー登録、ログインは不要です。
 
+Visual Studio、Visual Studio Installer、MSBuildは不要です。
+
+BuildPortableWindows.cmdは開発者向けです。利用する端末では実行しないでください。
+
 このフォルダ内のEXE、DLL、appフォルダを分離せずに使ってください。
 
 動作にはWindows 10またはWindows 11、.NET Framework 4.8以降、Microsoft Edge WebView2 Evergreen Runtimeが必要です。

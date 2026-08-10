@@ -100,13 +100,21 @@ WebView2のユーザーデータは `data/WebView2/` に置き、ポータブル
 
 ## ビルドと配布
 
+利用者は、リポジトリの `release/PortableMarkdownEditor-win-x64.zip` を展開し、`PortableMarkdownEditor.exe` を起動します。
+
+配布先にVisual Studio、Visual Studio Installer、MSBuildは不要です。
+
 `BuildPortableWindows.cmd` は、導入済みのVisual Studio Build ToolsとWebView2 SDKを探索します。
+
+このスクリプトは開発者がソースから配布物を作るためのものであり、利用者がアプリを起動するためのものではありません。
 
 ネットワーク取得、NuGet復元、npm実行は行いません。
 
 ビルド後は、WPFアプリ、WebView2 SDK DLL、x64 Loader、Web資産、ライセンス表示を一つのフォルダへまとめます。
 
 配布物はフォルダまたはZIPのままコピーして実行できます。
+
+`BuildPortableWindows.cmd -Publish` は、完成済みZIPを `release/` へコピーし、`SHA256SUMS.txt` を更新します。
 
 WebView2 Evergreen Runtimeと.NET Framework 4.8はOS側の実行条件であり、配布フォルダには含めません。
 

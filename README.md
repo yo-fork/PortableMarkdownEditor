@@ -8,9 +8,19 @@ Windowsアプリ版では、WPFがファイル操作と印刷を担当し、同�
 
 CDN、外部配信JavaScript、外部配信CSS、外部API通信は使いません。
 
-## 推奨: Windowsアプリ版
+## Windowsアプリ版をそのまま使う
 
-`dist/PortableMarkdownEditor/PortableMarkdownEditor.exe` をダブルクリックすると起動します。
+完成済みの [`release/PortableMarkdownEditor-win-x64.zip`](release/PortableMarkdownEditor-win-x64.zip) をダウンロードして展開します。
+
+展開した `PortableMarkdownEditor` フォルダ内の `PortableMarkdownEditor.exe` をダブルクリックすると起動します。
+
+Visual Studio、Visual Studio Installer、MSBuildは、利用するWindows端末には不要です。
+
+`BuildPortableWindows.cmd`はソースから再ビルドする開発者向けのファイルであり、アプリの起動には使いません。
+
+配布ZIPのSHA-256は [`release/SHA256SUMS.txt`](release/SHA256SUMS.txt) で確認できます。
+
+## Windowsアプリ版の機能
 
 インストーラー、管理者権限、ユーザー登録、ログインは不要です。
 
@@ -51,7 +61,11 @@ Windowsアプリ版の動作条件は次のとおりです。
 
 アプリを別の場所へ移す場合は、下書きを維持するなら `data/` も一緒に移してください。
 
-### Windowsアプリのビルド
+### 開発者向けビルド
+
+この手順は、ソースを変更してWindowsアプリを再ビルドする場合だけ必要です。
+
+完成済みZIPを利用する端末では実行しません。
 
 プロジェクト直下で次を実行します。
 
@@ -75,6 +89,12 @@ Windowsアプリ版の動作条件は次のとおりです。
 ビルド時にはネイティブのファイル処理検査も実行します。
 
 検査内容は、UTF-8の往復、BOMなし保存、画像署名とMIMEの一致、assetsファイル名の重複回避、Windows予約名の無害化です。
+
+配布用ZIPを `release/` へ更新し、SHA-256を生成する場合は次を実行します。
+
+```powershell
+.\BuildPortableWindows.cmd -Publish
+```
 
 ## ブラウザ版
 
