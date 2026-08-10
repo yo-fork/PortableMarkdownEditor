@@ -661,6 +661,7 @@ flowchart TD
   function bindEvents() {
     document.addEventListener('click', onDocumentClick);
     document.addEventListener('change', onDocumentChange);
+    document.addEventListener('keydown', onKeyboardShortcutKeyDown, true);
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('keyup', onDocumentKeyUp);
     document.addEventListener('beforeinput', onDocumentBeforeInput, true);
@@ -1056,7 +1057,8 @@ flowchart TD
       return true;
     }
     if (format === 'math') {
-      insertProseMirrorMarkdown('$x$', { inline: true, status: 'インライン数式を挿入しました' });
+      const selected = state.proseMirrorRich.selectedText().trim();
+      insertProseMirrorMarkdown(`$${selected || 'x'}$`, { inline: true, status: 'インライン数式を挿入しました' });
       return true;
     }
     setStatus('この操作はProseMirrorリッチ編集では未対応です');
@@ -1160,6 +1162,9 @@ flowchart TD
         break;
       case 'insert-code-block':
         insertCodeBlock();
+        break;
+      case 'insert-math-block':
+        insertMathBlock();
         break;
       case 'insert-mermaid':
         insertMermaid();
@@ -5190,34 +5195,24 @@ flowchart TD
       return;
     }
 
+  }
+
+  function onKeyboardShortcutKeyDown(event) {
+    if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
     if (!event.ctrlKey && !event.metaKey) return;
-    const key = event.key.toLowerCase();
     const formatShortcut = keyboardFormatShortcut(event);
     if (formatShortcut) {
       event.preventDefault();
+      event.stopPropagation();
       applyFormat(formatShortcut);
-    } else if (key === 's') {
-      event.preventDefault();
-      saveMarkdown();
-    } else if (key === 'o') {
-      event.preventDefault();
-      openMarkdownFile();
-    } else if (key === 'p') {
-      event.preventDefault();
-      printPreview();
-    } else if (key === 'b') {
-      event.preventDefault();
-      applyFormat('bold');
-    } else if (key === 'i') {
-      event.preventDefault();
-      applyFormat('italic');
-    } else if (key === 'k') {
-      event.preventDefault();
-      insertLink();
-    } else if (key === 'm' && event.shiftKey) {
-      event.preventDefault();
-      insertMermaid();
+      return;
     }
+
+    const actionShortcut = keyboardActionShortcut(event);
+    if (!actionShortcut) return;
+    event.preventDefault();
+    event.stopPropagation();
+    runKeyboardActionShortcut(actionShortcut);
   }
 
   function keyboardFormatShortcut(event) {
@@ -5229,6 +5224,90 @@ flowchart TD
     if (event.shiftKey && digit === '8') return 'list';
     if (event.shiftKey && digit === '9') return 'quote';
     return '';
+  }
+
+  function keyboardActionShortcut(event) {
+    const codeLetter = /^Key([A-Z])$/.exec(event.code || '')?.[1];
+    const keyLetter = /^[A-Z]$/i.test(event.key || '') ? event.key : '';
+    const key = (codeLetter || keyLetter).toLowerCase();
+    if (!key) return '';
+
+    if (!event.shiftKey && !event.altKey) {
+      return {
+        s: 'save',
+        o: 'open',
+        p: 'print',
+        b: 'bold',
+        i: 'italic',
+        k: 'inline-code',
+        m: 'inline-math',
+      }[key] || '';
+    }
+    if (event.shiftKey && !event.altKey) {
+      return {
+        k: 'code-block',
+        m: 'math-block',
+        l: 'link',
+      }[key] || '';
+    }
+    if (!event.shiftKey && event.altKey) {
+      return {
+        t: 'table',
+        i: 'toc',
+        m: 'mermaid',
+        o: 'toggle-outline',
+      }[key] || '';
+    }
+    return '';
+  }
+
+  function runKeyboardActionShortcut(action) {
+    switch (action) {
+      case 'save':
+        saveMarkdown();
+        break;
+      case 'open':
+        openMarkdownFile();
+        break;
+      case 'print':
+        printPreview();
+        break;
+      case 'bold':
+        applyFormat('bold');
+        break;
+      case 'italic':
+        applyFormat('italic');
+        break;
+      case 'inline-code':
+        applyFormat('code');
+        break;
+      case 'inline-math':
+        applyFormat('math');
+        break;
+      case 'code-block':
+        insertCodeBlock();
+        break;
+      case 'math-block':
+        insertMathBlock();
+        break;
+      case 'link':
+        insertLink();
+        break;
+      case 'table':
+        applyFormat('table');
+        break;
+      case 'toc':
+        applyFormat('toc');
+        break;
+      case 'mermaid':
+        insertMermaid();
+        break;
+      case 'toggle-outline':
+        toggleOutline();
+        break;
+      default:
+        break;
+    }
   }
 
   function snapshotRichDeleteFromKeydown() {
@@ -8975,7 +9054,7 @@ flowchart TD
   function insertCodeBlock() {
     if (state.mode === 'rich') {
       if (isProseMirrorRichActive()) {
-        const selected = state.proseMirrorRich.selectedText();
+        const selected = state.proseMirrorRich.selectedText().replace(/\n+$/, '');
         insertProseMirrorMarkdown(`\`\`\`\n${selected || 'code'}\n\`\`\``, { status: 'コードブロックを挿入しました' });
         return;
       }
@@ -8986,6 +9065,22 @@ flowchart TD
     focusMarkdownInput();
     const selected = getSelectedText();
     replaceSelection(`\`\`\`\n${selected || 'code'}\n\`\`\``);
+  }
+
+  function insertMathBlock() {
+    if (state.mode === 'rich') {
+      if (isProseMirrorRichActive()) {
+        const selected = state.proseMirrorRich.selectedText().trim();
+        insertProseMirrorMarkdown(`$$\n${selected || 'x = y'}\n$$`, { status: '数式ブロックを挿入しました' });
+        return;
+      }
+      guardReadOnlyRichFallbackAction('数式ブロック挿入');
+      return;
+    }
+
+    focusMarkdownInput();
+    const selected = getSelectedText().trim();
+    replaceSelection(`$$\n${selected || 'x = y'}\n$$`);
   }
 
   function insertMermaid() {
@@ -9413,7 +9508,7 @@ flowchart TD
     if (!toggle) return;
     const visible = !state.outlineCollapsed;
     toggle.setAttribute('aria-pressed', String(visible));
-    toggle.title = visible ? 'アウトラインを隠す' : 'アウトラインを表示';
+    toggle.title = `${visible ? 'アウトラインを隠す' : 'アウトラインを表示'} (Ctrl+Alt+O)`;
   }
 
   function showSecurityDialog() {

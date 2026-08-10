@@ -274,7 +274,7 @@ button[aria-pressed="true"], .view-controls button.is-active {
   background: color-mix(in srgb, var(--panel) 78%, transparent);
 }
 
-body.outline-collapsed .workspace { grid-template-columns: 0 1fr; }
+body.outline-collapsed .workspace { grid-template-columns: minmax(0, 1fr); }
 body.outline-collapsed .sidebar { display: none; }
 
 .sidebar-header {

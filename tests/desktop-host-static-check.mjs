@@ -50,7 +50,7 @@ assert.match(windowCode, /if \(!IsAppSource\(eventArgs\.Source\)\)/);
 assert.match(windowCode, /Core_NavigationStarting[\s\S]+eventArgs\.Cancel = true/);
 assert.match(windowCode, /Core_PermissionRequested[\s\S]+CoreWebView2PermissionState\.Deny/);
 assert.match(windowCode, /PostWebMessageAsJson/);
-assert.match(windowCode, /Shortcuts_Click[\s\S]+Ctrl\+1〜6[\s\S]+Ctrl\+Shift\+9/);
+assert.match(windowCode, /Shortcuts_Click[\s\S]+Ctrl\+1〜6[\s\S]+Ctrl\+K: インラインコード[\s\S]+Ctrl\+Shift\+M: 数式ブロック[\s\S]+Ctrl\+Shift\+L: リンク[\s\S]+Ctrl\+Alt\+O: アウトライン表示切り替え/);
 assert.match(windowCode, /desktop\.resolveImageReferences/);
 assert.match(windowCode, /HandleImageReferenceResolutionAsync/);
 assert.doesNotMatch(windowCode, /AddHostObjectToScript/);

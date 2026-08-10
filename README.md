@@ -155,12 +155,20 @@ MarkdownファイルはUTF-8として読み込み、BOMなしUTF-8で保存し�
 |`Ctrl + P`|PDF/印刷|
 |`Ctrl + B`|太字|
 |`Ctrl + I`|斜体|
-|`Ctrl + K`|リンク挿入|
+|`Ctrl + K`|インラインコード|
+|`Ctrl + M`|インライン数式|
+|`Ctrl + Shift + K`|コードブロック|
+|`Ctrl + Shift + M`|数式ブロック|
+|`Ctrl + Shift + L`|リンク挿入|
 |`Ctrl + 0`|段落へ戻す|
 |`Ctrl + 1`〜`Ctrl + 6`|見出し1〜6|
 |`Ctrl + Shift + 7`|番号リスト|
 |`Ctrl + Shift + 8`|箇条書き|
 |`Ctrl + Shift + 9`|引用|
+|`Ctrl + Alt + T`|表を挿入|
+|`Ctrl + Alt + I`|目次を挿入|
+|`Ctrl + Alt + M`|Mermaid図を挿入|
+|`Ctrl + Alt + O`|アウトラインの表示切り替え|
 
 ## 対応Markdown
 

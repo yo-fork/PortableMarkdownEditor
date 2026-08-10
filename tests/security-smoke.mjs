@@ -4,6 +4,7 @@ import vm from 'node:vm';
 
 const index = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
 const securitySample = readFileSync(new URL('../samples/security-check.md', import.meta.url), 'utf8');
 
 assert.match(index, /Content-Security-Policy/);
@@ -57,6 +58,17 @@ assert.match(index, /class="icon-button" data-action="collapse-outline"[^>]+aria
 assert.match(index, /data-format="bold"[^>]+aria-label="太字"[^>]+aria-keyshortcuts="Control\+B"/, 'symbol-only formatting buttons should expose descriptive accessible names and shortcuts');
 assert.match(index, /data-format="h1"[^>]+aria-keyshortcuts="Control\+1"/, 'heading buttons should expose their keyboard shortcuts');
 assert.match(index, /data-format="ordered-list"[^>]+aria-keyshortcuts="Control\+Shift\+7"/, 'the numbered-list shortcut should be discoverable from the toolbar');
+assert.match(index, /data-format="code"[^>]+aria-label="インラインコード"[^>]+aria-keyshortcuts="Control\+K"/, 'the inline-code shortcut should be discoverable from the toolbar');
+assert.match(index, /data-action="insert-code-block"[^>]+aria-keyshortcuts="Control\+Shift\+K"/, 'the code-block shortcut should be discoverable from the toolbar');
+assert.match(index, /data-format="math"[^>]+aria-keyshortcuts="Control\+M"/, 'the inline-math shortcut should be discoverable from the toolbar');
+assert.match(index, /data-action="insert-math-block"[^>]+aria-keyshortcuts="Control\+Shift\+M"/, 'the display-math shortcut should be discoverable from the toolbar');
+assert.match(index, /data-action="insert-link"[^>]+aria-keyshortcuts="Control\+Shift\+L"/, 'the reassigned link shortcut should be discoverable from the toolbar');
+assert.match(index, /data-format="table"[^>]+aria-keyshortcuts="Control\+Alt\+T"/, 'the table shortcut should be discoverable from the toolbar');
+assert.match(index, /data-format="toc"[^>]+aria-keyshortcuts="Control\+Alt\+I"/, 'the table-of-contents shortcut should be discoverable from the toolbar');
+assert.match(index, /data-action="insert-mermaid"[^>]+aria-keyshortcuts="Control\+Alt\+M"/, 'the reassigned Mermaid shortcut should be discoverable from the toolbar');
+assert.match(index, /data-action="collapse-outline"[^>]+aria-keyshortcuts="Control\+Alt\+O"/, 'the outline toggle shortcut should be discoverable from the topbar');
+assert.match(styles, /body\.outline-collapsed \.workspace\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/, 'the editor should keep a full-width grid column when the hidden sidebar leaves the layout');
+assert.doesNotMatch(styles, /body\.outline-collapsed \.workspace\s*\{[^}]*grid-template-columns:\s*0\s+1fr/, 'the hidden outline must not auto-place the editor into a zero-width first column');
 assert.match(app, /code-language-input/, 'rendered code blocks should expose a language input');
 assert.match(app, /showOpenFilePicker/, 'Open should use File System Access API when available');
 assert.match(app, /function\s+requestDirectoryForOpenedMarkdown/, 'opened Markdown files should be able to request containing folder access');
@@ -82,6 +94,12 @@ assert.match(app, /function\s+replaceSourceRange/, 'source writes should go thro
 assert.match(app, /function\s+sourceScrollElement/, 'source scroll sync should use the active editor scroll element');
 assert.match(app, /function\s+renderProseMirrorRich/, 'rich editing should prefer the ProseMirror transaction model when Markdown is supported');
 assert.match(app, /function\s+keyboardFormatShortcut[\s\S]+ordered-list[\s\S]+quote/, 'formatting keyboard shortcuts should cover headings, lists, and quotes');
+assert.match(app, /addEventListener\('keydown', onKeyboardShortcutKeyDown, true\)/, 'app shortcuts should run in capture phase before editor-specific keymaps');
+assert.match(app, /function\s+onKeyboardShortcutKeyDown[\s\S]+event\.preventDefault\(\)[\s\S]+event\.stopPropagation\(\)[\s\S]+runKeyboardActionShortcut/, 'captured app shortcuts should prevent conflicting editor commands');
+assert.match(app, /function\s+keyboardActionShortcut[\s\S]+k:\s*'inline-code'[\s\S]+m:\s*'inline-math'[\s\S]+k:\s*'code-block'[\s\S]+m:\s*'math-block'[\s\S]+l:\s*'link'/, 'code, math, and link shortcuts should use the requested reassigned keys');
+assert.match(app, /function\s+keyboardActionShortcut[\s\S]+t:\s*'table'[\s\S]+i:\s*'toc'[\s\S]+m:\s*'mermaid'[\s\S]+o:\s*'toggle-outline'/, 'structural and outline shortcuts should use the Ctrl+Alt group');
+assert.match(app, /function\s+runKeyboardActionShortcut[\s\S]+case 'math-block':[\s\S]+insertMathBlock\(\)/, 'keyboard commands should dispatch display-math insertion');
+assert.match(app, /function\s+insertMathBlock[\s\S]+\$\$\\n\$\{selected \|\| 'x = y'\}\\n\$\$/, 'display-math insertion should create a standalone Markdown block');
 assert.match(app, /function\s+handleProseMirrorRichChange/, 'ProseMirror rich edits should update Markdown source through one change path');
 assert.match(app, /function\s+isProseMirrorRichTarget/, 'legacy rich DOM handlers should ignore ProseMirror-managed DOM');
 assert.match(app, /function\s+onDocumentChange[\s\S]+isProseMirrorRichTarget\(target\)[\s\S]+updateTaskCheckbox/, 'legacy checklist change handling should not duplicate ProseMirror transactions');

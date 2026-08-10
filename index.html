@@ -8,14 +8,14 @@
   <title>Portable Markdown Editor</title>
   <link rel="stylesheet" href="./vendor/highlight/styles/github-dark.min.css">
   <link rel="stylesheet" href="./vendor/katex/katex.min.css">
-  <link rel="stylesheet" href="./styles.css?v=task-shortcuts-2">
+  <link rel="stylesheet" href="./styles.css?v=task-shortcuts-5">
   <script src="./vendor/markdown-it/markdown-it.min.js" defer></script>
   <script src="./vendor/highlight/highlight.min.js" defer></script>
   <script src="./vendor/mermaid/mermaid.min.js" defer></script>
   <script src="./vendor/katex/katex.min.js" defer></script>
   <script src="./vendor/prosemirror/prosemirror-editor.js?v=task-shortcuts-2" defer></script>
   <script src="./vendor/codemirror6/source-editor.bundle.js?v=table-toolbar-1" defer></script>
-  <script src="./app.js?v=task-shortcuts-2" defer></script>
+  <script src="./app.js?v=task-shortcuts-5" defer></script>
 </head>
 <body data-mode="rich">
   <a class="skip-link" href="#mainWorkspace">本文へ移動</a>
@@ -47,16 +47,17 @@
         <button type="button" data-action="format" data-format="h2" title="見出し2 (Ctrl+2)" aria-label="見出し2" aria-keyshortcuts="Control+2">H2</button>
         <button type="button" data-action="format" data-format="bold" title="太字 (Ctrl+B)" aria-label="太字" aria-keyshortcuts="Control+B">B</button>
         <button type="button" data-action="format" data-format="italic" title="斜体 (Ctrl+I)" aria-label="斜体" aria-keyshortcuts="Control+I">I</button>
-        <button type="button" data-action="format" data-format="code" title="インラインコード" aria-label="インラインコード">{ }</button>
-        <button type="button" data-action="insert-code-block" title="コードブロック" aria-label="コードブロック">```</button>
+        <button type="button" data-action="format" data-format="code" title="インラインコード (Ctrl+K)" aria-label="インラインコード" aria-keyshortcuts="Control+K">{ }</button>
+        <button type="button" data-action="insert-code-block" title="コードブロック (Ctrl+Shift+K)" aria-label="コードブロック" aria-keyshortcuts="Control+Shift+K">```</button>
         <button type="button" data-action="format" data-format="quote" title="引用 (Ctrl+Shift+9)" aria-label="引用" aria-keyshortcuts="Control+Shift+9">&gt;</button>
         <button type="button" data-action="format" data-format="list" title="箇条書き (Ctrl+Shift+8)" aria-label="箇条書き" aria-keyshortcuts="Control+Shift+8">•</button>
         <button type="button" data-action="format" data-format="ordered-list" title="番号リスト (Ctrl+Shift+7)" aria-label="番号リスト" aria-keyshortcuts="Control+Shift+7">1.</button>
-        <button type="button" data-action="format" data-format="table" title="表">表</button>
-        <button type="button" data-action="format" data-format="toc" title="目次" aria-label="目次">TOC</button>
-        <button type="button" data-action="format" data-format="math" title="インライン数式">数式</button>
-        <button type="button" data-action="insert-link" title="リンク (Ctrl+K)" aria-keyshortcuts="Control+K">リンク</button>
-        <button type="button" data-action="insert-mermaid" title="Mermaid図を挿入">Mermaid</button>
+        <button type="button" data-action="format" data-format="table" title="表 (Ctrl+Alt+T)" aria-keyshortcuts="Control+Alt+T">表</button>
+        <button type="button" data-action="format" data-format="toc" title="目次 (Ctrl+Alt+I)" aria-label="目次" aria-keyshortcuts="Control+Alt+I">TOC</button>
+        <button type="button" data-action="format" data-format="math" title="インライン数式 (Ctrl+M)" aria-keyshortcuts="Control+M">数式</button>
+        <button type="button" data-action="insert-math-block" title="数式ブロック (Ctrl+Shift+M)" aria-label="数式ブロック" aria-keyshortcuts="Control+Shift+M">$$</button>
+        <button type="button" data-action="insert-link" title="リンク (Ctrl+Shift+L)" aria-keyshortcuts="Control+Shift+L">リンク</button>
+        <button type="button" data-action="insert-mermaid" title="Mermaid図を挿入 (Ctrl+Alt+M)" aria-keyshortcuts="Control+Alt+M">Mermaid</button>
         <button type="button" data-action="insert-image" title="assetsフォルダへ保存して相対参照を挿入">画像挿入</button>
         <button type="button" data-action="insert-image-ref" title="Markdownファイル基準の相対画像パスを参照">画像参照</button>
       </nav>
@@ -76,7 +77,7 @@
       </div>
 
       <div class="top-actions">
-        <button type="button" class="icon-button" data-action="collapse-outline" title="アウトラインを隠す" aria-label="アウトライン表示" aria-pressed="true">☷</button>
+        <button type="button" class="icon-button" data-action="collapse-outline" title="アウトラインを隠す (Ctrl+Alt+O)" aria-label="アウトライン表示" aria-keyshortcuts="Control+Alt+O" aria-pressed="true">☷</button>
         <button type="button" class="icon-button" data-action="toggle-theme" title="ライト/ダーク切り替え" aria-label="ライト/ダーク切り替え">◐</button>
         <button type="button" class="icon-button" data-action="security" title="セキュリティモデル" aria-label="セキュリティモデル">🔒</button>
       </div>

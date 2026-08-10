@@ -150,7 +150,7 @@ assert.match(app, /function\s+focusProseMirrorSelection/, 'ProseMirror selection
 assert.match(app, /function\s+scheduleProseMirrorFocus/, 'ProseMirror focus should be deferred until the browser has applied the clicked DOM selection');
 assert.match(app, /focus\(\{\s*preventScroll:\s*true\s*\}\)/, 'ProseMirror focus restoration should preserve the clicked DOM selection');
 assert.match(app, /if \(focusProseMirrorSelection\(\)\) return;/, 'selection changes inside ProseMirror should bypass legacy rich selection handling');
-assert.match(app, /function\s+applyProseMirrorFormat[\s\S]+format === 'math'[\s\S]+insertProseMirrorMarkdown\('\$x\$'[\s\S]+inline:\s*true/, 'ProseMirror rich toolbar should insert inline math through Markdown parsing');
+assert.match(app, /function\s+applyProseMirrorFormat[\s\S]+format === 'math'[\s\S]+selectedText\(\)\.trim\(\)[\s\S]+insertProseMirrorMarkdown\(`\$\$\{selected \|\| 'x'\}\$`[\s\S]+inline:\s*true/, 'ProseMirror rich toolbar should preserve selected text when inserting inline math through Markdown parsing');
 assert.match(app, /items\.push\(\{ id, text, level, start: block\.start, index: items\.length \}\)/, 'outline headings should keep their document-order index for rich-mode navigation');
 assert.match(app, /function\s+navigateToOutlineHeading\(node\)[\s\S]+state\.proseMirrorRich\.revealHeadingByIndex\(node\.index\)/, 'outline clicks in rich mode should navigate through the ProseMirror editor API');
 assert.match(app, /case 'math':[\s\S]+replacement = `\$\$\{selected \|\| 'x'\}\$`/, 'source-mode toolbar should insert Markdown inline math');

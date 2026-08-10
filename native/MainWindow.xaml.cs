@@ -147,7 +147,27 @@ namespace PortableMarkdownEditor.Desktop
         {
             MessageBox.Show(
                 this,
-                "Ctrl+0: 段落\nCtrl+1〜6: 見出し1〜6\nCtrl+B: 太字\nCtrl+I: 斜体\nCtrl+K: リンク\nCtrl+Shift+7: 番号リスト\nCtrl+Shift+8: 箇条書き\nCtrl+Shift+9: 引用\n\nCtrl+N: 新規作成\nCtrl+O: 開く\nCtrl+S: 保存\nCtrl+Shift+S: 名前を付けて保存\nCtrl+P: 印刷",
+                "Ctrl+0: 段落\n"
+                    + "Ctrl+1〜6: 見出し1〜6\n"
+                    + "Ctrl+B: 太字\n"
+                    + "Ctrl+I: 斜体\n"
+                    + "Ctrl+K: インラインコード\n"
+                    + "Ctrl+M: インライン数式\n"
+                    + "Ctrl+Shift+K: コードブロック\n"
+                    + "Ctrl+Shift+M: 数式ブロック\n"
+                    + "Ctrl+Shift+L: リンク\n"
+                    + "Ctrl+Shift+7: 番号リスト\n"
+                    + "Ctrl+Shift+8: 箇条書き\n"
+                    + "Ctrl+Shift+9: 引用\n"
+                    + "Ctrl+Alt+T: 表\n"
+                    + "Ctrl+Alt+I: 目次\n"
+                    + "Ctrl+Alt+M: Mermaid図\n"
+                    + "Ctrl+Alt+O: アウトライン表示切り替え\n\n"
+                    + "Ctrl+N: 新規作成\n"
+                    + "Ctrl+O: 開く\n"
+                    + "Ctrl+S: 保存\n"
+                    + "Ctrl+Shift+S: 名前を付けて保存\n"
+                    + "Ctrl+P: 印刷",
                 "キーボードショートカット",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);
