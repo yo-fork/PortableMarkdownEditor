@@ -21,6 +21,19 @@ namespace PortableMarkdownEditor.Desktop
         public string MarkdownPath { get; private set; }
     }
 
+    internal sealed class DocumentImageContent
+    {
+        public DocumentImageContent(byte[] data, string contentType)
+        {
+            Data = data;
+            ContentType = contentType;
+        }
+
+        public byte[] Data { get; private set; }
+
+        public string ContentType { get; private set; }
+    }
+
     internal static class PortableFileService
     {
         internal const int MaxDocumentBytes = 10 * 1024 * 1024;
@@ -250,6 +263,7 @@ namespace PortableMarkdownEditor.Desktop
                 bool supported;
                 try
                 {
+                    RejectReparsePointsWithinDirectory(documentDirectory, candidate);
                     supported = File.Exists(candidate) && IsSupportedRasterImageFile(candidate);
                 }
                 catch (Exception exception) when (
@@ -275,6 +289,54 @@ namespace PortableMarkdownEditor.Desktop
             }
 
             return aliases;
+        }
+
+        internal static DocumentImageContent ReadDocumentImage(
+            string documentPath,
+            string relativePath)
+        {
+            string fullDocumentPath = RequireDocumentPath(documentPath, true);
+            string documentDirectory = Path.GetDirectoryName(fullDocumentPath);
+            if (string.IsNullOrEmpty(documentDirectory))
+            {
+                throw new InvalidDataException("Markdownファイルの保存先を確認できません。");
+            }
+
+            string decoded = DecodeLocalImageReference(relativePath).Replace(
+                Path.AltDirectorySeparatorChar,
+                Path.DirectorySeparatorChar);
+            if (string.IsNullOrWhiteSpace(decoded) || Path.IsPathRooted(decoded))
+            {
+                throw new InvalidDataException("画像の相対パスが正しくありません。");
+            }
+
+            string directoryPrefix = documentDirectory.TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            string candidate = Path.GetFullPath(Path.Combine(documentDirectory, decoded));
+            if (!candidate.StartsWith(directoryPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("Markdownファイルのフォルダ外は読み込めません。");
+            }
+
+            RejectReparsePointsWithinDirectory(documentDirectory, candidate);
+            byte[] data = ReadBoundedImageFile(candidate);
+            string extension = Path.GetExtension(candidate).ToLowerInvariant();
+            string detected = DetectImageExtension(data);
+            if (detected == null
+                || (detected != extension && !(detected == ".jpg" && extension == ".jpeg")))
+            {
+                throw new InvalidDataException("画像の拡張子と内容が一致しません。");
+            }
+
+            string contentType = detected == ".png"
+                ? "image/png"
+                : detected == ".jpg"
+                    ? "image/jpeg"
+                    : detected == ".gif"
+                        ? "image/gif"
+                        : "image/webp";
+            return new DocumentImageContent(data, contentType);
         }
 
         private static string RequireDocumentPath(string path, bool mustExist)
@@ -358,6 +420,30 @@ namespace PortableMarkdownEditor.Desktop
             string detected = DetectImageExtension(header);
             return detected == extension
                 || detected == ".jpg" && extension == ".jpeg";
+        }
+
+        private static byte[] ReadBoundedImageFile(string path)
+        {
+            using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                if (stream.Length == 0 || stream.Length > MaxAssetBytes)
+                {
+                    throw new InvalidDataException("画像は25MB以下にしてください。");
+                }
+
+                byte[] data = new byte[checked((int)stream.Length)];
+                int offset = 0;
+                while (offset < data.Length)
+                {
+                    int read = stream.Read(data, offset, data.Length - offset);
+                    if (read == 0)
+                    {
+                        throw new EndOfStreamException("画像ファイルを最後まで読み込めませんでした。");
+                    }
+                    offset += read;
+                }
+                return data;
+            }
         }
 
         private static bool HasUtf8Bom(byte[] data)
@@ -526,6 +612,31 @@ namespace PortableMarkdownEditor.Desktop
             if ((attributes & FileAttributes.ReparsePoint) != 0)
             {
                 throw new IOException("assetsフォルダがリンクになっているため、安全のため画像を保存しませんでした。");
+            }
+        }
+
+        private static void RejectReparsePointsWithinDirectory(string rootDirectory, string filePath)
+        {
+            string root = Path.GetFullPath(rootDirectory).TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar);
+            string current = filePath;
+            while (!string.Equals(current, root, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!File.Exists(current) && !Directory.Exists(current))
+                {
+                    throw new FileNotFoundException("画像ファイルが見つかりません。", filePath);
+                }
+
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                {
+                    throw new IOException("リンクを経由する画像は読み込めません。");
+                }
+                current = Path.GetDirectoryName(current);
+                if (string.IsNullOrEmpty(current))
+                {
+                    throw new InvalidDataException("画像パスを検証できません。");
+                }
             }
         }
 

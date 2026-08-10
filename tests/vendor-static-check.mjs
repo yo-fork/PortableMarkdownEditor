@@ -345,6 +345,7 @@ assert.doesNotMatch(proseMirrorBundle, /XMLHttpRequest/, 'ProseMirror bundle mus
 assert.doesNotMatch(proseMirrorBundle, /WebSocket/, 'ProseMirror bundle must not contain WebSocket');
 assert.doesNotMatch(proseMirrorBundle, /\bWorker\b/, 'ProseMirror bundle must not contain Worker');
 assert.match(proseMirrorBundle, /normalizeMarkdown/, 'ProseMirror bundle should expose a Markdown round-trip diagnostic');
+assert.match(proseMirrorBundle, /image\.addEventListener\('error',[\s\S]+renderBlocked/, 'ProseMirror images should replace failed loads with a reasoned placeholder');
 
 const MarkdownIt = require('../vendor/markdown-it/markdown-it.min.js');
 const proseMirrorContext = {
@@ -386,6 +387,42 @@ assert.equal(
   proseMirrorContext.window.PMEProseMirror.normalizeMarkdown(String.raw`\[x^2+y^2\]`),
   '$$\nx^2+y^2\n$$',
   'bracket display math should survive rich-mode normalization',
+);
+assert.equal(
+  proseMirrorContext.window.PMEProseMirror.normalizeMarkdown([
+    '$$',
+    String.raw`\begin{aligned}`,
+    String.raw`x &= y \\`,
+    '+ z &= 1',
+    String.raw`\end{aligned}`,
+    '$$',
+  ].join('\n')),
+  [
+    '$$',
+    String.raw`\begin{aligned}`,
+    String.raw`x &= y \\`,
+    '+ z &= 1',
+    String.raw`\end{aligned}`,
+    '$$',
+  ].join('\n'),
+  'multiline display math must keep a leading + line inside the formula',
+);
+assert.equal(
+  proseMirrorContext.window.PMEProseMirror.normalizeMarkdown([
+    '$$ x = y',
+    '+ z = 1',
+    '$$',
+  ].join('\n')),
+  '$$\nx = y\n+ z = 1\n$$',
+  'display math beginning on the opening delimiter line must keep a leading + line out of Markdown lists',
+);
+assert.equal(
+  proseMirrorContext.window.PMEProseMirror.normalizeMarkdown([
+    String.raw`\[ x = y`,
+    String.raw`+ z = 1 \]`,
+  ].join('\n')),
+  '$$\nx = y\n+ z = 1\n$$',
+  'bracket display math spanning delimiter lines must keep a leading + line inside the formula',
 );
 const extendedRoundTrip = proseMirrorContext.window.PMEProseMirror.normalizeMarkdown([
   '# Extended PM',

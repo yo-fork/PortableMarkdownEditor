@@ -24,6 +24,8 @@ assert.match(app, /function\s+sanitizeLinkUrl/);
 assert.match(app, /function\s+sanitizeImageUrl/);
 assert.match(app, /function\s+normalizeLocalImageUrl/);
 assert.match(app, /function\s+requestDesktopImageReferenceAliases/);
+assert.match(app, /function\s+onPreviewImageError/);
+assert.match(app, /els\.preview\.addEventListener\('error', onPreviewImageError, true\)/);
 assert.match(app, /desktop\.resolveImageReferences/);
 assert.match(app, /function\s+renderMermaidBlock/);
 assert.match(app, /function\s+highlightCode/);

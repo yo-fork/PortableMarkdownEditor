@@ -166,8 +166,92 @@ namespace PortableMarkdownEditor.Desktop
             core.NewWindowRequested += Core_NewWindowRequested;
             core.WebMessageReceived += Core_WebMessageReceived;
             core.PermissionRequested += Core_PermissionRequested;
+            core.AddWebResourceRequestedFilter(
+                "https://" + DocumentHost + "/*",
+                CoreWebView2WebResourceContext.Image);
+            core.WebResourceRequested += Core_WebResourceRequested;
             EditorWebView.Source = new Uri("https://" + AppHost + "/index.html?desktop=1");
             NativeStatusText.Text = "編集画面を読み込んでいます...";
+        }
+
+        private async void Core_WebResourceRequested(
+            object sender,
+            CoreWebView2WebResourceRequestedEventArgs eventArgs)
+        {
+            Uri requestUri;
+            if (eventArgs.ResourceContext != CoreWebView2WebResourceContext.Image
+                || !Uri.TryCreate(eventArgs.Request.Uri, UriKind.Absolute, out requestUri)
+                || requestUri.Scheme != Uri.UriSchemeHttps
+                || !string.Equals(requestUri.Host, DocumentHost, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            using (CoreWebView2Deferral deferral = eventArgs.GetDeferral())
+            {
+                try
+                {
+                    DocumentImageContent image = await TryReadDocumentImageAsync(requestUri);
+                    eventArgs.Response = CreateDocumentImageResponse(image);
+                }
+                catch (Exception)
+                {
+                    try
+                    {
+                        eventArgs.Response = CreateDocumentImageResponse(null);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+                finally
+                {
+                    deferral.Complete();
+                }
+            }
+        }
+
+        private async Task<DocumentImageContent> TryReadDocumentImageAsync(Uri requestUri)
+        {
+            string documentPath = _documentPath;
+            if (string.IsNullOrEmpty(documentPath))
+            {
+                return null;
+            }
+
+            string relativePath = requestUri.GetComponents(
+                UriComponents.Path,
+                UriFormat.UriEscaped);
+            try
+            {
+                return await Task.Run(
+                    () => PortableFileService.ReadDocumentImage(documentPath, relativePath));
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        private CoreWebView2WebResourceResponse CreateDocumentImageResponse(DocumentImageContent image)
+        {
+            CoreWebView2Environment environment = EditorWebView.CoreWebView2.Environment;
+            if (image == null)
+            {
+                return environment.CreateWebResourceResponse(
+                    new MemoryStream(new byte[0], false),
+                    404,
+                    "Not Found",
+                    "Content-Type: text/plain\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff");
+            }
+
+            return environment.CreateWebResourceResponse(
+                new MemoryStream(image.Data, false),
+                200,
+                "OK",
+                "Content-Type: " + image.ContentType
+                    + "\r\nCache-Control: no-store"
+                    + "\r\nX-Content-Type-Options: nosniff");
         }
 
         private static void ConfigureWebViewSettings(CoreWebView2Settings settings)
@@ -434,7 +518,6 @@ namespace PortableMarkdownEditor.Desktop
             _documentPath = null;
             _webFileName = "untitled.md";
             _dirty = false;
-            ClearDocumentMapping();
             SendHostMessage(new Dictionary<string, object>
             {
                 { "type", "host.newDocument" },
@@ -485,7 +568,7 @@ namespace PortableMarkdownEditor.Desktop
             _documentPath = fullPath;
             _webFileName = Path.GetFileName(fullPath);
             _dirty = false;
-            bool mapped = TryMapDocumentDirectory(fullPath);
+            bool mapped = HasUsableDocumentDirectory(fullPath);
             SendHostMessage(new Dictionary<string, object>
             {
                 { "type", "host.loadDocument" },
@@ -535,7 +618,7 @@ namespace PortableMarkdownEditor.Desktop
             _documentPath = fullPath;
             _webFileName = Path.GetFileName(fullPath);
             _dirty = false;
-            bool mapped = TryMapDocumentDirectory(fullPath);
+            bool mapped = HasUsableDocumentDirectory(fullPath);
             SendHostMessage(new Dictionary<string, object>
             {
                 { "type", "host.documentSaved" },
@@ -649,40 +732,16 @@ namespace PortableMarkdownEditor.Desktop
             return await completion.Task;
         }
 
-        private bool TryMapDocumentDirectory(string documentPath)
+        private static bool HasUsableDocumentDirectory(string documentPath)
         {
-            ClearDocumentMapping();
             try
             {
-                string directory = Path.GetDirectoryName(documentPath);
-                if (string.IsNullOrEmpty(directory))
-                {
-                    return false;
-                }
-
-                EditorWebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
-                    DocumentHost,
-                    directory,
-                    CoreWebView2HostResourceAccessKind.DenyCors);
-                return true;
+                string directory = Path.GetDirectoryName(Path.GetFullPath(documentPath));
+                return !string.IsNullOrEmpty(directory) && Directory.Exists(directory);
             }
             catch (Exception)
             {
                 return false;
-            }
-        }
-
-        private void ClearDocumentMapping()
-        {
-            try
-            {
-                if (EditorWebView.CoreWebView2 != null)
-                {
-                    EditorWebView.CoreWebView2.ClearVirtualHostNameToFolderMapping(DocumentHost);
-                }
-            }
-            catch (Exception)
-            {
             }
         }
 

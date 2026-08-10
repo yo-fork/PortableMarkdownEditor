@@ -18,7 +18,7 @@ flowchart LR
   N <--> B[限定JSONブリッジ]
   B <--> W[WebView2編集画面]
   W --> V[同梱vendorライブラリ]
-  F --> I[相対画像専用の仮想ホスト]
+  F --> I[検証済み画像応答]
   I --> W
 ```
 
@@ -38,7 +38,7 @@ WebView2編集画面は、ProseMirror、CodeMirror、Markdownプレビュー、M
 |HTML書出し|WPF|WebViewが生成したHTMLをWindows標準ダイアログで保存します。|
 |設定書出し|WPF|256KB以下のJSONだけを保存します。|
 |画像保存|WPF|画像署名、MIME、25MB上限、保存名を検証します。|
-|相対画像表示|WPFとWebView2|WPFが文書フォルダを画像専用仮想ホストへ割り当てます。|
+|相対画像表示|WPFとWebView2|WPFが画像要求ごとに文書フォルダ内の実体を検証して返します。|
 |編集と描画|WebView2|既存のローカルWeb資産をそのまま使います。|
 |下書き復元|WebView2|ポータブルデータフォルダ内のlocalStorageを使います。|
 |印刷|WPF|WebView2の内容をWindowsのシステム印刷画面へ渡します。|
@@ -69,11 +69,13 @@ WebViewからネイティブ側へ送れる主なメッセージは次のとお�
 
 アプリ資産は `https://portable-markdown-editor.local/` へ読み取り専用で割り当てます。
 
-開いているMarkdownの親フォルダは `https://document.portable-markdown-editor.local/` へ割り当てます。
+文書画像は `https://document.portable-markdown-editor.local/` のURLを使いますが、親フォルダ自体はこのホストへ割り当てません。
+
+WPFは画像要求を受けるたびに、現在のMarkdownを基準として相対パスを解決し、文書フォルダ内の検証済みラスター画像だけを応答します。
 
 Web側は、安全な相対パスをURLセグメント単位でエンコードしてから、相対画像の `src` にだけ使います。
 
-Content Security Policyは、この文書ホストを `img-src` にだけ追加し、`connect-src`、`script-src`、`object-src` では許可しません。
+Content Security Policyは、この文書画像用ホストを `img-src` にだけ追加し、`connect-src`、`script-src`、`object-src` では許可しません。
 
 `..` を含む相対パス、文書フォルダ外のローカル絶対パス、文書フォルダ外のUNCパス、遠隔画像はブロックします。
 

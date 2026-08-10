@@ -39,7 +39,9 @@ assert.match(windowXaml, /名前を付けて保存/);
 assert.match(windowXaml, /<wv2:WebView2/);
 
 assert.match(windowCode, /SetVirtualHostNameToFolderMapping\(AppHost,[\s\S]+DenyCors/);
-assert.match(windowCode, /SetVirtualHostNameToFolderMapping\([\s\S]+DocumentHost,[\s\S]+DenyCors/);
+assert.match(windowCode, /AddWebResourceRequestedFilter\([\s\S]+DocumentHost[\s\S]+CoreWebView2WebResourceContext\.Image/);
+assert.match(windowCode, /Core_WebResourceRequested[\s\S]+ReadDocumentImage[\s\S]+CreateWebResourceResponse/);
+assert.doesNotMatch(windowCode, /SetVirtualHostNameToFolderMapping\(\s*DocumentHost/);
 assert.match(windowCode, /AreHostObjectsAllowed = false/);
 assert.match(windowCode, /if \(!IsAppSource\(eventArgs\.Source\)\)/);
 assert.match(windowCode, /Core_NavigationStarting[\s\S]+eventArgs\.Cancel = true/);
@@ -58,6 +60,9 @@ assert.match(fileService, /UTF8Encoding\(false, true\)/);
 assert.match(fileService, /MoveFileEx/);
 assert.match(fileService, /WriteSettingsExport/);
 assert.match(fileService, /ResolveDocumentImageReferences/);
+assert.match(fileService, /ReadDocumentImage/);
+assert.match(fileService, /ReadBoundedImageFile/);
+assert.match(fileService, /RejectReparsePointsWithinDirectory/);
 assert.match(fileService, /IsSupportedRasterImageFile/);
 assert.match(fileService, /StartsWith\(directoryPrefix, StringComparison\.OrdinalIgnoreCase\)/);
 
@@ -81,6 +86,9 @@ assert.match(notice, /THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CON
 assert.match(nativeChecks, /CheckDocumentRoundTrip/);
 assert.match(nativeChecks, /CheckAssetValidationAndAllocation/);
 assert.match(nativeChecks, /CheckDocumentImageReferenceResolution/);
+assert.match(nativeChecks, /document PNG content type is incorrect/);
+assert.match(nativeChecks, /document image with an invalid signature was served/);
+assert.match(nativeChecks, /parent-relative document image was served/);
 assert.match(nativeChecks, /image outside the document folder was resolved/);
 assert.match(nativeChecks, /MIME and image signature mismatch was accepted/);
 

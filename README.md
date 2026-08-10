@@ -197,7 +197,7 @@ Windowsアプリ版の構成と信頼境界は [`docs/windows-portable-app.md`](
 * raw HTMLを無効化し、リンクと画像のURLを別々に検証します。
 * WindowsホストはWebView2のホストオブジェクトを無効化し、限定したJSONメッセージだけを受け付けます。
 * WebViewからのメッセージは、固定したアプリオリジンから届いた場合だけ処理します。
-* Windowsホストは実ファイルパスをWebViewへ送らず、開いている文書フォルダを相対画像専用の仮想ホストへ割り当てます。
+* Windowsホストは実ファイルパスをWebViewへ送らず、画像専用URLへの要求ごとに文書フォルダ内の画像を検証して返します。
 * 画像は拡張子だけでなくバイト署名とMIMEを照合し、任意の保存名や上書きを許可しません。
 * `eval`、`new Function`、Web Worker、fetch、XHRを使いません。
 

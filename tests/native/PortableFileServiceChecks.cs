@@ -110,6 +110,25 @@ namespace PortableMarkdownEditor.Desktop
                 "percent-encoded document-local image path was not resolved");
             Require(aliases.Count == 2, "missing image path was resolved unexpectedly");
 
+            DocumentImageContent image = PortableFileService.ReadDocumentImage(
+                documentPath,
+                "validation.assets/pasted.png");
+            Require(image.ContentType == "image/png", "document PNG content type is incorrect");
+            Require(image.Data.Length == 9, "document PNG content was not read completely");
+            DocumentImageContent encodedImage = PortableFileService.ReadDocumentImage(
+                documentPath,
+                "validation.assets/pasted%2Epng");
+            Require(encodedImage.Data.Length == 9, "percent-encoded document image path was not read");
+
+            string invalidImagePath = Path.Combine(testRoot, "validation.assets", "invalid.png");
+            File.WriteAllBytes(invalidImagePath, Encoding.UTF8.GetBytes("not a PNG"));
+            Expect<InvalidDataException>(
+                () => PortableFileService.ReadDocumentImage(documentPath, "validation.assets/invalid.png"),
+                "document image with an invalid signature was served");
+            Expect<InvalidDataException>(
+                () => PortableFileService.ReadDocumentImage(documentPath, "../outside.png"),
+                "parent-relative document image was served");
+
             string outsidePath = Path.Combine(
                 Path.GetTempPath(),
                 "PortableMarkdownEditor-outside-" + Guid.NewGuid().ToString("N") + ".png");

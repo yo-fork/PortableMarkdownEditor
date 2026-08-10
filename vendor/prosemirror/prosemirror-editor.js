@@ -17686,20 +17686,33 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
         state.line = startLine + 1;
         return true;
       }
-      var openingPattern = delimiter === '$$' ? /^\s*\$\$\s*$/ : /^\s*\\\[\s*$/;
-      var closingPattern = delimiter === '$$' ? /^\s*\$\$\s*$/ : /^\s*\\\]\s*$/;
-      if (!openingPattern.test(line)) return false;
+      var openingMatch = delimiter === '$$'
+        ? line.match(/^\s*\$\$(?!\$)([\s\S]*)$/)
+        : line.match(/^\s*\\\[([\s\S]*)$/);
+      if (!openingMatch) return false;
       var nextLine = startLine + 1;
+      var closingMatch = null;
       while (nextLine < endLine) {
         var nextStart = state.bMarks[nextLine] + state.tShift[nextLine];
         var nextMax = state.eMarks[nextLine];
-        if (closingPattern.test(state.src.slice(nextStart, nextMax))) break;
+        var nextText = state.src.slice(nextStart, nextMax);
+        closingMatch = delimiter === '$$'
+          ? nextText.match(/^([\s\S]*?)\$\$\s*$/)
+          : nextText.match(/^([\s\S]*?)\\\]\s*$/);
+        if (closingMatch) break;
         nextLine += 1;
       }
       if (nextLine >= endLine) return false;
       if (silent) return true;
       var token = state.push('math_display', '', 0);
-      token.content = normalizeNewlines(state.getLines(startLine + 1, nextLine, 0, false)).replace(/\n+$/g, '');
+      var contentParts = [];
+      var openingContent = openingMatch[1].replace(/^[ \t]+/, '');
+      if (openingContent) contentParts.push(openingContent);
+      var middleContent = normalizeNewlines(state.getLines(startLine + 1, nextLine, 0, false)).replace(/\n+$/g, '');
+      if (middleContent) contentParts.push(middleContent);
+      var closingContent = closingMatch[1].replace(/[ \t]+$/, '');
+      if (closingContent) contentParts.push(closingContent);
+      token.content = contentParts.join('\n');
       token.map = [startLine, nextLine + 1];
       state.line = nextLine + 1;
       return true;
@@ -20309,15 +20322,25 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     this.dom.textContent = '';
     this.dom.setAttribute('data-markdown-src', src);
     if (resolved) {
+      var self = this;
       var image = document.createElement('img');
       image.src = resolved;
       image.alt = alt;
       if (title) image.title = title;
       image.setAttribute('data-markdown-src', src);
+      image.addEventListener('error', function() {
+        if (image.parentNode === self.dom) self.renderBlocked(src, alt);
+      });
       this.dom.classList.remove('is-blocked-image');
       this.dom.appendChild(image);
       return;
     }
+    this.renderBlocked(src, alt);
+  };
+
+  ImageNodeView.prototype.renderBlocked = function(src, alt) {
+    this.dom.textContent = '';
+    this.dom.setAttribute('data-markdown-src', src);
     var fallback = document.createElement('span');
     fallback.className = 'blocked-image';
     fallback.setAttribute('data-markdown-src', src);

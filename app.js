@@ -680,6 +680,7 @@ flowchart TD
     els.preview.addEventListener('scroll', syncSourceScroll);
     els.preview.addEventListener('keyup', syncSourceScroll);
     els.preview.addEventListener('mouseup', syncSourceScroll);
+    els.preview.addEventListener('error', onPreviewImageError, true);
     els.source.addEventListener('paste', onMarkdownPaste);
     els.source.addEventListener('dragover', onEditorDragOver);
     els.source.addEventListener('dragleave', onEditorDragLeave);
@@ -14114,6 +14115,20 @@ ${body}
     return `<span class="blocked-image" data-markdown-src="${escapeAttribute(src)}" data-markdown-alt="${escapeAttribute(alt || '画像')}">画像未表示: ${label} (${escapeHtml(reason)})</span>`;
   }
 
+  function onPreviewImageError(event) {
+    const image = event.target;
+    if (!(image instanceof HTMLImageElement) || !els.preview.contains(image)) return;
+    const source = image.getAttribute('data-markdown-src') || '';
+    const alt = image.getAttribute('alt') || '画像';
+    const fallback = document.createElement('span');
+    fallback.className = 'blocked-image';
+    fallback.setAttribute('data-markdown-src', source);
+    fallback.setAttribute('data-markdown-alt', alt);
+    fallback.textContent = `画像未表示: ${alt} (${imageBlockReason(source)})`;
+    image.replaceWith(fallback);
+    setStatus('画像ファイルを読み込めませんでした。パス、形式、25MB上限を確認してください');
+  }
+
   function imageBlockReason(raw) {
     const value = cleanupUrl(raw, { keepSpaces: true });
     const decoded = decodeLocalImagePath(value);
@@ -14131,7 +14146,7 @@ ${body}
       if (isUnsafeRelativePath(normalized)) return '安全でない相対パスです';
       if (state.desktopHost && !state.desktopDocumentReady) return '先にMarkdownファイルを保存すると相対画像を表示できます';
       if (!state.markdownRelativePath) return 'フォルダが許可されていないため、Markdownファイル基準の相対画像を読めません';
-      return '許可済みフォルダ内に画像ファイルが見つかりません';
+      return '画像ファイルが見つからないか、PNG/JPEG/GIF/WebPとして検証できません';
     }
     return '許可されていない画像パスです';
   }
