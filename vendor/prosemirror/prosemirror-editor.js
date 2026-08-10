@@ -17625,8 +17625,22 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
         toDOM: function() { return ['nav', { class: 'toc pme-toc-node', 'data-toc-block': 'true' }]; }
       }
     });
+    var listItemSpec = markdown.schema.spec.nodes.get('list_item');
+    var taskListItemSpec = extendObject(listItemSpec, {
+      attrs: extendObject(listItemSpec.attrs || {}, { task: { default: null } }),
+      parseDOM: [{
+        tag: 'li[data-task-checked]',
+        getAttrs: function(dom) { return { task: dom.getAttribute('data-task-checked') === 'true' }; }
+      }].concat(listItemSpec.parseDOM || []),
+      toDOM: function(node) {
+        var attrs = node.attrs.task == null
+          ? {}
+          : { class: 'task-list-item', 'data-task-checked': String(Boolean(node.attrs.task)) };
+        return ['li', attrs, 0];
+      }
+    });
     return new model.Schema({
-      nodes: markdown.schema.spec.nodes.append(extendedNodes),
+      nodes: markdown.schema.spec.nodes.update('list_item', taskListItemSpec).append(extendedNodes),
       marks: markdown.schema.spec.marks
     });
   }
@@ -17794,6 +17808,40 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     });
   }
 
+  function stripTaskMarkerFromInlineToken(token, markerLength) {
+    token.content = String(token.content || '').slice(markerLength);
+    var remaining = markerLength;
+    var children = [];
+    for (var index = 0; index < (token.children || []).length; index += 1) {
+      var child = token.children[index];
+      if (remaining > 0 && child.type === 'text') {
+        if (child.content.length <= remaining) {
+          remaining -= child.content.length;
+          continue;
+        }
+        child.content = child.content.slice(remaining);
+        remaining = 0;
+      }
+      children.push(child);
+    }
+    token.children = children;
+  }
+
+  function addTaskListRule(tokenizer) {
+    tokenizer.core.ruler.after('inline', 'pme_task_lists', function(state) {
+      for (var index = 2; index < state.tokens.length; index += 1) {
+        var inlineToken = state.tokens[index];
+        var paragraphOpen = state.tokens[index - 1];
+        var listItemOpen = state.tokens[index - 2];
+        if (inlineToken.type !== 'inline' || paragraphOpen.type !== 'paragraph_open' || listItemOpen.type !== 'list_item_open') continue;
+        var match = String(inlineToken.content || '').match(/^\[([ xX])\]\s+/);
+        if (!match) continue;
+        listItemOpen.attrSet('data-pme-task', match[1].toLowerCase() === 'x' ? 'true' : 'false');
+        stripTaskMarkerFromInlineToken(inlineToken, match[0].length);
+      }
+    });
+  }
+
   function createMarkdownItTokenizer() {
     var tokenizer = MarkdownIt('commonmark', { html: false });
     preserveMarkdownLocalPaths(tokenizer);
@@ -17803,11 +17851,19 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     addMathInlineRule(tokenizer);
     addHardBreakHtmlRule(tokenizer);
     addMermaidFenceRule(tokenizer);
+    addTaskListRule(tokenizer);
     return tokenizer;
   }
 
   function createMarkdownParser(pmSchema) {
     return new markdown.MarkdownParser(pmSchema, createMarkdownItTokenizer(), extendObject(markdown.defaultMarkdownParser.tokens, {
+      list_item: {
+        block: 'list_item',
+        getAttrs: function(token) {
+          var task = token.attrGet('data-pme-task');
+          return { task: task == null ? null : task === 'true' };
+        }
+      },
       table: { block: 'table' },
       thead: { ignore: true },
       tbody: { ignore: true },
@@ -17885,6 +17941,10 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
 
   function createMarkdownSerializer() {
     return new markdown.MarkdownSerializer(extendObject(markdown.defaultMarkdownSerializer.nodes, {
+      list_item: function(state, node) {
+        if (node.attrs.task != null) state.write(node.attrs.task ? '[x] ' : '[ ] ');
+        state.renderContent(node);
+      },
       table: function(state, node) {
         var rows = tableRows(node);
         if (!rows.length) {
@@ -20390,8 +20450,81 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     });
   }
 
+  function TaskListItemNodeView(node, editorView, getPos) {
+    this.node = node;
+    this.editorView = editorView;
+    this.getPos = getPos;
+    this.dom = document.createElement('li');
+    this.contentDOM = document.createElement('div');
+    this.contentDOM.className = 'pme-task-list-item-content';
+    this.checkbox = null;
+    this.onCheckboxChange = this.onCheckboxChange.bind(this);
+    this.dom.appendChild(this.contentDOM);
+    this.syncCheckbox();
+  }
+
+  TaskListItemNodeView.prototype.syncCheckbox = function() {
+    var isTask = this.node.attrs.task != null;
+    this.dom.classList.toggle('task-list-item', isTask);
+    this.dom.classList.toggle('pme-task-list-item', isTask);
+    this.dom.removeAttribute('data-task-checked');
+    if (!isTask) {
+      if (this.checkbox) {
+        this.checkbox.removeEventListener('change', this.onCheckboxChange);
+        this.checkbox.remove();
+        this.checkbox = null;
+      }
+      return;
+    }
+    if (!this.checkbox) {
+      this.checkbox = document.createElement('input');
+      this.checkbox.type = 'checkbox';
+      this.checkbox.className = 'task-checkbox pme-task-checkbox';
+      this.checkbox.setAttribute('contenteditable', 'false');
+      this.checkbox.addEventListener('change', this.onCheckboxChange);
+      this.dom.insertBefore(this.checkbox, this.contentDOM);
+    }
+    this.checkbox.checked = Boolean(this.node.attrs.task);
+    this.checkbox.setAttribute('aria-label', this.checkbox.checked ? 'チェックを外す' : 'チェックを付ける');
+    this.dom.setAttribute('data-task-checked', String(this.checkbox.checked));
+  };
+
+  TaskListItemNodeView.prototype.onCheckboxChange = function() {
+    var pos;
+    try { pos = this.getPos(); }
+    catch (_) { return; }
+    var current = this.editorView.state.doc.nodeAt(pos);
+    if (!current || current.type !== this.node.type || current.attrs.task == null) return;
+    var attrs = extendObject(current.attrs || {}, { task: Boolean(this.checkbox.checked) });
+    this.editorView.dispatch(this.editorView.state.tr.setNodeMarkup(pos, null, attrs));
+    this.editorView.focus();
+  };
+
+  TaskListItemNodeView.prototype.update = function(node) {
+    if (node.type !== this.node.type) return false;
+    this.node = node;
+    this.syncCheckbox();
+    return true;
+  };
+
+  TaskListItemNodeView.prototype.stopEvent = function(event) {
+    return Boolean(this.checkbox && (event.target === this.checkbox || this.checkbox.contains(event.target)));
+  };
+
+  TaskListItemNodeView.prototype.ignoreMutation = function(mutation) {
+    return Boolean(
+      (this.checkbox && (mutation.target === this.checkbox || this.checkbox.contains(mutation.target)))
+      || (mutation.type === 'childList' && mutation.target === this.dom)
+    );
+  };
+
+  TaskListItemNodeView.prototype.destroy = function() {
+    if (this.checkbox) this.checkbox.removeEventListener('change', this.onCheckboxChange);
+  };
+
   function extendedNodeViews(options) {
     return {
+      list_item: function(node, editorView, getPos) { return new TaskListItemNodeView(node, editorView, getPos); },
       image: function(node, editorView, getPos) { return new ImageNodeView(node, editorView, getPos, options); },
       math_inline: function(node, editorView, getPos) { return new MathNodeView(node, editorView, getPos); },
       math_display: function(node, editorView, getPos) { return new MathNodeView(node, editorView, getPos); },
@@ -20485,6 +20618,13 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     var keys = {
       'Mod-b': commands.toggleMark(schema.marks.strong),
       'Mod-i': commands.toggleMark(schema.marks.em),
+      'Mod-0': commands.setBlockType(schema.nodes.paragraph),
+      'Mod-1': commands.setBlockType(schema.nodes.heading, { level: 1 }),
+      'Mod-2': commands.setBlockType(schema.nodes.heading, { level: 2 }),
+      'Mod-3': commands.setBlockType(schema.nodes.heading, { level: 3 }),
+      'Mod-4': commands.setBlockType(schema.nodes.heading, { level: 4 }),
+      'Mod-5': commands.setBlockType(schema.nodes.heading, { level: 5 }),
+      'Mod-6': commands.setBlockType(schema.nodes.heading, { level: 6 }),
       'Mod-z': historyModule.undo,
       'Mod-y': historyModule.redo,
       'Shift-Mod-z': historyModule.redo,
@@ -20507,6 +20647,9 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       keys.Tab = commands.chainCommands(moveTableCellCommand(1), schemaList.sinkListItem(listItem));
       keys['Shift-Tab'] = commands.chainCommands(moveTableCellCommand(-1), schemaList.liftListItem(listItem));
     }
+    if (schema.nodes.ordered_list) keys['Shift-Mod-7'] = schemaList.wrapInList(schema.nodes.ordered_list);
+    if (schema.nodes.bullet_list) keys['Shift-Mod-8'] = schemaList.wrapInList(schema.nodes.bullet_list);
+    if (schema.nodes.blockquote) keys['Shift-Mod-9'] = commands.wrapIn(schema.nodes.blockquote);
     return state.EditorState.create({
       schema: schema,
       doc: doc,
@@ -20753,10 +20896,16 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
           case 'bold': return run(commands.toggleMark(schema.marks.strong));
           case 'italic': return run(commands.toggleMark(schema.marks.em));
           case 'code': return run(commands.toggleMark(schema.marks.code));
+          case 'paragraph': return run(commands.setBlockType(schema.nodes.paragraph));
           case 'h1': return run(commands.setBlockType(schema.nodes.heading, { level: 1 }));
           case 'h2': return run(commands.setBlockType(schema.nodes.heading, { level: 2 }));
+          case 'h3': return run(commands.setBlockType(schema.nodes.heading, { level: 3 }));
+          case 'h4': return run(commands.setBlockType(schema.nodes.heading, { level: 4 }));
+          case 'h5': return run(commands.setBlockType(schema.nodes.heading, { level: 5 }));
+          case 'h6': return run(commands.setBlockType(schema.nodes.heading, { level: 6 }));
           case 'quote': return run(commands.wrapIn(schema.nodes.blockquote));
           case 'list': return schema.nodes.bullet_list ? run(schemaList.wrapInList(schema.nodes.bullet_list)) : false;
+          case 'ordered-list': return schema.nodes.ordered_list ? run(schemaList.wrapInList(schema.nodes.ordered_list)) : false;
           default: return false;
         }
       },

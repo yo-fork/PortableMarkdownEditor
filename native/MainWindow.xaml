@@ -25,6 +25,8 @@
         <MenuItem Header="終了" Click="Exit_Click" />
       </MenuItem>
       <MenuItem Header="_ヘルプ">
+        <MenuItem Header="キーボードショートカット" Click="Shortcuts_Click" />
+        <Separator />
         <MenuItem Header="このアプリについて" Click="About_Click" />
       </MenuItem>
     </Menu>

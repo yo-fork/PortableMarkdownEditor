@@ -156,6 +156,11 @@ MarkdownファイルはUTF-8として読み込み、BOMなしUTF-8で保存し�
 |`Ctrl + B`|太字|
 |`Ctrl + I`|斜体|
 |`Ctrl + K`|リンク挿入|
+|`Ctrl + 0`|段落へ戻す|
+|`Ctrl + 1`〜`Ctrl + 6`|見出し1〜6|
+|`Ctrl + Shift + 7`|番号リスト|
+|`Ctrl + Shift + 8`|箇条書き|
+|`Ctrl + Shift + 9`|引用|
 
 ## 対応Markdown
 

@@ -55,6 +55,8 @@ assert.match(index, /data-action="clear-folder-permissions"/, 'folder permission
 assert.match(index, /data-action="clear-all-local-data"/, 'all local data deletion button should exist');
 assert.match(index, /class="icon-button" data-action="collapse-outline"[^>]+aria-pressed="true"/, 'the outline should have a persistent topbar toggle after the sidebar is hidden');
 assert.match(index, /data-format="bold"[^>]+aria-label="太字"[^>]+aria-keyshortcuts="Control\+B"/, 'symbol-only formatting buttons should expose descriptive accessible names and shortcuts');
+assert.match(index, /data-format="h1"[^>]+aria-keyshortcuts="Control\+1"/, 'heading buttons should expose their keyboard shortcuts');
+assert.match(index, /data-format="ordered-list"[^>]+aria-keyshortcuts="Control\+Shift\+7"/, 'the numbered-list shortcut should be discoverable from the toolbar');
 assert.match(app, /code-language-input/, 'rendered code blocks should expose a language input');
 assert.match(app, /showOpenFilePicker/, 'Open should use File System Access API when available');
 assert.match(app, /function\s+requestDirectoryForOpenedMarkdown/, 'opened Markdown files should be able to request containing folder access');
@@ -79,8 +81,10 @@ assert.match(app, /function\s+sourceMarkdownValue/, 'source reads should go thro
 assert.match(app, /function\s+replaceSourceRange/, 'source writes should go through the CodeMirror-aware range replacement helper');
 assert.match(app, /function\s+sourceScrollElement/, 'source scroll sync should use the active editor scroll element');
 assert.match(app, /function\s+renderProseMirrorRich/, 'rich editing should prefer the ProseMirror transaction model when Markdown is supported');
+assert.match(app, /function\s+keyboardFormatShortcut[\s\S]+ordered-list[\s\S]+quote/, 'formatting keyboard shortcuts should cover headings, lists, and quotes');
 assert.match(app, /function\s+handleProseMirrorRichChange/, 'ProseMirror rich edits should update Markdown source through one change path');
 assert.match(app, /function\s+isProseMirrorRichTarget/, 'legacy rich DOM handlers should ignore ProseMirror-managed DOM');
+assert.match(app, /function\s+onDocumentChange[\s\S]+isProseMirrorRichTarget\(target\)[\s\S]+updateTaskCheckbox/, 'legacy checklist change handling should not duplicate ProseMirror transactions');
 assert.match(app, /proseMirrorUnsupportedReason/, 'unsupported Markdown should fall back instead of being lossy-parsed through ProseMirror');
 assert.match(app, /function\s+renderReadOnlyRichFallback/, 'ProseMirror failures should render a read-only rich fallback instead of legacy contenteditable editing');
 assert.match(app, /function\s+guardReadOnlyRichFallbackAction/, 'toolbar and insertion actions should not mutate legacy rich DOM fallback');
@@ -406,6 +410,28 @@ const rangedBlockRendered = renderer.renderMarkdownHtml('# Heading\n\nParagraph 
 assert.match(rangedBlockRendered, /data-block-id="b0-[a-z0-9]+"/, 'rendered heading should have a block id');
 assert.match(rangedBlockRendered, /data-block-type="heading"/, 'rendered heading should have a block type');
 assert.match(rangedBlockRendered, /data-source-start="0"/, 'rendered blocks should keep source start offsets');
+
+const escapedBlockedLinkRendered = renderer.renderMarkdownHtml([
+  '# Security',
+  '',
+  String.raw`\[blocked link\](javascript:alert(1))`,
+  '',
+  '## Table',
+  '',
+  '| A | B |',
+  '| --- | --- |',
+  '| 1 | 2 |',
+  '',
+  '## Tasks',
+  '',
+  '- [x] done',
+  '- [ ] todo',
+].join('\n'));
+assert.match(escapedBlockedLinkRendered, /<span class="blocked-link">リンクブロック: blocked link<\/span>/, 'a rich-mode escaped dangerous link should still render as one blocked link');
+assert.doesNotMatch(escapedBlockedLinkRendered, /blocked-link[^<]*<\/span>\)/, 'balanced parentheses in a blocked URL should not leave a trailing parenthesis');
+assert.match(escapedBlockedLinkRendered, /data-block-type="heading"[^>]+id="table"/, 'a blocked link must not consume the following heading');
+assert.match(escapedBlockedLinkRendered, /<table\b/, 'a blocked link must not consume the following table');
+assert.match(escapedBlockedLinkRendered, /class="task-checkbox"[^>]+checked/, 'a blocked link must not consume the following checklist');
 
 const slash = String.fromCharCode(92);
 const drivePath = `Z:${slash}share${slash}local sample.webp`;

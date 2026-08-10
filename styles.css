@@ -1700,6 +1700,25 @@ textarea.pme-node-source-editor.pme-node-source-popover {
   cursor: pointer;
 }
 
+.rich-editor .pme-task-list-item {
+  list-style: none;
+  position: relative;
+}
+
+.rich-editor .pme-task-list-item > .pme-task-checkbox {
+  inset-inline-start: -1.45rem;
+  position: absolute;
+  top: 0.36rem;
+}
+
+.rich-editor .pme-task-list-item-content > :first-child {
+  margin-top: 0;
+}
+
+.rich-editor .pme-task-list-item-content > :last-child {
+  margin-bottom: 0;
+}
+
 .blocked-image, .blocked-link {
   display: inline;
   align-items: center;

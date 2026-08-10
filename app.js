@@ -1256,6 +1256,7 @@ flowchart TD
   function onDocumentChange(event) {
     const target = event.target;
     if (!(target instanceof HTMLInputElement)) return;
+    if (isProseMirrorRichTarget(target)) return;
     if (target.classList.contains('task-checkbox')) {
       updateTaskCheckbox(target);
     } else if (target.classList.contains('code-language-input')) {
@@ -5191,7 +5192,11 @@ flowchart TD
 
     if (!event.ctrlKey && !event.metaKey) return;
     const key = event.key.toLowerCase();
-    if (key === 's') {
+    const formatShortcut = keyboardFormatShortcut(event);
+    if (formatShortcut) {
+      event.preventDefault();
+      applyFormat(formatShortcut);
+    } else if (key === 's') {
       event.preventDefault();
       saveMarkdown();
     } else if (key === 'o') {
@@ -5213,6 +5218,17 @@ flowchart TD
       event.preventDefault();
       insertMermaid();
     }
+  }
+
+  function keyboardFormatShortcut(event) {
+    if (event.altKey) return '';
+    const digit = /^Digit([0-9])$/.exec(event.code || '')?.[1] || (/^[0-9]$/.test(event.key) ? event.key : '');
+    if (!event.shiftKey && digit === '0') return 'paragraph';
+    if (!event.shiftKey && /^[1-6]$/.test(digit)) return `h${digit}`;
+    if (event.shiftKey && digit === '7') return 'ordered-list';
+    if (event.shiftKey && digit === '8') return 'list';
+    if (event.shiftKey && digit === '9') return 'quote';
+    return '';
   }
 
   function snapshotRichDeleteFromKeydown() {
@@ -8141,19 +8157,32 @@ flowchart TD
 
     focusMarkdownInput();
     const selection = sourceSelectionRange();
-    const start = selection.start;
-    const end = selection.end;
-    const selected = sourceMarkdownValue().slice(start, end);
+    let start = selection.start;
+    let end = selection.end;
+    const sourceValue = sourceMarkdownValue();
+    if (start === end && /^(?:paragraph|quote|list|ordered-list|h[1-6])$/.test(format)) {
+      start = sourceValue.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+      const nextNewline = sourceValue.indexOf('\n', end);
+      end = nextNewline < 0 ? sourceValue.length : nextNewline;
+    }
+    const selected = sourceValue.slice(start, end);
     let replacement = selected;
     let selectionStart = start;
     let selectionEnd = end;
 
     switch (format) {
       case 'h1':
-        replacement = prefixLines(selected || '見出し', '# ');
-        break;
       case 'h2':
-        replacement = prefixLines(selected || '見出し', '## ');
+      case 'h3':
+      case 'h4':
+      case 'h5':
+      case 'h6': {
+        const level = Number(format.slice(1));
+        replacement = prefixLines((selected || '見出し').replace(/^\s{0,3}#{1,6}\s+/gm, ''), `${'#'.repeat(level)} `);
+        break;
+      }
+      case 'paragraph':
+        replacement = (selected || '段落').replace(/^\s{0,3}#{1,6}\s+/gm, '');
         break;
       case 'bold':
         replacement = `**${selected || '太字'}**`;
@@ -8175,6 +8204,9 @@ flowchart TD
         break;
       case 'list':
         replacement = prefixLines(selected || '項目', '- ');
+        break;
+      case 'ordered-list':
+        replacement = (selected || '項目').split('\n').map((line, index) => `${index + 1}. ${line}`).join('\n');
         break;
       case 'table':
         replacement = selected || '| 項目 | 内容 |\n| --- | --- |\n| 例 | テキスト |';
@@ -12524,23 +12556,14 @@ flowchart TD
       const startLine = lines[index];
       let endIndex = index;
       const first = startLine.text;
+      const mathEndIndex = displayMathBlockEndIndex(lines, index);
 
       if (/^\s*```/.test(first)) {
         endIndex = index + 1;
         while (endIndex < lines.length && !/^\s*```\s*$/.test(lines[endIndex].text)) endIndex += 1;
         if (endIndex < lines.length) endIndex += 1;
-      } else if (displayMathDelimiter(first)) {
-        const delimiter = displayMathDelimiter(first);
-        endIndex = index + 1;
-        if (!isDisplayMathSelfContainedLine(first, delimiter)) {
-          while (endIndex < lines.length) {
-            if (isDisplayMathClosedLine(lines[endIndex].text, delimiter)) {
-              endIndex += 1;
-              break;
-            }
-            endIndex += 1;
-          }
-        }
+      } else if (mathEndIndex > index) {
+        endIndex = mathEndIndex;
       } else if (isHeadingLine(first) || isHorizontalRule(first) || isTocLine(first)) {
         endIndex = index + 1;
       } else if (isTableStart(lines, index)) {
@@ -12660,7 +12683,7 @@ flowchart TD
   }
 
   function renderBlockWithVendor(raw, block = null) {
-    if (hasAmbiguousStrongDelimiterNeighborhood(raw)) return '';
+    if (hasAmbiguousStrongDelimiterNeighborhood(raw) || hasBlockedMarkdownLink(raw)) return '';
     const md = getVendorMarkdownRenderer();
     if (!md) return '';
     return md.render(preprocessVendorMarkdown(raw), buildMarkdownItEnv(raw, block)).trimEnd();
@@ -12684,7 +12707,7 @@ flowchart TD
 
   function renderInlineMarkdown(raw) {
     const safeRaw = stripRichCaretTokens(raw);
-    if (hasAmbiguousStrongDelimiterNeighborhood(safeRaw)) return renderInline(safeRaw);
+    if (hasAmbiguousStrongDelimiterNeighborhood(safeRaw) || hasBlockedMarkdownLink(safeRaw)) return renderInline(safeRaw);
     const md = getVendorMarkdownRenderer();
     if (!md) return renderInline(safeRaw);
     return md.renderInline(String(safeRaw || ''));
@@ -12872,14 +12895,21 @@ flowchart TD
 
     let text = raw.replace(/`([^`]+)`/g, (_match, code) => hold(`<code>${escapeHtml(code)}</code>`));
 
-    text = text.replace(/!\[([^\]]*)\]\((<[^>]+>|[^)]+)\)/g, (_match, alt, target) => {
+    text = text.replace(/!\[([^\]\n]*)\]\((<[^>\n]+>|(?:[^()\s\n]+|\([^()\n]*\))+)\)/g, (_match, alt, target) => {
       const url = parseMarkdownTarget(target);
       const safe = sanitizeImageUrl(url);
       if (!safe) return hold(renderBlockedImage(url, alt || 'no alt'));
       return hold(`<img alt="${escapeAttribute(alt)}" src="${escapeAttribute(safe)}" data-markdown-src="${escapeAttribute(url)}">`);
     });
 
-    text = text.replace(/\[([^\]]+)\]\((<[^>]+>|[^)]+)\)/g, (_match, label, target) => {
+    text = text.replace(/\\\[([^\]\n]+)\\\]\((<[^>\n]+>|(?:[^()\s\n]+|\([^()\n]*\))+)\)/g, (match, label, target) => {
+      const url = parseMarkdownTarget(target);
+      if (sanitizeLinkUrl(url)) return match;
+      return hold(`<span class="blocked-link">リンクブロック: ${escapeHtml(label)}</span>`);
+    });
+
+    text = text.replace(/\[([^\]\n]+)\]\((<[^>\n]+>|(?:[^()\s\n]+|\([^()\n]*\))+)\)/g, (match, label, target, offset, source) => {
+      if (source[offset - 1] === '\\') return match;
       const url = parseMarkdownTarget(target);
       const safe = sanitizeLinkUrl(url);
       if (!safe) return hold(`<span class="blocked-link">リンクブロック: ${escapeHtml(label)}</span>`);
@@ -12901,6 +12931,25 @@ flowchart TD
       text = text.replaceAll(escapeHtml(token), html).replaceAll(token, html);
     }
     return text;
+  }
+
+  function hasBlockedMarkdownLink(raw) {
+    const text = String(raw || '');
+    const patterns = [
+      /\\\[([^\]\n]+)\\\]\((<[^>\n]+>|(?:[^()\s\n]+|\([^()\n]*\))+)\)/g,
+      /\[([^\]\n]+)\]\((<[^>\n]+>|(?:[^()\s\n]+|\([^()\n]*\))+)\)/g,
+    ];
+    for (let patternIndex = 0; patternIndex < patterns.length; patternIndex += 1) {
+      const pattern = patterns[patternIndex];
+      let match = pattern.exec(text);
+      while (match) {
+        const escaped = patternIndex === 0;
+        const previous = text[match.index - 1] || '';
+        if (previous !== '!' && (escaped || previous !== '\\') && !sanitizeLinkUrl(parseMarkdownTarget(match[2]))) return true;
+        match = pattern.exec(text);
+      }
+    }
+    return false;
   }
 
   function buildHeadingIndex(blocks) {
@@ -14389,6 +14438,16 @@ ${body}
     if (trimmed.startsWith('$$')) return '$$';
     if (trimmed.startsWith('\\[')) return '\\[';
     return '';
+  }
+
+  function displayMathBlockEndIndex(lines, startIndex) {
+    const delimiter = displayMathDelimiter(lines[startIndex]?.text);
+    if (!delimiter) return -1;
+    if (isDisplayMathSelfContainedLine(lines[startIndex].text, delimiter)) return startIndex + 1;
+    for (let index = startIndex + 1; index < lines.length; index += 1) {
+      if (isDisplayMathClosedLine(lines[index].text, delimiter)) return index + 1;
+    }
+    return -1;
   }
 
   function isDisplayMathClosedLine(line, delimiter) {

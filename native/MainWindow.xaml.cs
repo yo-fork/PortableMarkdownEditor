@@ -143,6 +143,16 @@ namespace PortableMarkdownEditor.Desktop
                 MessageBoxImage.Information);
         }
 
+        private void Shortcuts_Click(object sender, RoutedEventArgs eventArgs)
+        {
+            MessageBox.Show(
+                this,
+                "Ctrl+0: 段落\nCtrl+1〜6: 見出し1〜6\nCtrl+B: 太字\nCtrl+I: 斜体\nCtrl+K: リンク\nCtrl+Shift+7: 番号リスト\nCtrl+Shift+8: 箇条書き\nCtrl+Shift+9: 引用\n\nCtrl+N: 新規作成\nCtrl+O: 開く\nCtrl+S: 保存\nCtrl+Shift+S: 名前を付けて保存\nCtrl+P: 印刷",
+                "キーボードショートカット",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+
         private async Task InitializeEditorAsync()
         {
             NativeStatusText.Text = "WebView2を初期化しています...";

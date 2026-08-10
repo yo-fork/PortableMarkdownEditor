@@ -36,6 +36,7 @@ assert.match(project, /Microsoft\.Web\.WebView2\.Wpf/);
 
 assert.match(windowXaml, /xmlns:wv2=/);
 assert.match(windowXaml, /名前を付けて保存/);
+assert.match(windowXaml, /キーボードショートカット[^\n]+Shortcuts_Click/);
 assert.match(windowXaml, /<wv2:WebView2/);
 
 assert.match(windowCode, /SetVirtualHostNameToFolderMapping\(AppHost,[\s\S]+DenyCors/);
@@ -49,6 +50,7 @@ assert.match(windowCode, /if \(!IsAppSource\(eventArgs\.Source\)\)/);
 assert.match(windowCode, /Core_NavigationStarting[\s\S]+eventArgs\.Cancel = true/);
 assert.match(windowCode, /Core_PermissionRequested[\s\S]+CoreWebView2PermissionState\.Deny/);
 assert.match(windowCode, /PostWebMessageAsJson/);
+assert.match(windowCode, /Shortcuts_Click[\s\S]+Ctrl\+1〜6[\s\S]+Ctrl\+Shift\+9/);
 assert.match(windowCode, /desktop\.resolveImageReferences/);
 assert.match(windowCode, /HandleImageReferenceResolutionAsync/);
 assert.doesNotMatch(windowCode, /AddHostObjectToScript/);
