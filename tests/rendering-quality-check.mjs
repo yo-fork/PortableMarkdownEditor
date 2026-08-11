@@ -8,12 +8,14 @@ const MarkdownIt = require('../vendor/markdown-it/markdown-it.min.js');
 const katex = require('../vendor/katex/katex.min.js');
 
 const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+const markdownRendererModule = readFileSync(new URL('../modules/markdown-renderer.js', import.meta.url), 'utf8');
+const appRuntime = `${app}\n${markdownRendererModule}`;
 const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
 const extraGallery = readFileSync(new URL('../samples/mermaid-extra-gallery.md', import.meta.url), 'utf8');
 const advancedGallery = readFileSync(new URL('../samples/mermaid-advanced-gallery.md', import.meta.url), 'utf8');
 const mathGallery = readFileSync(new URL('../samples/math-syntax-gallery.md', import.meta.url), 'utf8');
 const instrumented = app.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml };\n})();');
-const renderer = vm.runInNewContext(instrumented, {
+const context = vm.createContext({
   document: { addEventListener() {} },
   window: { markdownit: MarkdownIt, katex },
   localStorage: {},
@@ -25,6 +27,8 @@ const renderer = vm.runInNewContext(instrumented, {
   alert() {},
   console,
 });
+vm.runInContext(markdownRendererModule, context);
+const renderer = vm.runInContext(instrumented, context);
 
 function renderMermaid(source) {
   return renderer.renderMarkdownHtml([
@@ -160,14 +164,14 @@ assert.match(consecutiveMathBlocks, /<h2[^>]*>Mermaid flowchart TD<\/h2>/, 'head
 assert.match(consecutiveMathBlocks, /class="[^"]*mermaid-diagram/, 'Mermaid fence after display math remains a Mermaid block');
 assert.doesNotMatch(consecutiveMathBlocks, /data-math-source="[^"]*Mermaid flowchart TD/, 'display math must not consume following Markdown blocks');
 
-assert.match(app, /function\s+normalizeSvgMarkupForParsing/, 'Mermaid SVG normalization should protect xlink parsing');
-assert.match(app, /function\s+polishMermaidTimeline/, 'timeline diagrams should receive readable color polish');
-assert.match(app, /function\s+polishMermaidSankey/, 'sankey diagrams should receive readable color polish');
-assert.match(app, /function\s+polishMermaidPacket/, 'packet diagrams should receive readable color polish');
-assert.match(app, /function\s+polishMermaidC4/, 'C4 diagrams should receive SVG safety/readability polish');
-assert.match(app, /function\s+replaceUnsafeC4Images/, 'C4 diagrams should replace sanitized image icons with safe local SVG shapes');
-assert.match(app, /function\s+repositionMermaidC4RelationshipLabels/, 'C4 relationship labels should be moved into readable gaps');
-assert.match(app, /function\s+mermaidViewBoxWidth/, 'Mermaid zoom sizing should use the rendered SVG viewBox when available');
+assert.match(appRuntime, /function\s+normalizeSvgMarkupForParsing/, 'Mermaid SVG normalization should protect xlink parsing');
+assert.match(appRuntime, /function\s+polishMermaidTimeline/, 'timeline diagrams should receive readable color polish');
+assert.match(appRuntime, /function\s+polishMermaidSankey/, 'sankey diagrams should receive readable color polish');
+assert.match(appRuntime, /function\s+polishMermaidPacket/, 'packet diagrams should receive readable color polish');
+assert.match(appRuntime, /function\s+polishMermaidC4/, 'C4 diagrams should receive SVG safety/readability polish');
+assert.match(appRuntime, /function\s+replaceUnsafeC4Images/, 'C4 diagrams should replace sanitized image icons with safe local SVG shapes');
+assert.match(appRuntime, /function\s+repositionMermaidC4RelationshipLabels/, 'C4 relationship labels should be moved into readable gaps');
+assert.match(appRuntime, /function\s+mermaidViewBoxWidth/, 'Mermaid zoom sizing should use the rendered SVG viewBox when available');
 assert.match(styles, /--mermaid-sequence-number-bg:/, 'sequence autonumber badges should define a theme-aware background');
 assert.match(styles, /--mermaid-sequence-number-text:/, 'sequence autonumber badges should define a theme-aware text color');
 assert.match(styles, /\.mermaid-svg\s+\[id\$="-sequencenumber"\][\s\S]*fill:\s*var\(--mermaid-sequence-number-bg\)\s*!important/, 'sequence autonumber marker should use the readable theme background');

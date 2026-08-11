@@ -29,7 +29,10 @@ for (const file of requiredFiles) {
 }
 
 const index = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+const app = [
+  readFileSync(new URL('../app.js', import.meta.url), 'utf8'),
+  readFileSync(new URL('../modules/markdown-renderer.js', import.meta.url), 'utf8'),
+].join('\n');
 const licenses = readFileSync(new URL('../docs/third-party-licenses.md', import.meta.url), 'utf8');
 
 assert.match(index, /vendor\/markdown-it\/markdown-it\.min\.js/);

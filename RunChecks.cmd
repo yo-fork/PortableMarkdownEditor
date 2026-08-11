@@ -3,6 +3,7 @@ setlocal
 pushd "%~dp0"
 
 call :run node --check app.js || goto :failed
+call :run node --check modules\markdown-renderer.js || goto :failed
 call :run node tests\lint-security.mjs || goto :failed
 call :run node tests\security-smoke.mjs || goto :failed
 call :run node tests\desktop-host-static-check.mjs || goto :failed

@@ -3,7 +3,9 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
 const index = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+const appEntry = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+const markdownRendererModule = readFileSync(new URL('../modules/markdown-renderer.js', import.meta.url), 'utf8');
+const app = `${appEntry}\n${markdownRendererModule}`;
 const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
 const securitySample = readFileSync(new URL('../samples/security-check.md', import.meta.url), 'utf8');
 
@@ -19,6 +21,7 @@ assert.doesNotMatch(index, /frame-ancestors/, 'frame-ancestors is ignored in met
 assert.match(index, /img-src 'self' data: blob:/);
 assert.doesNotMatch(index, /img-src[^"]*file:/, 'file: images should not be allowed by CSP');
 assert.match(index, /vendor\/prosemirror\/prosemirror-editor\.js/, 'ProseMirror should load from a local classic script bundle');
+assert.match(index, /modules\/markdown-renderer\.js[\s\S]+app\.js/, 'the Markdown renderer module should load before the app entry point');
 assert.doesNotMatch(index, /https?:\/\/.*\.(js|css)/i, 'no external JS/CSS');
 
 assert.match(app, /function\s+sanitizeLinkUrl/);
@@ -397,8 +400,8 @@ TestURL.createObjectURL = () => `blob:test-${objectUrlIndex += 1}`;
 TestURL.revokeObjectURL = () => {};
 
 let confirmResult = true;
-const instrumented = app.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml, sanitizeImageUrl, sanitizeLinkUrl, saveImageFileToAssets, ensureImageAssetWriteAccess, buildFolderAssetUrls, confirmDocumentReplacement, state };\n})();');
-const renderer = vm.runInNewContext(instrumented, {
+const instrumented = appEntry.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml, sanitizeImageUrl, sanitizeLinkUrl, saveImageFileToAssets, ensureImageAssetWriteAccess, buildFolderAssetUrls, confirmDocumentReplacement, state };\n})();');
+const context = vm.createContext({
   document: { addEventListener() {} },
   window: { isSecureContext: true },
   localStorage: {},
@@ -410,6 +413,8 @@ const renderer = vm.runInNewContext(instrumented, {
   alert() {},
   console,
 });
+vm.runInContext(markdownRendererModule, context);
+const renderer = vm.runInContext(instrumented, context);
 
 renderer.state.dirty = false;
 confirmResult = false;

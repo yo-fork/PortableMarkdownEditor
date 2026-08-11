@@ -176,10 +176,20 @@
   <input id="fileInput" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden>
   <input id="folderInput" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain,image/png,image/jpeg,image/gif,image/webp" webkitdirectory multiple hidden>
   <input id="imageInput" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+  <input id="settingsInput" type="file" accept="application/json,.json" hidden>
   <datalist id="codeLanguageOptions"><option value="text"></option></datalist>
   <dialog id="securityDialog"><button type="button">閉じる</button></dialog>
   <dialog id="linkDomainDialog"><textarea id="allowedDomainsInput"></textarea></dialog>
+  <dialog id="markdownEntryDialog"><div id="markdownEntryList"></div><button id="markdownEntryCancel" type="button">閉じる</button></dialog>
+  <dialog id="folderScanWarningDialog"><p id="folderScanWarningMessage"></p></dialog>
+  <dialog id="inlineInsertDialog">
+    <h2 id="inlineInsertTitle"></h2>
+    <p id="inlineInsertDescription"></p>
+    <label><span id="inlineInsertLabel"></span><input id="inlineInsertTarget"></label>
+    <span id="inlineInsertTargetLabel"></span>
+  </dialog>
 
+  <script src="../modules/markdown-renderer.js"></script>
   <script src="../app.js"></script>
   <script>
     (() => {

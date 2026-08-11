@@ -110,7 +110,7 @@ for (const vendorFile of collectFiles('vendor').filter((file) => file !== 'vendo
 }
 
 const index = read('index.html');
-const app = read('app.js');
+const app = `${read('app.js')}\n${read('modules/markdown-renderer.js')}`;
 const styles = read('styles.css');
 const codeMirrorBundle = read('vendor/codemirror6/source-editor.bundle.js');
 
@@ -121,6 +121,7 @@ assert.doesNotMatch(index, /script-src[^"]*sha256-/, 'CSP should not need an imp
 assert.doesNotMatch(index, /type="importmap"/, 'CodeMirror should load through a local classic bundle instead of an import map');
 assert.match(index, /vendor\/codemirror6\/source-editor\.bundle\.js/, 'CodeMirror should load from the local classic script bundle');
 assert.match(index, /vendor\/prosemirror\/prosemirror-editor\.js/, 'ProseMirror should load from the local classic script bundle');
+assert.match(index, /modules\/markdown-renderer\.js[\s\S]+app\.js/, 'the Markdown renderer module should load before the app entry point');
 assert.match(index, /style-src 'self' 'unsafe-inline'/, 'CSP must allow Mermaid/KaTeX inline styles only');
 assert.doesNotMatch(index, /frame-ancestors/, 'meta CSP must not include ignored frame-ancestors directive');
 assert.match(index, /data-format="math"[\s\S]+インライン数式/, 'toolbar should expose a KaTeX inline math insertion button');

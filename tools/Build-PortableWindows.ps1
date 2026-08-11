@@ -209,6 +209,11 @@ New-Item -ItemType Directory -Path $webRoot -Force | Out-Null
 foreach ($webFile in @('index.html', 'app.js', 'styles.css')) {
     Copy-Item -LiteralPath (Join-Path $repoRoot $webFile) -Destination (Join-Path $webRoot $webFile)
 }
+$modulesRoot = Join-Path $repoRoot 'modules'
+if (!(Test-Path -LiteralPath $modulesRoot -PathType Container)) {
+    throw "Web modules directory was not found: $modulesRoot"
+}
+Copy-Item -LiteralPath $modulesRoot -Destination (Join-Path $webRoot 'modules') -Recurse
 Copy-Item -LiteralPath (Join-Path $repoRoot 'vendor') -Destination (Join-Path $webRoot 'vendor') -Recurse
 Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $distRoot 'LICENSE')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'native\README-WINDOWS.txt') -Destination (Join-Path $distRoot 'README.txt')
