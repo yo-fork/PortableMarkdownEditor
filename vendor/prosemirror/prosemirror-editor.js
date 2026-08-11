@@ -19216,7 +19216,9 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     activeLinkHrefPopover = null;
     if (active.popover) active.popover.classList.remove('is-open');
     if (refocusEditor && active.editorView) {
-      active.editorView.dispatch(clearStoredMarks(active.editorView.state.tr));
+      var exitPos = Math.max(0, Math.min(active.range.to, active.editorView.state.doc.content.size));
+      var exitSelection = state.TextSelection.create(active.editorView.state.doc, exitPos);
+      active.editorView.dispatch(clearStoredMarks(active.editorView.state.tr.setSelection(exitSelection)).scrollIntoView());
       linkHrefArrowExit = { editorView: active.editorView, pos: active.range.to };
       active.editorView.focus();
     }
@@ -19258,6 +19260,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       var after = document.createElement('span');
       var value = document.createElement('span');
       wrapper.className = 'pme-link-href-editor ProseMirror-widget';
+      wrapper.setAttribute('contenteditable', 'false');
       wrapper.setAttribute('data-link-from', String(range.from));
       wrapper.setAttribute('data-link-to', String(range.to));
       before.className = 'pme-inline-source-token pme-inline-source-token--link-url-before';
@@ -19352,7 +19355,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     }
     var range = linkMarkRangeAtPosition(editorState.doc, selection.from);
     if (!range) return false;
-    if (selection.from < range.to - 1) {
+    if (selection.from < range.to) {
       if (dispatch) dispatch(editorState.tr.setSelection(state.TextSelection.create(editorState.doc, selection.from + 1)).scrollIntoView());
       return true;
     }
@@ -19391,8 +19394,6 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       decorations.push(view.Decoration.widget(range.to, sourceMarkerWidget(mark, 'after', range), {
         key: 'pme-inline-source-after-' + mark.type.name + '-' + range.to,
         side: 1,
-        raw: mark.type === schema.marks.link,
-        ignoreSelection: mark.type === schema.marks.link,
         stopEvent: stopLinkHrefEditorEvent
       }));
     }
@@ -20917,7 +20918,13 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
   function enterStoredMarksAtInlineBoundaryCommand(editorState, dispatch) {
     var marks = marksBeforeInlineBoundary(editorState);
     if (!marks) return false;
-    if (dispatch) dispatch(editorState.tr.setStoredMarks(marks));
+    if (dispatch) {
+      var previousPos = Math.max(0, editorState.selection.from - 1);
+      var tr = editorState.tr
+        .setSelection(state.TextSelection.create(editorState.doc, previousPos))
+        .setStoredMarks(marks);
+      dispatch(tr.scrollIntoView());
+    }
     return true;
   }
 
