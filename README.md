@@ -156,6 +156,7 @@ MarkdownファイルはUTF-8として読み込み、BOMなしUTF-8で保存し�
 |`Ctrl + S`|Markdown保存|
 |`Ctrl + Shift + S`|名前を付けて保存、Windowsアプリ版のみ|
 |`Ctrl + O`|Markdownを開く|
+|`Ctrl + Shift + O`|Markdownを新しいウィンドウで開く、Windowsアプリ版のみ|
 |`Ctrl + P`|PDF/印刷|
 |`Ctrl + B`|太字|
 |`Ctrl + I`|斜体|

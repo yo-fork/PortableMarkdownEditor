@@ -16,6 +16,8 @@ WebView2 Runtimeが導入されていないPCでは起動できません。
 
 MarkdownはUTF-8の .md、.markdown、.txt に対応し、1ファイル10MBを上限とします。
 
+ファイルメニューの「新しいウィンドウで開く」、またはCtrl+Shift+Oで、別のMarkdownを独立したウィンドウで開けます。
+
 保存時は改行をLFへ正規化し、BOMなしUTF-8で書き込みます。
 
 画像はPNG、JPEG、GIF、WebPに対応し、1ファイル25MBを上限とします。

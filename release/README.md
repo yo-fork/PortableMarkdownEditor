@@ -4,6 +4,8 @@
 
 ZIPを展開し、`PortableMarkdownEditor` フォルダ内の `PortableMarkdownEditor.exe` をダブルクリックしてください。
 
+起動後は、「ファイル」メニューの「新しいウィンドウで開く」、または `Ctrl+Shift+O` で別のMarkdownを独立したウィンドウで開けます。
+
 Visual Studio、Visual Studio Installer、MSBuildは不要です。
 
 `BuildPortableWindows.cmd` は実行しないでください。

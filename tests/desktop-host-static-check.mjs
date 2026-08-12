@@ -37,6 +37,8 @@ assert.match(project, /Microsoft\.Web\.WebView2\.Wpf/);
 
 assert.match(windowXaml, /xmlns:wv2=/);
 assert.match(windowXaml, /名前を付けて保存/);
+assert.match(windowXaml, /新しいウィンドウで開く[^\n]+Ctrl\+Shift\+O[^\n]+OpenInNewWindow_Click/);
+assert.match(windowXaml, /OpenInNewWindowButton[^\n]+別窓で開く/);
 assert.match(windowXaml, /キーボードショートカット[^\n]+Shortcuts_Click/);
 assert.match(windowXaml, /<wv2:WebView2/);
 
@@ -52,6 +54,10 @@ assert.match(windowCode, /Core_NavigationStarting[\s\S]+eventArgs\.Cancel = true
 assert.match(windowCode, /Core_PermissionRequested[\s\S]+CoreWebView2PermissionState\.Deny/);
 assert.match(windowCode, /PostWebMessageAsJson/);
 assert.match(windowCode, /Shortcuts_Click[\s\S]+Ctrl\+1〜6[\s\S]+Ctrl\+K: インラインコード[\s\S]+Ctrl\+Shift\+M: 数式ブロック[\s\S]+Ctrl\+Shift\+L: リンク[\s\S]+Ctrl\+Alt\+O: アウトライン表示切り替え/);
+assert.match(windowCode, /MainWindow_PreviewKeyDown[\s\S]+ModifierKeys\.Control \| ModifierKeys\.Shift[\s\S]+Key\.O[\s\S]+OpenDocumentInNewWindow/);
+assert.match(windowCode, /OpenDocumentInNewWindow[\s\S]+Process\.Start\(new ProcessStartInfo[\s\S]+UseShellExecute = false/);
+assert.match(windowCode, /OpenDocumentInNewWindow[\s\S]+File\.Exists\(executablePath\)[\s\S]+File\.Exists\(fullPath\)/);
+assert.match(windowCode, /QuoteCommandLineArgument[\s\S]+value\.IndexOf\('"'\)[\s\S]+return "\\\"" \+ value \+ "\\\""/);
 assert.match(windowCode, /desktop\.resolveImageReferences/);
 assert.match(windowCode, /HandleImageReferenceResolutionAsync/);
 assert.doesNotMatch(windowCode, /AddHostObjectToScript/);
@@ -102,12 +108,14 @@ assert.match(nativeChecks, /image outside the document folder was resolved/);
 assert.match(nativeChecks, /MIME and image signature mismatch was accepted/);
 
 assert.match(portableReadme, /WebView2 Evergreen Runtime/);
+assert.match(portableReadme, /Ctrl\+Shift\+O[^\n]+独立したウィンドウ/);
 assert.match(portableReadme, /data\\WebView2/);
 assert.match(portableReadme, /Visual Studio[^\n]+不要/);
 assert.match(projectReadme, /release\/PortableMarkdownEditor-win-x64\.zip/);
 assert.match(projectReadme, /BuildPortableWindows\.cmd[^\n]+開発者向け/);
 assert.match(projectReadme, /release\/LICENSE/);
 assert.match(releaseReadme, /PortableMarkdownEditor\.exe/);
+assert.match(releaseReadme, /Ctrl\+Shift\+O[^\n]+独立したウィンドウ/);
 assert.match(releaseReadme, /BuildPortableWindows\.cmd[^\n]+実行しない/);
 assert.match(releaseReadme, /THIRD-PARTY-NOTICES\.txt/);
 

@@ -86,6 +86,11 @@ namespace PortableMarkdownEditor.Desktop
                 eventArgs.Handled = true;
                 await RunOperationAsync(OpenDocumentAsync);
             }
+            else if (modifiers == (ModifierKeys.Control | ModifierKeys.Shift) && eventArgs.Key == Key.O)
+            {
+                eventArgs.Handled = true;
+                OpenDocumentInNewWindow();
+            }
             else if (modifiers == ModifierKeys.Control && eventArgs.Key == Key.S)
             {
                 eventArgs.Handled = true;
@@ -111,6 +116,11 @@ namespace PortableMarkdownEditor.Desktop
         private async void Open_Click(object sender, RoutedEventArgs eventArgs)
         {
             await RunOperationAsync(OpenDocumentAsync);
+        }
+
+        private void OpenInNewWindow_Click(object sender, RoutedEventArgs eventArgs)
+        {
+            OpenDocumentInNewWindow();
         }
 
         private async void Save_Click(object sender, RoutedEventArgs eventArgs)
@@ -165,6 +175,7 @@ namespace PortableMarkdownEditor.Desktop
                     + "Ctrl+Alt+O: アウトライン表示切り替え\n\n"
                     + "Ctrl+N: 新規作成\n"
                     + "Ctrl+O: 開く\n"
+                    + "Ctrl+Shift+O: 新しいウィンドウで開く\n"
                     + "Ctrl+S: 保存\n"
                     + "Ctrl+Shift+S: 名前を付けて保存\n"
                     + "Ctrl+P: 印刷",
@@ -564,21 +575,85 @@ namespace PortableMarkdownEditor.Desktop
                 return;
             }
 
+            string path = SelectMarkdownDocumentPath("Markdownファイルを開く");
+            if (string.IsNullOrEmpty(path))
+            {
+                return;
+            }
+
+            await OpenDocumentPathAsync(path, true);
+        }
+
+        private void OpenDocumentInNewWindow()
+        {
+            if (!_editorReady || _operationInProgress)
+            {
+                return;
+            }
+
+            string path = SelectMarkdownDocumentPath("新しいウィンドウでMarkdownファイルを開く");
+            if (string.IsNullOrEmpty(path))
+            {
+                return;
+            }
+
+            try
+            {
+                string executablePath = Path.GetFullPath(Environment.GetCommandLineArgs()[0]);
+                if (!File.Exists(executablePath))
+                {
+                    throw new FileNotFoundException("実行中のアプリ本体が見つかりません。", executablePath);
+                }
+
+                string fullPath = Path.GetFullPath(path);
+                if (!File.Exists(fullPath))
+                {
+                    throw new FileNotFoundException("選択したMarkdownファイルが見つかりません。", fullPath);
+                }
+
+                Process process = Process.Start(new ProcessStartInfo
+                {
+                    FileName = executablePath,
+                    Arguments = QuoteCommandLineArgument(fullPath),
+                    WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory,
+                    UseShellExecute = false,
+                });
+                if (process == null)
+                {
+                    throw new InvalidOperationException("新しいウィンドウの起動結果を確認できませんでした。");
+                }
+
+                process.Dispose();
+                NativeStatusText.Text = "新しいウィンドウでファイルを開きました。";
+            }
+            catch (Exception exception)
+            {
+                ShowOperationError("新しいウィンドウを開けませんでした。", exception);
+            }
+        }
+
+        private string SelectMarkdownDocumentPath(string title)
+        {
             OpenFileDialog dialog = new OpenFileDialog
             {
-                Title = "Markdownファイルを開く",
+                Title = title,
                 Filter = "Markdown (*.md;*.markdown;*.txt)|*.md;*.markdown;*.txt|すべてのファイル (*.*)|*.*",
                 Multiselect = false,
                 CheckFileExists = true,
                 DereferenceLinks = true,
                 RestoreDirectory = true,
             };
-            if (dialog.ShowDialog(this) != true)
+            return dialog.ShowDialog(this) == true ? dialog.FileName : null;
+        }
+
+        private static string QuoteCommandLineArgument(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.IndexOf('"') >= 0)
             {
-                return;
+                throw new ArgumentException("起動引数として使用できないファイルパスです。", "value");
             }
 
-            await OpenDocumentPathAsync(dialog.FileName, true);
+            return "\"" + value + "\"";
         }
 
         private async Task OpenDocumentPathAsync(string path, bool confirmDiscard)
@@ -845,6 +920,7 @@ namespace PortableMarkdownEditor.Desktop
             bool enabled = _editorReady && !_operationInProgress;
             NewButton.IsEnabled = enabled;
             OpenButton.IsEnabled = enabled;
+            OpenInNewWindowButton.IsEnabled = enabled;
             SaveButton.IsEnabled = enabled;
             SaveAsButton.IsEnabled = enabled;
             PrintButton.IsEnabled = enabled;
