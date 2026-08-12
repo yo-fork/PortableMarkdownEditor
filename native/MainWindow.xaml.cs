@@ -32,6 +32,7 @@ namespace PortableMarkdownEditor.Desktop
         private readonly Dictionary<string, string> _shortcutByCommand = CreateDefaultNativeShortcuts();
         private readonly Dictionary<string, string> _commandByShortcut
             = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly NativeThemeController _themeController;
 
         private string _documentPath;
         private string _webFileName = "untitled.md";
@@ -45,6 +46,8 @@ namespace PortableMarkdownEditor.Desktop
         public MainWindow()
         {
             InitializeComponent();
+            _themeController = new NativeThemeController(this, EditorWebView);
+            _themeController.ApplyDefault();
             string[] arguments = Environment.GetCommandLineArgs();
             if (arguments.Length > 1 && !string.IsNullOrWhiteSpace(arguments[1]))
             {
@@ -61,6 +64,11 @@ namespace PortableMarkdownEditor.Desktop
             RebuildNativeShortcutLookup();
             UpdateShortcutMenuLabels();
             UpdateWindowState();
+        }
+
+        private void MainWindow_SourceInitialized(object sender, EventArgs eventArgs)
+        {
+            _themeController.ApplyTitleBarTheme();
         }
 
         private async void MainWindow_Loaded(object sender, RoutedEventArgs eventArgs)
@@ -193,6 +201,7 @@ namespace PortableMarkdownEditor.Desktop
             Directory.CreateDirectory(userDataDirectory);
             CoreWebView2Environment environment = await CoreWebView2Environment.CreateAsync(null, userDataDirectory, null);
             await EditorWebView.EnsureCoreWebView2Async(environment);
+            _themeController.ApplyWebViewTheme();
 
             CoreWebView2 core = EditorWebView.CoreWebView2;
             ConfigureWebViewSettings(core.Settings);
@@ -397,6 +406,9 @@ namespace PortableMarkdownEditor.Desktop
                     case "desktop.shortcutsChanged":
                         ApplyShortcutSettings(message);
                         break;
+                    case "desktop.themeChanged":
+                        ApplyThemeMessage(message);
+                        break;
                     case "desktop.shortcutCaptureState":
                         _shortcutCaptureActive = GetBoolean(message, "active");
                         break;
@@ -427,6 +439,7 @@ namespace PortableMarkdownEditor.Desktop
             _dirty = GetBoolean(message, "dirty");
             _webFileName = SafeDisplayFileName(GetString(message, "fileName"));
             ApplyShortcutSettings(message);
+            ApplyThemeMessage(message);
             NativeStatusText.Text = "準備完了";
             UpdateWindowState();
 
@@ -484,6 +497,19 @@ namespace PortableMarkdownEditor.Desktop
             foreach (KeyValuePair<string, string> entry in next) _shortcutByCommand[entry.Key] = entry.Value;
             RebuildNativeShortcutLookup();
             UpdateShortcutMenuLabels();
+        }
+
+        private void ApplyThemeMessage(Dictionary<string, object> message)
+        {
+            string theme = GetString(message, "theme");
+            if (string.Equals(theme, "dark", StringComparison.Ordinal))
+            {
+                _themeController.Apply(true);
+            }
+            else if (string.Equals(theme, "light", StringComparison.Ordinal))
+            {
+                _themeController.Apply(false);
+            }
         }
 
         private void HandleDocumentState(Dictionary<string, object> message)

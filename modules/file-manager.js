@@ -103,6 +103,7 @@
         dirty: state.dirty,
         fileName: state.fileName,
         shortcuts: shortcutAssignmentsForExport(),
+        theme: state.theme,
       });
       notifyDesktopDocumentState(true);
     }
@@ -122,6 +123,14 @@
       if (!state.desktopHost) return false;
       postDesktopMessage({ type: 'desktop.command', command });
       return true;
+    }
+
+    function notifyDesktopTheme() {
+      if (!state.desktopHost) return false;
+      return postDesktopMessage({
+        type: 'desktop.themeChanged',
+        theme: state.theme,
+      });
     }
 
     function notifyDesktopDocumentState(force = false) {
@@ -2014,6 +2023,7 @@
       initializeDesktopBridge,
       insertImageFilesAsAssets,
       notifyDesktopDocumentState,
+      notifyDesktopTheme,
       onFileChosen,
       onFolderChosen,
       onImageChosen,

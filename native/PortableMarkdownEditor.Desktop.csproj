@@ -43,6 +43,7 @@
     </Reference>
     <Reference Include="System" />
     <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
     <Reference Include="System.Web.Extensions" />
     <Reference Include="System.Xaml">
       <HintPath Condition=" '$(FrameworkRuntimeDirectory)' != '' ">$(FrameworkRuntimeDirectory)\System.Xaml.dll</HintPath>
@@ -76,6 +77,7 @@
     <Compile Include="MainWindow.xaml.cs">
       <DependentUpon>MainWindow.xaml</DependentUpon>
     </Compile>
+    <Compile Include="NativeThemeController.cs" />
     <Compile Include="PortableFileService.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Resource Include="Assets\AppIcon.ico" />

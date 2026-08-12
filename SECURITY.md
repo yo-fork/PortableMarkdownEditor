@@ -34,6 +34,8 @@ Windowsアプリ版は、WebView2のホストオブジェクトを無効化し�
 
 JavaScriptとWPFの間では、許可した種類のJSONメッセージだけを交換します。
 
+表示テーマの通知は `light` または `dark` だけを受け付け、その他の値は無視します。
+
 ネイティブ側は、メッセージ送信元が固定アプリオリジン `https://portable-markdown-editor.local/` の場合だけ処理します。
 
 Windowsホストは、現在の文書パスやフォルダ列挙結果、汎用ファイルアクセス関数をWebViewへ渡しません。

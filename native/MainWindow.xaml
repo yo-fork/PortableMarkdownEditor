@@ -9,11 +9,47 @@
         MinWidth="900"
         MinHeight="620"
         WindowStartupLocation="CenterScreen"
+        SourceInitialized="MainWindow_SourceInitialized"
         Loaded="MainWindow_Loaded"
         Closing="MainWindow_Closing"
-        PreviewKeyDown="MainWindow_PreviewKeyDown">
-  <DockPanel LastChildFill="True">
-    <Menu DockPanel.Dock="Top">
+        PreviewKeyDown="MainWindow_PreviewKeyDown"
+        Background="{DynamicResource NativeWindowBackgroundBrush}"
+        Foreground="{DynamicResource NativeTextBrush}">
+  <Window.Resources>
+    <SolidColorBrush x:Key="NativeWindowBackgroundBrush" Color="#F5F6F8" />
+    <SolidColorBrush x:Key="NativeSurfaceBrush" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="NativeControlBrush" Color="#F0F2F5" />
+    <SolidColorBrush x:Key="NativeTextBrush" Color="#20242A" />
+    <SolidColorBrush x:Key="NativeMutedTextBrush" Color="#667085" />
+    <SolidColorBrush x:Key="NativeBorderBrush" Color="#D9DEE7" />
+    <Style TargetType="{x:Type Menu}">
+      <Setter Property="Background" Value="{DynamicResource NativeSurfaceBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource NativeTextBrush}" />
+    </Style>
+    <Style TargetType="{x:Type MenuItem}">
+      <Setter Property="Background" Value="{DynamicResource NativeSurfaceBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource NativeTextBrush}" />
+    </Style>
+    <Style TargetType="{x:Type ToolBar}">
+      <Setter Property="Background" Value="{DynamicResource NativeControlBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource NativeTextBrush}" />
+    </Style>
+    <Style TargetType="{x:Type Button}" BasedOn="{StaticResource {x:Static ToolBar.ButtonStyleKey}}">
+      <Setter Property="Background" Value="{DynamicResource NativeSurfaceBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource NativeTextBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource NativeBorderBrush}" />
+    </Style>
+    <Style TargetType="{x:Type StatusBar}">
+      <Setter Property="Background" Value="{DynamicResource NativeSurfaceBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource NativeMutedTextBrush}" />
+    </Style>
+    <Style TargetType="{x:Type StatusBarItem}">
+      <Setter Property="Background" Value="{DynamicResource NativeSurfaceBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource NativeMutedTextBrush}" />
+    </Style>
+  </Window.Resources>
+  <DockPanel LastChildFill="True" Background="{DynamicResource NativeWindowBackgroundBrush}">
+    <Menu x:Name="NativeMenu" DockPanel.Dock="Top">
       <MenuItem Header="_ファイル">
         <MenuItem x:Name="NewMenuItem" Header="_新規ウィンドウ" InputGestureText="Ctrl+N" Click="New_Click" />
         <MenuItem x:Name="OpenMenuItem" Header="_開く..." InputGestureText="Ctrl+O" Click="Open_Click" />
@@ -34,8 +70,8 @@
       </MenuItem>
     </Menu>
 
-    <ToolBarTray DockPanel.Dock="Top" Background="#F3F4F6">
-      <ToolBar Band="0" BandIndex="0" Padding="6,2">
+    <ToolBarTray x:Name="NativeToolBarTray" DockPanel.Dock="Top" Background="{DynamicResource NativeControlBrush}">
+      <ToolBar x:Name="NativeToolBar" Band="0" BandIndex="0" Padding="6,2">
         <Button x:Name="NewButton" Content="新規ウィンドウ" Padding="12,5" Margin="0,0,4,0" Click="New_Click" />
         <Button x:Name="OpenButton" Content="開く" Padding="12,5" Margin="0,0,4,0" Click="Open_Click" />
         <Button x:Name="OpenInNewWindowButton" Content="別窓で開く" Padding="12,5" Margin="0,0,4,0" Click="OpenInNewWindow_Click" />
@@ -46,7 +82,7 @@
       </ToolBar>
     </ToolBarTray>
 
-    <StatusBar DockPanel.Dock="Bottom">
+    <StatusBar x:Name="NativeStatusBar" DockPanel.Dock="Bottom">
       <StatusBarItem>
         <TextBlock x:Name="NativeStatusText" Text="起動中..." />
       </StatusBarItem>
@@ -56,7 +92,7 @@
       </StatusBarItem>
     </StatusBar>
 
-    <Border BorderBrush="#D1D5DB" BorderThickness="0,1,0,0">
+    <Border x:Name="EditorBorder" BorderBrush="{DynamicResource NativeBorderBrush}" BorderThickness="0,1,0,0">
       <wv2:WebView2 x:Name="EditorWebView" DefaultBackgroundColor="White" />
     </Border>
   </DockPanel>

@@ -395,6 +395,7 @@ flowchart TD
     initializeDesktopBridge,
     insertImageFilesAsAssets,
     notifyDesktopDocumentState,
+    notifyDesktopTheme,
     onFileChosen,
     onFolderChosen,
     onImageChosen,
@@ -3075,6 +3076,7 @@ flowchart TD
 
   function applyTheme() {
     document.documentElement.dataset.theme = state.theme;
+    notifyDesktopTheme();
     const themeButton = document.querySelector('[data-action="toggle-theme"]');
     if (!themeButton) return;
     const label = state.theme === 'dark' ? 'ライトテーマに切り替え' : 'ダークテーマに切り替え';

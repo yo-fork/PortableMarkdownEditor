@@ -16,6 +16,8 @@ ZIPを展開し、`PortableMarkdownEditor` フォルダ内の `PortableMarkdownE
 
 選択した本文フォントはリッチ、プレビュー、集中モードへ共通適用し、通常のソースモードと文書内のコードは等幅フォントのままです。
 
+ダークモードへ切り替えると、編集画面に加えてメニュー、ファイルツールバー、ステータスバー、タイトルバーも暗い配色になります。
+
 Visual Studio、Visual Studio Installer、MSBuildは不要です。
 
 `BuildPortableWindows.cmd` は実行しないでください。

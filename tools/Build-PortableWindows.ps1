@@ -10,6 +10,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $projectPath = Join-Path $repoRoot 'native\PortableMarkdownEditor.Desktop.csproj'
 $nativeChecksProjectPath = Join-Path $repoRoot 'tests\native\PortableMarkdownEditor.NativeChecks.csproj'
+$nativeThemeCheckPath = Join-Path $repoRoot 'tests\Check-NativeTheme.ps1'
 $buildRoot = Join-Path $repoRoot 'artifacts\portable-windows'
 $buildOutput = Join-Path $buildRoot 'bin'
 $intermediateOutput = Join-Path $buildRoot 'obj'
@@ -226,6 +227,8 @@ $buildInfo = @(
     "Built: $([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss zzz'))"
 ) -join [Environment]::NewLine
 Set-Content -LiteralPath (Join-Path $distRoot 'BUILD-INFO.txt') -Value $buildInfo -Encoding UTF8
+
+& $nativeThemeCheckPath -ExecutablePath (Join-Path $distRoot 'PortableMarkdownEditor.exe')
 
 if (!$SkipZip) {
     New-Item -ItemType Directory -Path $distParent -Force | Out-Null
