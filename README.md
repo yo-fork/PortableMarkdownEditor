@@ -152,7 +152,7 @@ MarkdownファイルはUTF-8として読み込み、BOMなしUTF-8で保存し�
 
 |キー|操作|
 |-|-|
-|`Ctrl + N`|新規作成、Windowsアプリ版のみ|
+|`Ctrl + N`|空の新規ウィンドウを開く、Windowsアプリ版のみ|
 |`Ctrl + S`|Markdown保存|
 |`Ctrl + Shift + S`|名前を付けて保存、Windowsアプリ版のみ|
 |`Ctrl + O`|Markdownを開く|

@@ -17,6 +17,7 @@ namespace PortableMarkdownEditor.Desktop
     {
         private const string AppHost = "portable-markdown-editor.local";
         private const string DocumentHost = "document.portable-markdown-editor.local";
+        private const string NewDocumentArgument = "--new-document";
         private const int MaxBridgeMessageCharacters = 80 * 1024 * 1024;
         private const int SnapshotTimeoutMilliseconds = 10000;
 
@@ -32,6 +33,7 @@ namespace PortableMarkdownEditor.Desktop
         private string _documentPath;
         private string _webFileName = "untitled.md";
         private string _startupDocumentPath;
+        private bool _startWithNewDocument;
         private bool _editorReady;
         private bool _dirty;
         private bool _operationInProgress;
@@ -42,7 +44,14 @@ namespace PortableMarkdownEditor.Desktop
             string[] arguments = Environment.GetCommandLineArgs();
             if (arguments.Length > 1 && !string.IsNullOrWhiteSpace(arguments[1]))
             {
-                _startupDocumentPath = arguments[1];
+                if (string.Equals(arguments[1], NewDocumentArgument, StringComparison.Ordinal))
+                {
+                    _startWithNewDocument = true;
+                }
+                else
+                {
+                    _startupDocumentPath = arguments[1];
+                }
             }
 
             UpdateWindowState();
@@ -79,7 +88,7 @@ namespace PortableMarkdownEditor.Desktop
             if (modifiers == ModifierKeys.Control && eventArgs.Key == Key.N)
             {
                 eventArgs.Handled = true;
-                await RunOperationAsync(NewDocumentAsync);
+                OpenNewDocumentWindow();
             }
             else if (modifiers == ModifierKeys.Control && eventArgs.Key == Key.O)
             {
@@ -108,9 +117,9 @@ namespace PortableMarkdownEditor.Desktop
             }
         }
 
-        private async void New_Click(object sender, RoutedEventArgs eventArgs)
+        private void New_Click(object sender, RoutedEventArgs eventArgs)
         {
-            await RunOperationAsync(NewDocumentAsync);
+            OpenNewDocumentWindow();
         }
 
         private async void Open_Click(object sender, RoutedEventArgs eventArgs)
@@ -173,7 +182,7 @@ namespace PortableMarkdownEditor.Desktop
                     + "Ctrl+Alt+I: 目次\n"
                     + "Ctrl+Alt+M: Mermaid図\n"
                     + "Ctrl+Alt+O: アウトライン表示切り替え\n\n"
-                    + "Ctrl+N: 新規作成\n"
+                    + "Ctrl+N: 新規ウィンドウ\n"
                     + "Ctrl+O: 開く\n"
                     + "Ctrl+Shift+O: 新しいウィンドウで開く\n"
                     + "Ctrl+S: 保存\n"
@@ -428,6 +437,13 @@ namespace PortableMarkdownEditor.Desktop
             NativeStatusText.Text = "準備完了";
             UpdateWindowState();
 
+            if (_startWithNewDocument)
+            {
+                _startWithNewDocument = false;
+                LoadNewDocument();
+                return;
+            }
+
             string startupPath = _startupDocumentPath;
             _startupDocumentPath = null;
             if (!string.IsNullOrWhiteSpace(startupPath))
@@ -528,7 +544,7 @@ namespace PortableMarkdownEditor.Desktop
             switch (command)
             {
                 case "new":
-                    await NewDocumentAsync();
+                    OpenNewDocumentWindow();
                     break;
                 case "open":
                     await OpenDocumentAsync();
@@ -545,11 +561,11 @@ namespace PortableMarkdownEditor.Desktop
             }
         }
 
-        private Task NewDocumentAsync()
+        private void LoadNewDocument()
         {
-            if (!_editorReady || !ConfirmDiscardChanges("新規文書へ切り替え"))
+            if (!_editorReady)
             {
-                return Task.CompletedTask;
+                return;
             }
 
             _documentPath = null;
@@ -565,7 +581,6 @@ namespace PortableMarkdownEditor.Desktop
             });
             NativeStatusText.Text = "新規文書を作成しました。";
             UpdateWindowState();
-            return Task.CompletedTask;
         }
 
         private async Task OpenDocumentAsync()
@@ -599,37 +614,60 @@ namespace PortableMarkdownEditor.Desktop
 
             try
             {
-                string executablePath = Path.GetFullPath(Environment.GetCommandLineArgs()[0]);
-                if (!File.Exists(executablePath))
-                {
-                    throw new FileNotFoundException("実行中のアプリ本体が見つかりません。", executablePath);
-                }
-
                 string fullPath = Path.GetFullPath(path);
                 if (!File.Exists(fullPath))
                 {
                     throw new FileNotFoundException("選択したMarkdownファイルが見つかりません。", fullPath);
                 }
 
-                Process process = Process.Start(new ProcessStartInfo
-                {
-                    FileName = executablePath,
-                    Arguments = QuoteCommandLineArgument(fullPath),
-                    WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory,
-                    UseShellExecute = false,
-                });
-                if (process == null)
-                {
-                    throw new InvalidOperationException("新しいウィンドウの起動結果を確認できませんでした。");
-                }
-
-                process.Dispose();
+                StartNewEditorProcess(QuoteCommandLineArgument(fullPath));
                 NativeStatusText.Text = "新しいウィンドウでファイルを開きました。";
             }
             catch (Exception exception)
             {
                 ShowOperationError("新しいウィンドウを開けませんでした。", exception);
             }
+        }
+
+        private void OpenNewDocumentWindow()
+        {
+            if (!_editorReady)
+            {
+                return;
+            }
+
+            try
+            {
+                StartNewEditorProcess(NewDocumentArgument);
+                NativeStatusText.Text = "新規ウィンドウを開きました。";
+            }
+            catch (Exception exception)
+            {
+                ShowOperationError("新規ウィンドウを開けませんでした。", exception);
+            }
+        }
+
+        private static void StartNewEditorProcess(string arguments)
+        {
+            string executablePath = Path.GetFullPath(Environment.GetCommandLineArgs()[0]);
+            if (!File.Exists(executablePath))
+            {
+                throw new FileNotFoundException("実行中のアプリ本体が見つかりません。", executablePath);
+            }
+
+            Process process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executablePath,
+                Arguments = arguments,
+                WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory,
+                UseShellExecute = false,
+            });
+            if (process == null)
+            {
+                throw new InvalidOperationException("新しいウィンドウの起動結果を確認できませんでした。");
+            }
+
+            process.Dispose();
         }
 
         private string SelectMarkdownDocumentPath(string title)

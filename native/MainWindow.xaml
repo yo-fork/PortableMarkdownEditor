@@ -15,7 +15,7 @@
   <DockPanel LastChildFill="True">
     <Menu DockPanel.Dock="Top">
       <MenuItem Header="_ファイル">
-        <MenuItem Header="_新規" InputGestureText="Ctrl+N" Click="New_Click" />
+        <MenuItem Header="_新規ウィンドウ" InputGestureText="Ctrl+N" Click="New_Click" />
         <MenuItem Header="_開く..." InputGestureText="Ctrl+O" Click="Open_Click" />
         <MenuItem Header="新しいウィンドウで開く..." InputGestureText="Ctrl+Shift+O" Click="OpenInNewWindow_Click" />
         <Separator />
@@ -35,7 +35,7 @@
 
     <ToolBarTray DockPanel.Dock="Top" Background="#F3F4F6">
       <ToolBar Band="0" BandIndex="0" Padding="6,2">
-        <Button x:Name="NewButton" Content="新規" Padding="12,5" Margin="0,0,4,0" Click="New_Click" />
+        <Button x:Name="NewButton" Content="新規ウィンドウ" Padding="12,5" Margin="0,0,4,0" Click="New_Click" />
         <Button x:Name="OpenButton" Content="開く" Padding="12,5" Margin="0,0,4,0" Click="Open_Click" />
         <Button x:Name="OpenInNewWindowButton" Content="別窓で開く" Padding="12,5" Margin="0,0,4,0" Click="OpenInNewWindow_Click" />
         <Button x:Name="SaveButton" Content="保存" Padding="12,5" Margin="0,0,4,0" Click="Save_Click" />
