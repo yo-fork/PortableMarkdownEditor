@@ -238,12 +238,17 @@ button[aria-pressed="true"], .view-controls button.is-active {
 .toolbar, .view-controls {
   min-width: 0;
   overflow-x: auto;
+  overflow-y: hidden;
   overscroll-behavior-x: contain;
   scrollbar-width: thin;
 }
 
 .toolbar button, .view-controls button, .top-actions button {
   flex: 0 0 auto;
+}
+
+.toolbar button:active, .view-controls button:active {
+  transform: none;
 }
 
 .toolbar.compact button { min-width: 2.25rem; padding-inline: 0.6rem; }

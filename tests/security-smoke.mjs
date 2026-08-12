@@ -88,6 +88,8 @@ assert.match(styles, /--document-sans:[^;]+Yu Gothic UI[^;]+Meiryo/, 'the Gothic
 assert.match(styles, /--document-serif:[^;]+Yu Mincho/, 'the Mincho document font should prioritize Yu Mincho');
 assert.match(styles, /\.markdown-body, \.rich-editor\s*\{[^}]+font-family:\s*var\(--document-font\)/, 'rich and preview modes should share the selected document font');
 assert.match(styles, /body\[data-mode="focus"\][^}]+font-family:\s*var\(--document-font\)/, 'focus mode should share the selected document font');
+assert.match(styles, /\.toolbar,\s*\.view-controls\s*\{[^}]*overflow-x:\s*auto;[^}]*overflow-y:\s*hidden;/, 'scrollable topbar controls should not gain a vertical scrollbar while a button is pressed');
+assert.match(styles, /\.toolbar button:active,\s*\.view-controls button:active\s*\{[^}]*transform:\s*none;/, 'scrollable topbar buttons should not move their hit target while pressed');
 assert.match(styles, /#sourceEditor\s*\{[^}]+font-family:\s*var\(--mono\)/, 'normal source mode should remain monospaced');
 assert.match(app, /code-language-input/, 'rendered code blocks should expose a language input');
 assert.match(app, /showOpenFilePicker/, 'Open should use File System Access API when available');
