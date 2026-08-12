@@ -9,7 +9,8 @@ const katex = require('../vendor/katex/katex.min.js');
 
 const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
 const markdownRendererModule = readFileSync(new URL('../modules/markdown-renderer.js', import.meta.url), 'utf8');
-const appRuntime = `${app}\n${markdownRendererModule}`;
+const fileManagerModule = readFileSync(new URL('../modules/file-manager.js', import.meta.url), 'utf8');
+const appRuntime = `${app}\n${markdownRendererModule}\n${fileManagerModule}`;
 const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
 const extraGallery = readFileSync(new URL('../samples/mermaid-extra-gallery.md', import.meta.url), 'utf8');
 const advancedGallery = readFileSync(new URL('../samples/mermaid-advanced-gallery.md', import.meta.url), 'utf8');
@@ -28,6 +29,7 @@ const context = vm.createContext({
   console,
 });
 vm.runInContext(markdownRendererModule, context);
+vm.runInContext(fileManagerModule, context);
 const renderer = vm.runInContext(instrumented, context);
 
 function renderMermaid(source) {

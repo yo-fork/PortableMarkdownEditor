@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-const app = `${read('../app.js')}\n${read('../modules/markdown-renderer.js')}`;
+const app = `${read('../app.js')}\n${read('../modules/markdown-renderer.js')}\n${read('../modules/file-manager.js')}`;
 const index = read('../index.html');
 const styles = read('../styles.css');
 const project = read('../native/PortableMarkdownEditor.Desktop.csproj');

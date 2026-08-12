@@ -5,7 +5,8 @@ import vm from 'node:vm';
 const index = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const appEntry = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
 const markdownRendererModule = readFileSync(new URL('../modules/markdown-renderer.js', import.meta.url), 'utf8');
-const app = `${appEntry}\n${markdownRendererModule}`;
+const fileManagerModule = readFileSync(new URL('../modules/file-manager.js', import.meta.url), 'utf8');
+const app = `${appEntry}\n${markdownRendererModule}\n${fileManagerModule}`;
 const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
 const securitySample = readFileSync(new URL('../samples/security-check.md', import.meta.url), 'utf8');
 
@@ -22,6 +23,7 @@ assert.match(index, /img-src 'self' data: blob:/);
 assert.doesNotMatch(index, /img-src[^"]*file:/, 'file: images should not be allowed by CSP');
 assert.match(index, /vendor\/prosemirror\/prosemirror-editor\.js/, 'ProseMirror should load from a local classic script bundle');
 assert.match(index, /modules\/markdown-renderer\.js[\s\S]+app\.js/, 'the Markdown renderer module should load before the app entry point');
+assert.match(index, /modules\/file-manager\.js[\s\S]+app\.js/, 'the file manager module should load before the app entry point');
 assert.doesNotMatch(index, /https?:\/\/.*\.(js|css)/i, 'no external JS/CSS');
 
 assert.match(app, /function\s+sanitizeLinkUrl/);
@@ -86,9 +88,9 @@ assert.match(app, /ファイル選択を開始できませんでした/, 'file p
 assert.match(app, /フォルダ選択を開始できませんでした/, 'folder picker startup failures should have a distinct status');
 assert.match(app, /window\.console\.warn\(\`\[PME\]/, 'picker and local file failures should log safe name/message diagnostics');
 {
-  const pickerStartHelper = app.match(/function\s+pickerOptionsWithCurrentStartDirectory[\s\S]+?\n  \}/)?.[0] || '';
+  const pickerStartHelper = app.match(/function\s+pickerOptionsWithCurrentStartDirectory[\s\S]+?\n    \}/)?.[0] || '';
   assert.doesNotMatch(pickerStartHelper, /await|readPickerStartDirectoryHandle|indexedDB|markdownDirectoryHandle/, 'click-time picker startIn helper must stay synchronous');
-  const currentDirectoryHelper = app.match(/function\s+currentPickerStartDirectory[\s\S]+?\n  \}/)?.[0] || '';
+  const currentDirectoryHelper = app.match(/function\s+currentPickerStartDirectory[\s\S]+?\n    \}/)?.[0] || '';
   assert.doesNotMatch(currentDirectoryHelper, /await|readPickerStartDirectoryHandle|indexedDB|markdownDirectoryHandle/, 'click-time picker directory selection must not restore handles asynchronously');
 }
 assert.match(app, /function\s+initializeCodeMirrorSourceEditor/, 'source editor should initialize the local CodeMirror wrapper');
@@ -414,6 +416,7 @@ const context = vm.createContext({
   console,
 });
 vm.runInContext(markdownRendererModule, context);
+vm.runInContext(fileManagerModule, context);
 const renderer = vm.runInContext(instrumented, context);
 
 renderer.state.dirty = false;

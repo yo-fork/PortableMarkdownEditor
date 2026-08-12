@@ -89,6 +89,7 @@ try {
         'PortableMarkdownEditor/THIRD-PARTY-NOTICES.txt',
         'PortableMarkdownEditor/app/index.html',
         'PortableMarkdownEditor/app/app.js',
+        'PortableMarkdownEditor/app/modules/file-manager.js',
         'PortableMarkdownEditor/app/modules/markdown-renderer.js',
         'PortableMarkdownEditor/app/styles.css'
     )
@@ -105,6 +106,7 @@ try {
     $sourceByEntry = @{
         'PortableMarkdownEditor/app/index.html' = (Join-Path $repoRoot 'index.html')
         'PortableMarkdownEditor/app/app.js' = (Join-Path $repoRoot 'app.js')
+        'PortableMarkdownEditor/app/modules/file-manager.js' = (Join-Path $repoRoot 'modules\file-manager.js')
         'PortableMarkdownEditor/app/modules/markdown-renderer.js' = (Join-Path $repoRoot 'modules\markdown-renderer.js')
         'PortableMarkdownEditor/app/styles.css' = (Join-Path $repoRoot 'styles.css')
         'PortableMarkdownEditor/README.txt' = (Join-Path $repoRoot 'native\README-WINDOWS.txt')
