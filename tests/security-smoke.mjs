@@ -5,8 +5,9 @@ import vm from 'node:vm';
 const index = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const appEntry = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
 const markdownRendererModule = readFileSync(new URL('../modules/markdown-renderer.js', import.meta.url), 'utf8');
+const richEditorModule = readFileSync(new URL('../modules/rich-editor.js', import.meta.url), 'utf8');
 const fileManagerModule = readFileSync(new URL('../modules/file-manager.js', import.meta.url), 'utf8');
-const app = `${appEntry}\n${markdownRendererModule}\n${fileManagerModule}`;
+const app = `${appEntry}\n${markdownRendererModule}\n${richEditorModule}\n${fileManagerModule}`;
 const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
 const securitySample = readFileSync(new URL('../samples/security-check.md', import.meta.url), 'utf8');
 
@@ -23,6 +24,7 @@ assert.match(index, /img-src 'self' data: blob:/);
 assert.doesNotMatch(index, /img-src[^"]*file:/, 'file: images should not be allowed by CSP');
 assert.match(index, /vendor\/prosemirror\/prosemirror-editor\.js/, 'ProseMirror should load from a local classic script bundle');
 assert.match(index, /modules\/markdown-renderer\.js[\s\S]+app\.js/, 'the Markdown renderer module should load before the app entry point');
+assert.match(index, /modules\/rich-editor\.js[\s\S]+app\.js/, 'the rich editor module should load before the app entry point');
 assert.match(index, /modules\/file-manager\.js[\s\S]+app\.js/, 'the file manager module should load before the app entry point');
 assert.doesNotMatch(index, /https?:\/\/.*\.(js|css)/i, 'no external JS/CSS');
 
@@ -416,6 +418,7 @@ const context = vm.createContext({
   console,
 });
 vm.runInContext(markdownRendererModule, context);
+vm.runInContext(richEditorModule, context);
 vm.runInContext(fileManagerModule, context);
 const renderer = vm.runInContext(instrumented, context);
 
