@@ -135,6 +135,7 @@
         <span>LOCAL</span>
         <span>NO CDN</span>
         <span>HTML OFF</span>
+        <button type="button" class="icon-button" data-action="appearance-settings">Aa</button>
         <button type="button" class="icon-button" data-action="shortcut-settings">⌨</button>
         <button type="button" class="icon-button" data-action="toggle-theme">◐</button>
         <button type="button" class="icon-button" data-action="security">🔒</button>
@@ -180,6 +181,10 @@
   <input id="settingsInput" type="file" accept="application/json,.json" hidden>
   <datalist id="codeLanguageOptions"><option value="text"></option></datalist>
   <dialog id="securityDialog"><button type="button">閉じる</button></dialog>
+  <dialog id="appearanceDialog">
+    <select id="documentFontSelect"><option value="sans">ゴシック</option><option value="serif">明朝</option></select>
+    <button type="button" data-action="save-appearance">適用</button>
+  </dialog>
   <dialog id="linkDomainDialog"><textarea id="allowedDomainsInput"></textarea></dialog>
   <dialog id="shortcutDialog">
     <p id="shortcutMessage"></p>
@@ -316,9 +321,23 @@
         assert(toolbarButton.title.includes('Ctrl+Alt+C'), 'toolbar shortcut title did not update');
       }
 
+      async function testDocumentFontCustomization() {
+        document.querySelector('[data-action="appearance-settings"]').click();
+        await waitFor(() => document.getElementById('appearanceDialog').open, 'appearance settings dialog did not open');
+        document.getElementById('documentFontSelect').value = 'serif';
+        document.querySelector('[data-action="save-appearance"]').click();
+        await waitFor(() => !document.getElementById('appearanceDialog').open, 'appearance settings dialog did not close after apply');
+        const settings = JSON.parse(localStorage.getItem('portable-markdown-editer:settings:v1') || '{}');
+        assert(settings.documentFont === 'serif', 'document font was not persisted');
+        assert(document.documentElement.dataset.documentFont === 'serif', 'document font was not applied to the document root');
+        assert(getComputedStyle(document.getElementById('richEditor')).fontFamily.includes('Yu Mincho'), 'rich mode did not use the selected Mincho font');
+        assert(getComputedStyle(document.getElementById('preview')).fontFamily.includes('Yu Mincho'), 'preview mode did not use the selected Mincho font');
+      }
+
       async function runStartPhase() {
         await window.__PME_IMAGE_TEST_READY;
         await waitFor(() => document.body.dataset.mode === 'rich', 'app did not initialize');
+        await testDocumentFontCustomization();
         await testShortcutCustomization();
         document.querySelector('[data-action="open-folder"]').click();
         await waitFor(() => document.body.dataset.folderAccess === 'fsa', 'folder was not opened through File System Access API');
@@ -349,9 +368,11 @@
         assert(document.querySelectorAll('#preview img[src^="blob:"]').length >= 2, 'asset images did not render from restored directory map');
         const settings = JSON.parse(localStorage.getItem('portable-markdown-editer:settings:v1') || '{}');
         assert(settings.shortcuts?.['inline-code'] === 'Ctrl+Alt+C', 'custom shortcut did not survive reload');
+        assert(settings.documentFont === 'serif', 'document font did not survive reload');
+        assert(document.documentElement.dataset.documentFont === 'serif', 'restored document font was not applied');
         await hasAsset('pasted.png');
         await hasAsset('dropped.png');
-        pass('custom shortcuts persisted across reload; paste/drop images saved to sample.assets, Markdown uses relative references, and FSA directory handle restored.');
+        pass('document font and custom shortcuts persisted across reload; paste/drop images saved to sample.assets, Markdown uses relative references, and FSA directory handle restored.');
       }
 
       window.addEventListener('DOMContentLoaded', () => {

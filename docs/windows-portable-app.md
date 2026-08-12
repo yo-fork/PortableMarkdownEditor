@@ -37,6 +37,7 @@ WebView2編集画面は、ProseMirror、CodeMirror、Markdownプレビュー、M
 |新しいウィンドウで開く|WPF|選択した文書パスを同じ実行ファイルへ渡し、別プロセスで開きます。|
 |保存と別名保存|WPF|BOMなしUTF-8で保存します。|
 |ショートカット設定|WebView2とWPF|WebView2が設定を保存し、WPFがファイル操作の割り当てとメニュー表示を同期します。|
+|本文フォント設定|WebView2|ゴシックまたは明朝をローカル設定へ保存し、リッチ、プレビュー、集中モードへ共通適用します。|
 |HTML書出し|WPF|WebViewが生成したHTMLをWindows標準ダイアログで保存します。|
 |設定書出し|WPF|256KB以下のJSONだけを保存します。|
 |画像保存|WPF|画像署名、MIME、25MB上限、保存名を検証します。|
@@ -60,6 +61,8 @@ WebViewからネイティブ側へ送れる主なメッセージは次のとお�
 * `desktop.exportHtml` と `desktop.exportSettings` は、明示操作で生成した内容の保存を要求します。
 
 ネイティブ側の `host.showShortcutSettings` は、WebView2へショートカット設定画面の表示を要求します。
+
+ネイティブ側の `host.showAppearanceSettings` は、WebView2へ表示設定画面の表示を要求します。
 
 ネイティブ側は、送信元が `https://portable-markdown-editor.local/` の場合だけメッセージを処理します。
 

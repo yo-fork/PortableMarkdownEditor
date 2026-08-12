@@ -67,6 +67,8 @@ assert.match(index, /data-action="clear-folder-permissions"/, 'folder permission
 assert.match(index, /data-action="clear-all-local-data"/, 'all local data deletion button should exist');
 assert.match(index, /id="shortcutDialog"[\s\S]+data-action="reset-shortcuts"[\s\S]+data-action="save-shortcuts"/, 'shortcut settings should support default restoration and explicit apply');
 assert.match(index, /data-action="shortcut-settings"/, 'the shortcut settings dialog should be reachable from the topbar');
+assert.match(index, /data-action="appearance-settings"/, 'document font settings should be reachable from the topbar');
+assert.match(index, /id="appearanceDialog"[\s\S]+id="documentFontSelect"[\s\S]+value="sans"[\s\S]+value="serif"[\s\S]+data-action="save-appearance"/, 'appearance settings should offer Gothic and Mincho document fonts');
 assert.match(index, /class="icon-button" data-action="collapse-outline"[^>]+aria-pressed="true"/, 'the outline should have a persistent topbar toggle after the sidebar is hidden');
 assert.match(index, /data-format="bold"[^>]+aria-label="太字"[^>]+aria-keyshortcuts="Control\+B"/, 'symbol-only formatting buttons should expose descriptive accessible names and shortcuts');
 assert.match(index, /data-format="h1"[^>]+aria-keyshortcuts="Control\+1"/, 'heading buttons should expose their keyboard shortcuts');
@@ -82,6 +84,11 @@ assert.match(index, /data-action="insert-mermaid"[^>]+aria-keyshortcuts="Control
 assert.match(index, /data-action="collapse-outline"[^>]+aria-keyshortcuts="Control\+Alt\+O"/, 'the outline toggle shortcut should be discoverable from the topbar');
 assert.match(styles, /body\.outline-collapsed \.workspace\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/, 'the editor should keep a full-width grid column when the hidden sidebar leaves the layout');
 assert.doesNotMatch(styles, /body\.outline-collapsed \.workspace\s*\{[^}]*grid-template-columns:\s*0\s+1fr/, 'the hidden outline must not auto-place the editor into a zero-width first column');
+assert.match(styles, /--document-sans:[^;]+Yu Gothic UI[^;]+Meiryo/, 'the Gothic document font should prioritize Japanese Windows screen fonts');
+assert.match(styles, /--document-serif:[^;]+Yu Mincho/, 'the Mincho document font should prioritize Yu Mincho');
+assert.match(styles, /\.markdown-body, \.rich-editor\s*\{[^}]+font-family:\s*var\(--document-font\)/, 'rich and preview modes should share the selected document font');
+assert.match(styles, /body\[data-mode="focus"\][^}]+font-family:\s*var\(--document-font\)/, 'focus mode should share the selected document font');
+assert.match(styles, /#sourceEditor\s*\{[^}]+font-family:\s*var\(--mono\)/, 'normal source mode should remain monospaced');
 assert.match(app, /code-language-input/, 'rendered code blocks should expose a language input');
 assert.match(app, /showOpenFilePicker/, 'Open should use File System Access API when available');
 assert.match(app, /function\s+requestDirectoryForOpenedMarkdown/, 'opened Markdown files should be able to request containing folder access');
@@ -112,7 +119,7 @@ assert.match(app, /function\s+onKeyboardShortcutKeyDown[\s\S]+event\.preventDefa
 assert.match(app, /definition\('inline-code',[^\n]+Ctrl\+K[\s\S]+definition\('inline-math',[^\n]+Ctrl\+M[\s\S]+definition\('code-block',[^\n]+Ctrl\+Shift\+K[\s\S]+definition\('math-block',[^\n]+Ctrl\+Shift\+M[\s\S]+definition\('link',[^\n]+Ctrl\+Shift\+L/, 'code, math, and link defaults should preserve the requested keys');
 assert.match(app, /function\s+captureShortcutAssignment[\s\S]+conflict[\s\S]+割り当てられています/, 'shortcut capture should reject duplicate assignments');
 assert.match(app, /function\s+normalizeShortcutAssignments[\s\S]+used\.has[\s\S]+shortcut = ''/, 'imported duplicate shortcuts should fail closed');
-assert.match(app, /version:\s*2[\s\S]+allowedLinkDomains[\s\S]+shortcuts:/, 'exported settings should include shortcut assignments');
+assert.match(app, /version:\s*3[\s\S]+allowedLinkDomains[\s\S]+documentFont:[\s\S]+shortcuts:/, 'exported settings should include the document font and shortcut assignments');
 assert.match(app, /function\s+runKeyboardActionShortcut[\s\S]+case 'math-block':[\s\S]+insertMathBlock\(\)/, 'keyboard commands should dispatch display-math insertion');
 assert.match(app, /function\s+insertMathBlock[\s\S]+\$\$\\n\$\{selected \|\| 'x = y'\}\\n\$\$/, 'display-math insertion should create a standalone Markdown block');
 assert.match(app, /function\s+handleProseMirrorRichChange/, 'ProseMirror rich edits should update Markdown source through one change path');
@@ -162,7 +169,7 @@ assert.match(app, /dataset\.folderAccess = state\.desktopDocumentReady[\s\S]+sta
 assert.match(app, /function\s+restorePersistedDirectoryHandle/, 'File System Access directory handles should be restorable after reopening');
 assert.match(app, /window\.indexedDB\.open\(FSA_DB_NAME,\s*1\)/, 'persisted File System Access handles should use local IndexedDB only');
 assert.match(app, /persistDirectoryHandle\(directoryHandle\)/, 'opened File System Access directory handle should be persisted for reopen');
-assert.match(app, /function\s+parseSettingsFile[\s\S]+allowedLinkDomains[\s\S]+shortcuts/, 'settings file import should parse allowedLinkDomains and shortcuts explicitly');
+assert.match(app, /function\s+parseSettingsFile[\s\S]+allowedLinkDomains[\s\S]+documentFont[\s\S]+shortcuts/, 'settings file import should parse allowedLinkDomains, documentFont, and shortcuts explicitly');
 assert.match(app, /function\s+exportSettingsFile/, 'settings file export should be available without network access');
 assert.match(app, /allowedLinkDomains:\s*normalizeDomainList\(state\.allowedLinkDomains\)/, 'settings export should write normalized link allowlist domains');
 assert.match(app, /CONFIG_SETTINGS_FILE_NAME\s*=\s*'portable-markdown-editor-settings\.json'/, 'settings folder should use a stable local config filename');
@@ -412,7 +419,7 @@ TestURL.createObjectURL = () => `blob:test-${objectUrlIndex += 1}`;
 TestURL.revokeObjectURL = () => {};
 
 let confirmResult = true;
-const instrumented = appEntry.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml, sanitizeImageUrl, sanitizeLinkUrl, saveImageFileToAssets, ensureImageAssetWriteAccess, buildFolderAssetUrls, confirmDocumentReplacement, state };\n})();');
+const instrumented = appEntry.replace(/\}\)\(\);\s*$/, 'return { buildExportHtml, normalizeDocumentFont, renderMarkdownHtml, sanitizeImageUrl, sanitizeLinkUrl, saveImageFileToAssets, ensureImageAssetWriteAccess, buildFolderAssetUrls, confirmDocumentReplacement, state };\n})();');
 const context = vm.createContext({
   document: { addEventListener() {} },
   window: { isSecureContext: true },
@@ -433,6 +440,15 @@ vm.runInContext(shortcutManagerModule, context);
 const renderer = vm.runInContext(instrumented, context);
 
 renderer.state.dirty = false;
+
+renderer.state.documentFont = 'sans';
+assert.equal(renderer.normalizeDocumentFont('serif'), 'serif');
+assert.equal(renderer.normalizeDocumentFont('invalid'), 'sans', 'invalid local document font settings should fall back to Gothic');
+assert.match(renderer.buildExportHtml('# Font', 'font.md'), /font-family:'Yu Gothic UI','Yu Gothic',Meiryo/, 'HTML export should use the selected Gothic document font');
+renderer.state.documentFont = 'serif';
+assert.match(renderer.buildExportHtml('# Font', 'font.md'), /font-family:'Yu Mincho','Hiragino Mincho ProN'/, 'HTML export should use the selected Mincho document font');
+renderer.state.documentFont = 'sans';
+
 confirmResult = false;
 assert.equal(renderer.confirmDocumentReplacement('新規文書'), true, 'clean documents should be replaceable without depending on confirmation');
 renderer.state.dirty = true;

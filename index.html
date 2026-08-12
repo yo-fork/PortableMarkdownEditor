@@ -82,6 +82,7 @@
       </div>
 
       <div class="top-actions">
+        <button type="button" class="icon-button" data-action="appearance-settings" title="本文フォント設定" aria-label="本文フォント設定">Aa</button>
         <button type="button" class="icon-button" data-action="shortcut-settings" title="キーボードショートカット" aria-label="キーボードショートカット">⌨</button>
         <button type="button" class="icon-button" data-action="collapse-outline" title="アウトラインを隠す (Ctrl+Alt+O)" aria-label="アウトライン表示" aria-keyshortcuts="Control+Alt+O" aria-pressed="true">☷</button>
         <button type="button" class="icon-button" data-action="toggle-theme" title="ライト/ダーク切り替え" aria-label="ライト/ダーク切り替え">◐</button>
@@ -153,7 +154,7 @@
         <li>Markdown内のHTMLは実行せず、文字としてエスケープ。</li>
         <li>JavaScript URL、危険なプロトコル、外部画像読み込みをブロック。</li>
         <li>画像はPNG/JPEG/GIF/WebPのみ。相対パスを基本とし、Windowsアプリ版では文書フォルダ内を指す既存の絶対パスだけを制限付きで解決。</li>
-        <li>下書き、表示設定、リンク許可ドメイン、ショートカットはブラウザのlocalStorageに保存。リンク許可ドメインとショートカットはユーザーが選んだJSON設定ファイルから読み込み、JSONとして書き出せます。許可した設定フォルダは起動時に自動読み込みし、同じJSONへ上書き保存できます。File System Access APIのフォルダハンドルはIndexedDBに保存。</li>
+        <li>下書き、表示設定、リンク許可ドメイン、ショートカットはブラウザのlocalStorageに保存。本文フォント、リンク許可ドメイン、ショートカットはユーザーが選んだJSON設定ファイルから読み込み、JSONとして書き出せます。許可した設定フォルダは起動時に自動読み込みし、同じJSONへ上書き保存できます。File System Access APIのフォルダハンドルはIndexedDBに保存。</li>
         <li>Markdown保存は、フォルダ許可済みなら開いているMarkdownファイルへ上書きし、未許可時はユーザー操作によるダウンロード保存。</li>
         <li>貼り付け/ドロップ画像は、フォルダ許可済みの場合だけMarkdownファイル横のassetsフォルダへ保存。外部アップロードや同期は行いません。</li>
       </ul>
@@ -170,6 +171,28 @@
       </section>
       <menu>
         <button type="submit">閉じる</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="appearanceDialog" aria-labelledby="appearanceTitle" aria-describedby="appearanceDescription">
+    <form method="dialog" class="dialog-card">
+      <h2 id="appearanceTitle">表示設定</h2>
+      <p id="appearanceDescription">リッチ、プレビュー、集中モードで使う本文フォントを選択します。通常のソースモードと、文書内のコードは等幅フォントのままです。</p>
+      <label class="dialog-field" for="documentFontSelect">
+        <span>本文フォント</span>
+        <select id="documentFontSelect">
+          <option value="sans">ゴシック（既定）</option>
+          <option value="serif">明朝</option>
+        </select>
+      </label>
+      <div class="font-preview-list" aria-hidden="true">
+        <p class="font-preview font-preview--sans"><strong>ゴシック</strong>　Markdownを読みやすく表示します。</p>
+        <p class="font-preview font-preview--serif"><strong>明朝</strong>　Markdownを読みやすく表示します。</p>
+      </div>
+      <menu>
+        <button type="submit">キャンセル</button>
+        <button type="button" data-action="save-appearance">適用</button>
       </menu>
     </form>
   </dialog>

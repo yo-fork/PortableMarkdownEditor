@@ -170,6 +170,14 @@ namespace PortableMarkdownEditor.Desktop
             });
         }
 
+        private void Appearance_Click(object sender, RoutedEventArgs eventArgs)
+        {
+            SendHostMessage(new Dictionary<string, object>
+            {
+                { "type", "host.showAppearanceSettings" },
+            });
+        }
+
         private async Task InitializeEditorAsync()
         {
             NativeStatusText.Text = "WebView2を初期化しています...";

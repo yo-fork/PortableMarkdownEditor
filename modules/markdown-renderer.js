@@ -1456,6 +1456,9 @@
       const title = escapeHtml(stripExtension(fileName || 'Markdown Document'));
       const body = renderMarkdownHtml(markdown);
       const exportedAt = escapeHtml(new Date().toLocaleString('ja-JP'));
+      const documentFont = state.documentFont === 'serif'
+        ? "'Yu Mincho','Hiragino Mincho ProN',Georgia,serif"
+        : "'Yu Gothic UI','Yu Gothic',Meiryo,system-ui,sans-serif";
       return `<!doctype html>
   <html lang="ja">
   <head>
@@ -1468,7 +1471,7 @@
   body{margin:0;padding:clamp(1rem,4vw,4rem);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.75;color:#111827;background:#fff}main{max-width:920px;margin:auto}h1,h2{border-bottom:1px solid #e5e7eb;padding-bottom:.25rem}pre{overflow:auto;background:#0f172a;color:#e5e7eb;border-radius:.75rem;padding:1rem}code{font-family:Consolas,monospace;background:#f3f4f6;border-radius:.25rem;padding:.1rem .25rem}pre code{background:transparent;padding:0}.code-lang{float:right;color:#94a3b8;font:700 .72rem system-ui}.tok-comment{color:#94a3b8}.tok-string{color:#a7f3d0}.tok-number{color:#fde68a}.tok-keyword{color:#93c5fd}.tok-function{color:#f9a8d4}.tok-property{color:#c4b5fd}.tok-tag{color:#fca5a5}.tok-operator{color:#cbd5e1}blockquote{border-left:.25rem solid #2563eb;margin:1rem 0;padding:.25rem 1rem;background:#eff6ff}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d1d5db;padding:.5rem}.align-left{text-align:left}.align-center{text-align:center}.align-right{text-align:right}img{max-width:100%}.math-inline{display:inline-block}.math-display{display:block;margin:1rem 0;text-align:center}.katex>.katex-mathml{display:inline}.katex>.katex-html{display:none}.meta{color:#6b7280;font-size:.9rem}.blocked-image,.blocked-link{color:#b42318;border:1px solid #f3b8b1;border-radius:.3rem;padding:.1rem .3rem}.toc{border:1px solid #e5e7eb;border-radius:.75rem;padding:1rem}.toc a{display:block;color:#2563eb;text-decoration:none}.mermaid-diagram{margin:1.25rem 0}.mermaid-diagram figcaption{font-weight:700;color:#475569;margin-bottom:.4rem}.mermaid-svg{width:100%;height:auto;min-height:10rem;max-height:none;border:1px solid #d1d5db;border-radius:.75rem;background:#f8fafc}.mermaid-sequence .mermaid-svg,.mermaid-svg.mindmapDiagram{max-width:min(100%,820px);margin-inline:auto}.mermaid-svg.flowchart{display:block;width:min(100%,560px);margin-inline:auto}.mermaid-svg.flowchart text{font-size:12px!important}.mermaid-fallback pre{margin:0}.mermaid-svg .edgeLabel text,.mermaid-svg .edgeLabel tspan{paint-order:stroke;stroke:#f8fafc;stroke-width:7px;stroke-linejoin:round}.mermaid-node rect,.mermaid-node ellipse,.mermaid-node polygon,.mermaid-seq-participant rect{fill:#fff;stroke:#2563eb;stroke-width:1.5}.mermaid-svg.mindmapDiagram .section-root circle,.mermaid-svg.mindmapDiagram .node-bkg{fill:#fff!important;stroke:#2563eb!important}.mermaid-svg.mindmapDiagram .label .background{fill:#fff!important;opacity:.92!important}.mermaid-svg.mindmapDiagram .edge{stroke:#2563eb!important;stroke-width:2px!important;stroke-opacity:.22}.mermaid-edge path,.mermaid-message path{stroke:#334155;stroke-width:1.6;fill:none}.mermaid-edge-label,.mermaid-message text{font:650 18px system-ui;fill:#475569;text-anchor:middle;paint-order:stroke;stroke:#f8fafc;stroke-width:7px;stroke-linejoin:round}.mermaid-node-label{font:650 16px system-ui;fill:#0f172a}.mermaid-flow-node-label{font:650 24px system-ui;fill:#0f172a}.mermaid-lifeline{stroke:#94a3b8;stroke-dasharray:5 5}.mermaid-note rect{fill:#fef3c7;stroke:#f59e0b}
   </style>
   </head>
-  <body>
+  <body style="font-family:${documentFont}">
   <main>
   <p class="meta">Exported locally: ${exportedAt}</p>
   ${body}

@@ -129,6 +129,7 @@ flowchart TD
     scrollSyncLock: false,
     mermaidPan: null,
     allowedLinkDomains: [],
+    documentFont: 'sans',
     shortcuts: {},
     assetUrls: new Map(),
     directoryHandle: null,
@@ -435,6 +436,7 @@ flowchart TD
     },
     dependencies: {
       applyMode,
+      applyDocumentFont,
       applyOutlineVisibility,
       applyTheme,
       applyShortcutAssignments,
@@ -465,6 +467,7 @@ flowchart TD
       newDocument,
       nodeClosest,
       normalizeAssetPath,
+      normalizeDocumentFont,
       normalizeDomainList,
       normalizeNewlines,
       parseMarkdownTarget,
@@ -486,6 +489,7 @@ flowchart TD
       sanitizeMarkdownLabel,
       setSourceSelectionRange,
       setStatus,
+      showAppearanceDialog,
       sourceMarkdownValue,
       sourceScrollElement,
       sourceSelectionRange,
@@ -680,6 +684,7 @@ flowchart TD
     if (state.desktopHost) state.markdownRelativePath = '';
     bindEvents();
     applyTheme();
+    applyDocumentFont();
     initializeVendorLibraries();
     els.source.value = state.markdown;
     initializeCodeMirrorSourceEditor();
@@ -725,6 +730,8 @@ flowchart TD
     els.saveState = document.getElementById('saveState');
     els.fileNameLabel = document.getElementById('fileNameLabel');
     els.securityDialog = document.getElementById('securityDialog');
+    els.appearanceDialog = document.getElementById('appearanceDialog');
+    els.documentFontSelect = document.getElementById('documentFontSelect');
     els.linkDomainDialog = document.getElementById('linkDomainDialog');
     els.allowedDomainsInput = document.getElementById('allowedDomainsInput');
     els.shortcutDialog = document.getElementById('shortcutDialog');
@@ -749,6 +756,7 @@ flowchart TD
     state.mode = settings?.mode || 'rich';
     state.outlineCollapsed = Boolean(settings?.outlineCollapsed);
     state.allowedLinkDomains = normalizeDomainList(settings?.allowedLinkDomains || []);
+    state.documentFont = normalizeDocumentFont(settings?.documentFont);
     state.shortcuts = window.PMEShortcutManager.normalizeShortcutAssignments(settings?.shortcuts);
   }
 
@@ -1238,6 +1246,12 @@ flowchart TD
         break;
       case 'link-settings':
         showLinkDomainDialog();
+        break;
+      case 'appearance-settings':
+        showAppearanceDialog();
+        break;
+      case 'save-appearance':
+        saveAppearanceSettings();
         break;
       case 'shortcut-settings':
         showShortcutDialog();
@@ -3068,6 +3082,42 @@ flowchart TD
     themeButton.title = label;
   }
 
+  function normalizeDocumentFont(value) {
+    return value === 'serif' ? 'serif' : 'sans';
+  }
+
+  function applyDocumentFont() {
+    state.documentFont = normalizeDocumentFont(state.documentFont);
+    document.documentElement.dataset.documentFont = state.documentFont;
+    const button = document.querySelector('[data-action="appearance-settings"]');
+    if (!button) return;
+    const label = state.documentFont === 'serif' ? '本文フォント: 明朝' : '本文フォント: ゴシック';
+    button.setAttribute('aria-label', label);
+    button.title = label;
+  }
+
+  function showAppearanceDialog() {
+    if (!els.appearanceDialog || !els.documentFontSelect) return;
+    if (els.appearanceDialog.open) return;
+    els.documentFontSelect.value = normalizeDocumentFont(state.documentFont);
+    if (typeof els.appearanceDialog.showModal === 'function') els.appearanceDialog.showModal();
+    else els.appearanceDialog.setAttribute('open', '');
+    els.documentFontSelect.focus();
+  }
+
+  function saveAppearanceSettings() {
+    if (!els.documentFontSelect) return;
+    state.documentFont = normalizeDocumentFont(els.documentFontSelect.value);
+    applyDocumentFont();
+    persistSettings();
+    if (els.appearanceDialog?.open && typeof els.appearanceDialog.close === 'function') {
+      els.appearanceDialog.close('saved');
+    } else {
+      els.appearanceDialog?.removeAttribute('open');
+    }
+    setStatus(`本文フォント: ${state.documentFont === 'serif' ? '明朝' : 'ゴシック'}`);
+  }
+
   function initializeVendorLibraries() {
     if (window.mermaid?.initialize) {
       window.mermaid.initialize({
@@ -3283,6 +3333,7 @@ flowchart TD
       mode: state.mode,
       outlineCollapsed: state.outlineCollapsed,
       allowedLinkDomains: state.allowedLinkDomains,
+      documentFont: normalizeDocumentFont(state.documentFont),
       shortcuts: shortcutAssignmentsForExport(),
     });
   }

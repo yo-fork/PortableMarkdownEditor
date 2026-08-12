@@ -27,6 +27,7 @@
     } = constants;
     const {
       applyMode,
+      applyDocumentFont,
       applyOutlineVisibility,
       applyShortcutAssignments,
       applyTheme,
@@ -57,6 +58,7 @@
       newDocument,
       nodeClosest,
       normalizeAssetPath,
+      normalizeDocumentFont,
       normalizeDomainList,
       normalizeNewlines,
       parseMarkdownTarget,
@@ -78,6 +80,7 @@
       sanitizeMarkdownLabel,
       setSourceSelectionRange,
       setStatus,
+      showAppearanceDialog,
       sourceMarkdownValue,
       sourceScrollElement,
       sourceSelectionRange,
@@ -168,6 +171,9 @@
           break;
         case 'host.showShortcutSettings':
           showShortcutDialog();
+          break;
+        case 'host.showAppearanceSettings':
+          showAppearanceDialog();
           break;
         default:
           break;
@@ -1612,9 +1618,11 @@
       state.mode = 'rich';
       state.outlineCollapsed = false;
       state.allowedLinkDomains = [];
+      state.documentFont = 'sans';
       resetShortcutAssignments({ persist: false, notify: true });
       if (els.allowedDomainsInput) els.allowedDomainsInput.value = '';
       applyTheme();
+      applyDocumentFont();
       initializeVendorLibraries();
       applyOutlineVisibility();
       applyMode(state.mode, { preserveScroll: false, persist: false });
@@ -1703,9 +1711,9 @@
         persistSettings();
         if (els.allowedDomainsInput) els.allowedDomainsInput.value = state.allowedLinkDomains.join('\n');
         renderAll('link-settings');
-        setStatus(`設定ファイルを読み込みました: 許可ドメイン${state.allowedLinkDomains.length}件${settings.shortcuts ? '、ショートカット反映済み' : ''}`);
+        setStatus(`設定ファイルを読み込みました: 許可ドメイン${state.allowedLinkDomains.length}件${settings.shortcuts ? '、ショートカット反映済み' : ''}${settings.documentFont ? '、本文フォント反映済み' : ''}`);
       } catch (_) {
-        setStatus('設定ファイルを読み込めませんでした。JSON形式、allowedLinkDomains、shortcutsを確認してください');
+        setStatus('設定ファイルを読み込めませんでした。JSON形式、allowedLinkDomains、documentFont、shortcutsを確認してください');
       }
     }
 
@@ -1817,8 +1825,9 @@
     function settingsFileText() {
       return `${JSON.stringify({
         app: 'Portable Markdown Editor',
-        version: 2,
+        version: 3,
         allowedLinkDomains: normalizeDomainList(state.allowedLinkDomains),
+        documentFont: normalizeDocumentFont(state.documentFont),
         shortcuts: shortcutAssignmentsForExport(),
       }, null, 2)}\n`;
     }
@@ -1833,14 +1842,23 @@
           && (!parsed.shortcuts || typeof parsed.shortcuts !== 'object' || Array.isArray(parsed.shortcuts))) {
         throw new Error('shortcuts must be an object');
       }
+      if (!Array.isArray(parsed) && parsed?.documentFont !== undefined
+          && !['sans', 'serif'].includes(parsed.documentFont)) {
+        throw new Error('documentFont must be sans or serif');
+      }
       return {
         allowedLinkDomains: normalizeDomainList(values),
+        documentFont: Array.isArray(parsed) || parsed.documentFont === undefined ? null : parsed.documentFont,
         shortcuts: Array.isArray(parsed) || parsed.shortcuts === undefined ? null : parsed.shortcuts,
       };
     }
 
     function applyImportedSettings(settings) {
       state.allowedLinkDomains = settings.allowedLinkDomains;
+      if (settings.documentFont) {
+        state.documentFont = normalizeDocumentFont(settings.documentFont);
+        applyDocumentFont();
+      }
       if (settings.shortcuts) {
         applyShortcutAssignments(settings.shortcuts, { persist: false, notify: true });
       }

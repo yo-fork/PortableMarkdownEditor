@@ -61,6 +61,8 @@ assert.match(windowCode, /Core_NavigationStarting[\s\S]+eventArgs\.Cancel = true
 assert.match(windowCode, /Core_PermissionRequested[\s\S]+CoreWebView2PermissionState\.Deny/);
 assert.match(windowCode, /PostWebMessageAsJson/);
 assert.match(windowCode, /Shortcuts_Click[\s\S]+host\.showShortcutSettings/);
+assert.match(windowCode, /Appearance_Click[\s\S]+host\.showAppearanceSettings/);
+assert.match(windowXaml, /Header="表示設定" Click="Appearance_Click"/);
 assert.match(windowCode, /NewDocumentArgument = "--new-document"/);
 assert.match(windowCode, /MainWindow_PreviewKeyDown[\s\S]+ShortcutCommandForKeyEvent[\s\S]+case "new-window":[\s\S]+OpenNewDocumentWindow/);
 assert.match(windowCode, /MainWindow_PreviewKeyDown[\s\S]+case "open-new-window":[\s\S]+OpenDocumentInNewWindow/);

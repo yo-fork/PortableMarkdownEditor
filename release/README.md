@@ -12,6 +12,10 @@ ZIPを展開し、`PortableMarkdownEditor` フォルダ内の `PortableMarkdownE
 
 同じキーを複数の操作へ割り当てることはできず、設定画面から解除または既定値への復元ができます。
 
+本文フォントは、「ヘルプ」メニューの「表示設定」からゴシックまたは明朝を選べます。
+
+選択した本文フォントはリッチ、プレビュー、集中モードへ共通適用し、通常のソースモードと文書内のコードは等幅フォントのままです。
+
 Visual Studio、Visual Studio Installer、MSBuildは不要です。
 
 `BuildPortableWindows.cmd` は実行しないでください。

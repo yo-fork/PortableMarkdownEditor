@@ -53,6 +53,7 @@ Run these checks without npm, package managers, CDN, or network access.
 23. Move the caret to the end of a rich link and press `ArrowRight`. Confirm the URL editor opens without clicking and a long URL wraps without clipping.
 24. Open link insertion, image insertion, and an existing rich image source editor with long targets. Confirm each target can be read and edited without horizontal clipping.
 25. Open the keyboard shortcut dialog, change inline code to `Ctrl+Alt+C`, and confirm the tooltip, key action, reload persistence, duplicate rejection, assignment removal, and default reset all work.
+26. Open appearance settings, switch the document font between Gothic and Mincho, and confirm rich, preview, and focus modes use the same selection while normal source mode and rendered code remain monospaced. Reload and confirm the selection persists.
 
 ## Windows portable app
 
@@ -75,3 +76,4 @@ Run these checks without npm, package managers, CDN, or network access.
 17. On a test PC without WebView2 Runtime, confirm startup fails visibly instead of silently; install-free operation requires the runtime to already exist.
 18. Confirm the release ZIP contains `LICENSE` and `THIRD-PARTY-NOTICES.txt`, and the same legal files are present beside the ZIP under `release/`.
 19. Change a native file shortcut, confirm its Windows menu label updates, and confirm the new key works while the previous key no longer runs the command.
+20. Open `Help > Appearance`, select Mincho, and confirm rich, preview, focus, printing, and exported HTML use the selected document font.
