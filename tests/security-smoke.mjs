@@ -6,8 +6,9 @@ const index = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const appEntry = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
 const markdownRendererModule = readFileSync(new URL('../modules/markdown-renderer.js', import.meta.url), 'utf8');
 const richEditorModule = readFileSync(new URL('../modules/rich-editor.js', import.meta.url), 'utf8');
+const richInputControllerModule = readFileSync(new URL('../modules/rich-input-controller.js', import.meta.url), 'utf8');
 const fileManagerModule = readFileSync(new URL('../modules/file-manager.js', import.meta.url), 'utf8');
-const app = `${appEntry}\n${markdownRendererModule}\n${richEditorModule}\n${fileManagerModule}`;
+const app = `${appEntry}\n${markdownRendererModule}\n${richEditorModule}\n${richInputControllerModule}\n${fileManagerModule}`;
 const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
 const securitySample = readFileSync(new URL('../samples/security-check.md', import.meta.url), 'utf8');
 
@@ -25,6 +26,7 @@ assert.doesNotMatch(index, /img-src[^"]*file:/, 'file: images should not be allo
 assert.match(index, /vendor\/prosemirror\/prosemirror-editor\.js/, 'ProseMirror should load from a local classic script bundle');
 assert.match(index, /modules\/markdown-renderer\.js[\s\S]+app\.js/, 'the Markdown renderer module should load before the app entry point');
 assert.match(index, /modules\/rich-editor\.js[\s\S]+app\.js/, 'the rich editor module should load before the app entry point');
+assert.match(index, /modules\/rich-input-controller\.js[\s\S]+app\.js/, 'the rich input controller module should load before the app entry point');
 assert.match(index, /modules\/file-manager\.js[\s\S]+app\.js/, 'the file manager module should load before the app entry point');
 assert.doesNotMatch(index, /https?:\/\/.*\.(js|css)/i, 'no external JS/CSS');
 
@@ -307,7 +309,7 @@ assert.match(app, /function\s+onRichCut[\s\S]+richSelectionRange\(selection\)[\s
 assert.match(app, /function\s+richSourceBlocksIntersectingRange[\s\S]+RICH_SOURCE_BLOCK_SELECTOR[\s\S]+intersectsNode/, 'unsupported selection mutation guard should detect source-backed blocks intersected by the selection range');
 assert.match(app, /function\s+richSelectionTouchesSourceBlock[\s\S]+richSelectionRange\(selection\)[\s\S]+richRangeTouchesSourceBlock\(range\)/, 'source-backed selection intersection checks should use validated rich ranges');
 assert.match(app, /function\s+guardUnsupportedRichSelectionMutationFallback[\s\S]+richSelectionRange\(selection\)[\s\S]+richSelectionTouchesSourceBlock\(selection\)/, 'unsupported selection mutation fallback should derive blocked ranges from validated rich selections');
-assert.match(app, /function\s+guardUnsupportedRichSelectionMutationFallback[\s\S]+preventDefault[\s\S]+この選択はMarkdownソースへ変換できません/, 'unsupported selection mutation fallback should prevent browser DOM mutation and show status');
+assert.match(app, /function\s+guardUnsupportedRichSelectionMutationFallback\([^)]*この選択はMarkdownソースへ変換できません[^)]*\)[\s\S]+preventDefault[\s\S]+setStatus\(status\)/, 'unsupported selection mutation fallback should prevent browser DOM mutation and show status');
 assert.match(app, /function\s+applyRichBlockFormatTransaction[\s\S]+richRangeExtendsOutsideSourceBlock\(range,\s*sourceBlock\)[\s\S]+この選択はMarkdownソースへ変換できません[\s\S]+applySourceTransaction/, 'block formatting should not rewrite only the starting source block for a cross-block selection');
 assert.match(app, /function\s+guardUnsupportedRichInlineInsertContext[\s\S]+richRangeTouchesSourceBlock\(range\)[\s\S]+この選択はMarkdownソースへ変換できません/, 'inline insert DOM fallback should block source-backed selections using intersecting source ranges');
 assert.match(app, /function\s+handleRichPlainTextPaste[\s\S]+applySourceTransaction/, 'plain rich paste should be routed through source transactions');
@@ -419,6 +421,7 @@ const context = vm.createContext({
 });
 vm.runInContext(markdownRendererModule, context);
 vm.runInContext(richEditorModule, context);
+vm.runInContext(richInputControllerModule, context);
 vm.runInContext(fileManagerModule, context);
 const renderer = vm.runInContext(instrumented, context);
 

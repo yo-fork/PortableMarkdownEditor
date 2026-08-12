@@ -110,7 +110,7 @@ for (const vendorFile of collectFiles('vendor').filter((file) => file !== 'vendo
 }
 
 const index = read('index.html');
-const app = `${read('app.js')}\n${read('modules/markdown-renderer.js')}\n${read('modules/rich-editor.js')}\n${read('modules/file-manager.js')}`;
+const app = `${read('app.js')}\n${read('modules/markdown-renderer.js')}\n${read('modules/rich-editor.js')}\n${read('modules/rich-input-controller.js')}\n${read('modules/file-manager.js')}`;
 const styles = read('styles.css');
 const codeMirrorBundle = read('vendor/codemirror6/source-editor.bundle.js');
 
@@ -123,6 +123,7 @@ assert.match(index, /vendor\/codemirror6\/source-editor\.bundle\.js/, 'CodeMirro
 assert.match(index, /vendor\/prosemirror\/prosemirror-editor\.js/, 'ProseMirror should load from the local classic script bundle');
 assert.match(index, /modules\/markdown-renderer\.js[\s\S]+app\.js/, 'the Markdown renderer module should load before the app entry point');
 assert.match(index, /modules\/rich-editor\.js[\s\S]+app\.js/, 'the rich editor module should load before the app entry point');
+assert.match(index, /modules\/rich-input-controller\.js[\s\S]+app\.js/, 'the rich input controller module should load before the app entry point');
 assert.match(index, /modules\/file-manager\.js[\s\S]+app\.js/, 'the file manager module should load before the app entry point');
 assert.match(index, /style-src 'self' 'unsafe-inline'/, 'CSP must allow Mermaid/KaTeX inline styles only');
 assert.doesNotMatch(index, /frame-ancestors/, 'meta CSP must not include ignored frame-ancestors directive');

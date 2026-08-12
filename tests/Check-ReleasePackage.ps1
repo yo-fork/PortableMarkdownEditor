@@ -92,6 +92,7 @@ try {
         'PortableMarkdownEditor/app/modules/file-manager.js',
         'PortableMarkdownEditor/app/modules/markdown-renderer.js',
         'PortableMarkdownEditor/app/modules/rich-editor.js',
+        'PortableMarkdownEditor/app/modules/rich-input-controller.js',
         'PortableMarkdownEditor/app/styles.css'
     )
     foreach ($entryName in $requiredEntries) {
@@ -110,6 +111,7 @@ try {
         'PortableMarkdownEditor/app/modules/file-manager.js' = (Join-Path $repoRoot 'modules\file-manager.js')
         'PortableMarkdownEditor/app/modules/markdown-renderer.js' = (Join-Path $repoRoot 'modules\markdown-renderer.js')
         'PortableMarkdownEditor/app/modules/rich-editor.js' = (Join-Path $repoRoot 'modules\rich-editor.js')
+        'PortableMarkdownEditor/app/modules/rich-input-controller.js' = (Join-Path $repoRoot 'modules\rich-input-controller.js')
         'PortableMarkdownEditor/app/styles.css' = (Join-Path $repoRoot 'styles.css')
         'PortableMarkdownEditor/README.txt' = (Join-Path $repoRoot 'native\README-WINDOWS.txt')
         'PortableMarkdownEditor/LICENSE' = (Join-Path $repoRoot 'LICENSE')
