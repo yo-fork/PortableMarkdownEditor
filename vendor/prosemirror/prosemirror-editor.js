@@ -20754,15 +20754,6 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     var doc = ensureEditableTrailingParagraph(parseMarkdown(markdownText || ''));
     var listItem = schema.nodes.list_item;
     var keys = {
-      'Mod-b': commands.toggleMark(schema.marks.strong),
-      'Mod-i': commands.toggleMark(schema.marks.em),
-      'Mod-0': commands.setBlockType(schema.nodes.paragraph),
-      'Mod-1': commands.setBlockType(schema.nodes.heading, { level: 1 }),
-      'Mod-2': commands.setBlockType(schema.nodes.heading, { level: 2 }),
-      'Mod-3': commands.setBlockType(schema.nodes.heading, { level: 3 }),
-      'Mod-4': commands.setBlockType(schema.nodes.heading, { level: 4 }),
-      'Mod-5': commands.setBlockType(schema.nodes.heading, { level: 5 }),
-      'Mod-6': commands.setBlockType(schema.nodes.heading, { level: 6 }),
       'Mod-z': historyModule.undo,
       'Mod-y': historyModule.redo,
       'Shift-Mod-z': historyModule.redo,
@@ -20785,9 +20776,6 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       keys.Tab = commands.chainCommands(moveTableCellCommand(1), schemaList.sinkListItem(listItem));
       keys['Shift-Tab'] = commands.chainCommands(moveTableCellCommand(-1), schemaList.liftListItem(listItem));
     }
-    if (schema.nodes.ordered_list) keys['Shift-Mod-7'] = schemaList.wrapInList(schema.nodes.ordered_list);
-    if (schema.nodes.bullet_list) keys['Shift-Mod-8'] = schemaList.wrapInList(schema.nodes.bullet_list);
-    if (schema.nodes.blockquote) keys['Shift-Mod-9'] = commands.wrapIn(schema.nodes.blockquote);
     return state.EditorState.create({
       schema: schema,
       doc: doc,

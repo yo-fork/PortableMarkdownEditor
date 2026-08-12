@@ -25,6 +25,7 @@
       applyFormat,
       buildBlockModel,
       buildHeadingIndex,
+      captureShortcutAssignment,
       cleanupRichCaretBoundaryMarkers,
       commitRichInlineSource,
       configureRichEditableSurface,
@@ -59,10 +60,12 @@
       normalizeNewlines,
       normalizeRichText,
       numericData,
+      newDocument,
       openMarkdownFile,
       parsePendingRichMathShortcutInBlock,
       placeCaretInInlineSource,
       printPreview,
+      requestDesktopCommand,
       refreshRichSourceRangesFromMarkdown,
       removeRichTaskCheckboxTransaction,
       renderAll,
@@ -93,6 +96,7 @@
       serializeTableCellInlineNode,
       serializeTableCellInlineNodes,
       setStatus,
+      shortcutActionForEvent,
       showRichSourceEditor,
       sourceContentBaseOffset,
       stripRichCaretTokens,
@@ -3169,75 +3173,30 @@
 
     function onKeyboardShortcutKeyDown(event) {
       if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
-      if (!event.ctrlKey && !event.metaKey) return;
-      const formatShortcut = keyboardFormatShortcut(event);
-      if (formatShortcut) {
-        event.preventDefault();
-        event.stopPropagation();
-        applyFormat(formatShortcut);
-        return;
-      }
-
-      const actionShortcut = keyboardActionShortcut(event);
+      if (captureShortcutAssignment?.(event)) return;
+      const actionShortcut = shortcutActionForEvent?.(event) || '';
       if (!actionShortcut) return;
       event.preventDefault();
       event.stopPropagation();
       runKeyboardActionShortcut(actionShortcut);
     }
 
-    function keyboardFormatShortcut(event) {
-      if (event.altKey) return '';
-      const digit = /^Digit([0-9])$/.exec(event.code || '')?.[1] || (/^[0-9]$/.test(event.key) ? event.key : '');
-      if (!event.shiftKey && digit === '0') return 'paragraph';
-      if (!event.shiftKey && /^[1-6]$/.test(digit)) return `h${digit}`;
-      if (event.shiftKey && digit === '7') return 'ordered-list';
-      if (event.shiftKey && digit === '8') return 'list';
-      if (event.shiftKey && digit === '9') return 'quote';
-      return '';
-    }
-
-    function keyboardActionShortcut(event) {
-      const codeLetter = /^Key([A-Z])$/.exec(event.code || '')?.[1];
-      const keyLetter = /^[A-Z]$/i.test(event.key || '') ? event.key : '';
-      const key = (codeLetter || keyLetter).toLowerCase();
-      if (!key) return '';
-
-      if (!event.shiftKey && !event.altKey) {
-        return {
-          s: 'save',
-          o: 'open',
-          p: 'print',
-          b: 'bold',
-          i: 'italic',
-          k: 'inline-code',
-          m: 'inline-math',
-        }[key] || '';
-      }
-      if (event.shiftKey && !event.altKey) {
-        return {
-          k: 'code-block',
-          m: 'math-block',
-          l: 'link',
-        }[key] || '';
-      }
-      if (!event.shiftKey && event.altKey) {
-        return {
-          t: 'table',
-          i: 'toc',
-          m: 'mermaid',
-          o: 'toggle-outline',
-        }[key] || '';
-      }
-      return '';
-    }
-
     function runKeyboardActionShortcut(action) {
       switch (action) {
+        case 'new-window':
+          newDocument();
+          break;
         case 'save':
           saveMarkdown();
           break;
+        case 'save-as':
+          if (!requestDesktopCommand('saveAs')) saveMarkdown();
+          break;
         case 'open':
           openMarkdownFile();
+          break;
+        case 'open-new-window':
+          if (!requestDesktopCommand('openNewWindow')) setStatus('新しいウィンドウで開く操作はWindowsアプリ版で利用できます');
           break;
         case 'print':
           printPreview();
@@ -3247,6 +3206,18 @@
           break;
         case 'italic':
           applyFormat('italic');
+          break;
+        case 'paragraph':
+        case 'h1':
+        case 'h2':
+        case 'h3':
+        case 'h4':
+        case 'h5':
+        case 'h6':
+        case 'ordered-list':
+        case 'list':
+        case 'quote':
+          applyFormat(action);
           break;
         case 'inline-code':
           applyFormat('code');

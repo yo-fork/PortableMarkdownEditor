@@ -28,6 +28,7 @@
     const {
       applyMode,
       applyOutlineVisibility,
+      applyShortcutAssignments,
       applyTheme,
       basenamePath,
       buildExportHtml,
@@ -67,6 +68,7 @@
       renderOutline,
       renderPreview,
       renderRich,
+      resetShortcutAssignments,
       replaceSourceRange,
       restoreRichCaret,
       richInlineInsertRangeFromSelection,
@@ -80,11 +82,13 @@
       sourceScrollElement,
       sourceSelectionRange,
       splitDomainInput,
+      shortcutAssignmentsForExport,
       stripExtension,
       stripMarkdown,
       stripRichCaretTokens,
       suppressRichInlineActivation,
       syncCodeMirrorSourceFromTextarea,
+      showShortcutDialog,
       updateStatusBar,
     } = dependencies;
 
@@ -95,6 +99,7 @@
         type: 'desktop.ready',
         dirty: state.dirty,
         fileName: state.fileName,
+        shortcuts: shortcutAssignmentsForExport(),
       });
       notifyDesktopDocumentState(true);
     }
@@ -160,6 +165,9 @@
           break;
         case 'host.status':
           setStatus(String(message.message || ''));
+          break;
+        case 'host.showShortcutSettings':
+          showShortcutDialog();
           break;
         default:
           break;
@@ -1604,6 +1612,7 @@
       state.mode = 'rich';
       state.outlineCollapsed = false;
       state.allowedLinkDomains = [];
+      resetShortcutAssignments({ persist: false, notify: true });
       if (els.allowedDomainsInput) els.allowedDomainsInput.value = '';
       applyTheme();
       initializeVendorLibraries();
@@ -1689,14 +1698,14 @@
       }
 
       try {
-        const domains = parseAllowedDomainsSettings(await readTextFile(file));
-        state.allowedLinkDomains = domains;
+        const settings = parseSettingsFile(await readTextFile(file));
+        applyImportedSettings(settings);
         persistSettings();
         if (els.allowedDomainsInput) els.allowedDomainsInput.value = state.allowedLinkDomains.join('\n');
         renderAll('link-settings');
-        setStatus(`設定ファイルから外部リンク許可ドメインを読み込みました: ${state.allowedLinkDomains.length}件`);
+        setStatus(`設定ファイルを読み込みました: 許可ドメイン${state.allowedLinkDomains.length}件${settings.shortcuts ? '、ショートカット反映済み' : ''}`);
       } catch (_) {
-        setStatus('設定ファイルを読み込めませんでした。JSON形式とallowedLinkDomainsを確認してください');
+        setStatus('設定ファイルを読み込めませんでした。JSON形式、allowedLinkDomains、shortcutsを確認してください');
       }
     }
 
@@ -1710,7 +1719,7 @@
         return;
       }
       downloadBlob(CONFIG_SETTINGS_FILE_NAME, settingsFileText(), 'application/json;charset=utf-8');
-      setStatus(`外部リンク許可ドメイン設定を書き出しました: ${state.allowedLinkDomains.length}件`);
+      setStatus(`設定を書き出しました: 許可ドメイン${state.allowedLinkDomains.length}件、ショートカット含む`);
     }
 
     async function grantSettingsDirectory() {
@@ -1721,7 +1730,7 @@
         setStatus(`設定フォルダを許可し、${CONFIG_SETTINGS_FILE_NAME} から読み込みました: ${state.allowedLinkDomains.length}件`);
       } else {
         await writeSettingsFileToConfigDirectory(directoryHandle);
-        setStatus(`設定フォルダを許可し、現在の許可ドメイン設定を ${CONFIG_SETTINGS_FILE_NAME} に保存しました`);
+        setStatus(`設定フォルダを許可し、現在の設定を ${CONFIG_SETTINGS_FILE_NAME} に保存しました`);
       }
       return true;
     }
@@ -1738,7 +1747,7 @@
       }
       try {
         await writeSettingsFileToConfigDirectory(directoryHandle);
-        setStatus(`${CONFIG_SETTINGS_FILE_NAME} に外部リンク許可ドメイン設定を保存しました: ${state.allowedLinkDomains.length}件`);
+        setStatus(`${CONFIG_SETTINGS_FILE_NAME} に設定を保存しました: 許可ドメイン${state.allowedLinkDomains.length}件、ショートカット含む`);
         return true;
       } catch (_) {
         setStatus('設定ファイルの保存に失敗しました');
@@ -1783,8 +1792,8 @@
         const fileHandle = await directoryHandle.getFileHandle(CONFIG_SETTINGS_FILE_NAME);
         const file = await fileHandle.getFile();
         if (file.size > 256 * 1024) throw new Error('settings file too large');
-        const domains = parseAllowedDomainsSettings(await readTextFile(file));
-        state.allowedLinkDomains = domains;
+        const settings = parseSettingsFile(await readTextFile(file));
+        applyImportedSettings(settings);
         persistSettings();
         if (els.allowedDomainsInput) els.allowedDomainsInput.value = state.allowedLinkDomains.join('\n');
         renderAll('link-settings');
@@ -1808,18 +1817,33 @@
     function settingsFileText() {
       return `${JSON.stringify({
         app: 'Portable Markdown Editor',
-        version: 1,
+        version: 2,
         allowedLinkDomains: normalizeDomainList(state.allowedLinkDomains),
+        shortcuts: shortcutAssignmentsForExport(),
       }, null, 2)}\n`;
     }
 
-    function parseAllowedDomainsSettings(text) {
+    function parseSettingsFile(text) {
       const parsed = JSON.parse(String(text || ''));
       const values = Array.isArray(parsed)
         ? parsed
         : parsed?.allowedLinkDomains;
       if (!Array.isArray(values)) throw new Error('allowedLinkDomains must be an array');
-      return normalizeDomainList(values);
+      if (!Array.isArray(parsed) && parsed?.shortcuts !== undefined
+          && (!parsed.shortcuts || typeof parsed.shortcuts !== 'object' || Array.isArray(parsed.shortcuts))) {
+        throw new Error('shortcuts must be an object');
+      }
+      return {
+        allowedLinkDomains: normalizeDomainList(values),
+        shortcuts: Array.isArray(parsed) || parsed.shortcuts === undefined ? null : parsed.shortcuts,
+      };
+    }
+
+    function applyImportedSettings(settings) {
+      state.allowedLinkDomains = settings.allowedLinkDomains;
+      if (settings.shortcuts) {
+        applyShortcutAssignments(settings.shortcuts, { persist: false, notify: true });
+      }
     }
 
 

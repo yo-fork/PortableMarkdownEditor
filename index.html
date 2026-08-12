@@ -19,7 +19,8 @@
   <script src="./modules/rich-editor.js?v=app-modules-3" defer></script>
   <script src="./modules/rich-input-controller.js?v=app-modules-4" defer></script>
   <script src="./modules/file-manager.js?v=app-modules-2" defer></script>
-  <script src="./app.js?v=app-modules-4" defer></script>
+  <script src="./modules/shortcut-manager.js?v=app-modules-1" defer></script>
+  <script src="./app.js?v=app-modules-5" defer></script>
 </head>
 <body data-mode="rich">
   <a class="skip-link" href="#mainWorkspace">本文へ移動</a>
@@ -81,6 +82,7 @@
       </div>
 
       <div class="top-actions">
+        <button type="button" class="icon-button" data-action="shortcut-settings" title="キーボードショートカット" aria-label="キーボードショートカット">⌨</button>
         <button type="button" class="icon-button" data-action="collapse-outline" title="アウトラインを隠す (Ctrl+Alt+O)" aria-label="アウトライン表示" aria-keyshortcuts="Control+Alt+O" aria-pressed="true">☷</button>
         <button type="button" class="icon-button" data-action="toggle-theme" title="ライト/ダーク切り替え" aria-label="ライト/ダーク切り替え">◐</button>
         <button type="button" class="icon-button" data-action="security" title="セキュリティモデル" aria-label="セキュリティモデル">🔒</button>
@@ -151,7 +153,7 @@
         <li>Markdown内のHTMLは実行せず、文字としてエスケープ。</li>
         <li>JavaScript URL、危険なプロトコル、外部画像読み込みをブロック。</li>
         <li>画像はPNG/JPEG/GIF/WebPのみ。相対パスを基本とし、Windowsアプリ版では文書フォルダ内を指す既存の絶対パスだけを制限付きで解決。</li>
-        <li>下書き、設定、リンク許可ドメインはブラウザのlocalStorageに保存。リンク許可ドメインはユーザーが選んだJSON設定ファイルから読み込み、JSONとして書き出せます。許可した設定フォルダは起動時に自動読み込みし、同じJSONへ上書き保存できます。File System Access APIのフォルダハンドルはIndexedDBに保存。</li>
+        <li>下書き、表示設定、リンク許可ドメイン、ショートカットはブラウザのlocalStorageに保存。リンク許可ドメインとショートカットはユーザーが選んだJSON設定ファイルから読み込み、JSONとして書き出せます。許可した設定フォルダは起動時に自動読み込みし、同じJSONへ上書き保存できます。File System Access APIのフォルダハンドルはIndexedDBに保存。</li>
         <li>Markdown保存は、フォルダ許可済みなら開いているMarkdownファイルへ上書きし、未許可時はユーザー操作によるダウンロード保存。</li>
         <li>貼り付け/ドロップ画像は、フォルダ許可済みの場合だけMarkdownファイル横のassetsフォルダへ保存。外部アップロードや同期は行いません。</li>
       </ul>
@@ -185,6 +187,20 @@
         <button type="button" data-action="save-settings-file">設定フォルダに保存</button>
         <button type="submit">キャンセル</button>
         <button type="button" data-action="save-link-domains">保存</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="shortcutDialog" aria-labelledby="shortcutTitle" aria-describedby="shortcutDescription">
+    <form method="dialog" class="dialog-card shortcut-dialog-card">
+      <h2 id="shortcutTitle">キーボードショートカット</h2>
+      <p id="shortcutDescription">割り当て欄を選び、Ctrlを含むキーを押します。英字、数字、F1からF12までを指定できます。</p>
+      <p id="shortcutMessage" class="shortcut-message" aria-live="polite"></p>
+      <div id="shortcutList" class="shortcut-list"></div>
+      <menu>
+        <button type="button" data-action="reset-shortcuts">既定値に戻す</button>
+        <button type="submit">キャンセル</button>
+        <button type="button" data-action="save-shortcuts">適用</button>
       </menu>
     </form>
   </dialog>

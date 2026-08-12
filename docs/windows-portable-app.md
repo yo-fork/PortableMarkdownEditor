@@ -36,6 +36,7 @@ WebView2編集画面は、ProseMirror、CodeMirror、Markdownプレビュー、M
 |Markdown読込|WPF|UTF-8、10MB以下、許可拡張子を検証します。|
 |新しいウィンドウで開く|WPF|選択した文書パスを同じ実行ファイルへ渡し、別プロセスで開きます。|
 |保存と別名保存|WPF|BOMなしUTF-8で保存します。|
+|ショートカット設定|WebView2とWPF|WebView2が設定を保存し、WPFがファイル操作の割り当てとメニュー表示を同期します。|
 |HTML書出し|WPF|WebViewが生成したHTMLをWindows標準ダイアログで保存します。|
 |設定書出し|WPF|256KB以下のJSONだけを保存します。|
 |画像保存|WPF|画像署名、MIME、25MB上限、保存名を検証します。|
@@ -52,9 +53,13 @@ WebViewからネイティブ側へ送れる主なメッセージは次のとお�
 * `desktop.documentState` は、未保存状態と表示用ファイル名を通知します。
 * `desktop.documentSnapshot` は、ネイティブ側が要求した現在のMarkdownを返します。
 * `desktop.command` は、新規、開く、保存、別名保存、印刷のいずれかを要求します。
+* `desktop.shortcutsChanged` は、検証済みのショートカット設定をネイティブ側へ通知します。
+* `desktop.shortcutCaptureState` は、設定画面でキー入力を取得している間だけWPFのショートカット処理を停止します。
 * `desktop.saveAsset` は、ユーザーが選択した画像をassetsフォルダへ保存するよう要求します。
 * `desktop.resolveImageReferences` は、Markdownに含まれる絶対画像パスを現在の文書フォルダ内に限定して検査するよう要求します。
 * `desktop.exportHtml` と `desktop.exportSettings` は、明示操作で生成した内容の保存を要求します。
+
+ネイティブ側の `host.showShortcutSettings` は、WebView2へショートカット設定画面の表示を要求します。
 
 ネイティブ側は、送信元が `https://portable-markdown-editor.local/` の場合だけメッセージを処理します。
 
@@ -113,6 +118,10 @@ WebView2のユーザーデータは `data/WebView2/` に置き、ポータブル
 「新しいウィンドウで開く」は、選択したMarkdownを同じ実行ファイルの別プロセスへ渡します。
 
 既存ウィンドウの文書パス、未保存状態、画像参照は変更しません。
+
+変更可能なショートカットはCtrlを必須とし、英字、数字、F1からF12までのいずれかへShiftとAltを追加できます。
+
+WebView2とWPFの両側で割り当て形式と重複を検証し、不正な設定をファイル操作へ使いません。
 
 ## ビルドと配布
 

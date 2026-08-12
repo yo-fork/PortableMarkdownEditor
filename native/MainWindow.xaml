@@ -15,14 +15,14 @@
   <DockPanel LastChildFill="True">
     <Menu DockPanel.Dock="Top">
       <MenuItem Header="_ファイル">
-        <MenuItem Header="_新規ウィンドウ" InputGestureText="Ctrl+N" Click="New_Click" />
-        <MenuItem Header="_開く..." InputGestureText="Ctrl+O" Click="Open_Click" />
-        <MenuItem Header="新しいウィンドウで開く..." InputGestureText="Ctrl+Shift+O" Click="OpenInNewWindow_Click" />
+        <MenuItem x:Name="NewMenuItem" Header="_新規ウィンドウ" InputGestureText="Ctrl+N" Click="New_Click" />
+        <MenuItem x:Name="OpenMenuItem" Header="_開く..." InputGestureText="Ctrl+O" Click="Open_Click" />
+        <MenuItem x:Name="OpenInNewWindowMenuItem" Header="新しいウィンドウで開く..." InputGestureText="Ctrl+Shift+O" Click="OpenInNewWindow_Click" />
         <Separator />
-        <MenuItem Header="_保存" InputGestureText="Ctrl+S" Click="Save_Click" />
-        <MenuItem Header="名前を付けて保存..." InputGestureText="Ctrl+Shift+S" Click="SaveAs_Click" />
+        <MenuItem x:Name="SaveMenuItem" Header="_保存" InputGestureText="Ctrl+S" Click="Save_Click" />
+        <MenuItem x:Name="SaveAsMenuItem" Header="名前を付けて保存..." InputGestureText="Ctrl+Shift+S" Click="SaveAs_Click" />
         <Separator />
-        <MenuItem Header="_印刷..." InputGestureText="Ctrl+P" Click="Print_Click" />
+        <MenuItem x:Name="PrintMenuItem" Header="_印刷..." InputGestureText="Ctrl+P" Click="Print_Click" />
         <Separator />
         <MenuItem Header="終了" Click="Exit_Click" />
       </MenuItem>

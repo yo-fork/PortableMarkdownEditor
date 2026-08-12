@@ -12,7 +12,8 @@ const markdownRendererModule = readFileSync(new URL('../modules/markdown-rendere
 const richEditorModule = readFileSync(new URL('../modules/rich-editor.js', import.meta.url), 'utf8');
 const richInputControllerModule = readFileSync(new URL('../modules/rich-input-controller.js', import.meta.url), 'utf8');
 const fileManagerModule = readFileSync(new URL('../modules/file-manager.js', import.meta.url), 'utf8');
-const appRuntime = `${app}\n${markdownRendererModule}\n${richEditorModule}\n${richInputControllerModule}\n${fileManagerModule}`;
+const shortcutManagerModule = readFileSync(new URL('../modules/shortcut-manager.js', import.meta.url), 'utf8');
+const appRuntime = `${app}\n${markdownRendererModule}\n${richEditorModule}\n${richInputControllerModule}\n${fileManagerModule}\n${shortcutManagerModule}`;
 const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
 const extraGallery = readFileSync(new URL('../samples/mermaid-extra-gallery.md', import.meta.url), 'utf8');
 const advancedGallery = readFileSync(new URL('../samples/mermaid-advanced-gallery.md', import.meta.url), 'utf8');
@@ -34,6 +35,7 @@ vm.runInContext(markdownRendererModule, context);
 vm.runInContext(richEditorModule, context);
 vm.runInContext(richInputControllerModule, context);
 vm.runInContext(fileManagerModule, context);
+vm.runInContext(shortcutManagerModule, context);
 const renderer = vm.runInContext(instrumented, context);
 
 function renderMermaid(source) {

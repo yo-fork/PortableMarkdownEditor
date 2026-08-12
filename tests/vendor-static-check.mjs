@@ -110,7 +110,7 @@ for (const vendorFile of collectFiles('vendor').filter((file) => file !== 'vendo
 }
 
 const index = read('index.html');
-const app = `${read('app.js')}\n${read('modules/markdown-renderer.js')}\n${read('modules/rich-editor.js')}\n${read('modules/rich-input-controller.js')}\n${read('modules/file-manager.js')}`;
+const app = `${read('app.js')}\n${read('modules/markdown-renderer.js')}\n${read('modules/rich-editor.js')}\n${read('modules/rich-input-controller.js')}\n${read('modules/file-manager.js')}\n${read('modules/shortcut-manager.js')}`;
 const styles = read('styles.css');
 const codeMirrorBundle = read('vendor/codemirror6/source-editor.bundle.js');
 
@@ -125,6 +125,7 @@ assert.match(index, /modules\/markdown-renderer\.js[\s\S]+app\.js/, 'the Markdow
 assert.match(index, /modules\/rich-editor\.js[\s\S]+app\.js/, 'the rich editor module should load before the app entry point');
 assert.match(index, /modules\/rich-input-controller\.js[\s\S]+app\.js/, 'the rich input controller module should load before the app entry point');
 assert.match(index, /modules\/file-manager\.js[\s\S]+app\.js/, 'the file manager module should load before the app entry point');
+assert.match(index, /modules\/shortcut-manager\.js[\s\S]+app\.js/, 'the shortcut manager module should load before the app entry point');
 assert.match(index, /style-src 'self' 'unsafe-inline'/, 'CSP must allow Mermaid/KaTeX inline styles only');
 assert.doesNotMatch(index, /frame-ancestors/, 'meta CSP must not include ignored frame-ancestors directive');
 assert.match(index, /data-format="math"[\s\S]+インライン数式/, 'toolbar should expose a KaTeX inline math insertion button');
@@ -189,8 +190,8 @@ assert.match(proseMirrorBundle, /function\s+inlineMathMatchAt/, 'ProseMirror inl
 assert.match(proseMirrorBundle, /function\s+addTaskListRule[\s\S]+data-pme-task/, 'ProseMirror parsing should promote Markdown checklist markers into list-item attrs');
 assert.match(proseMirrorBundle, /function\s+TaskListItemNodeView[\s\S]+pme-task-checkbox[\s\S]+setNodeMarkup/, 'rich checklist items should expose an interactive checkbox backed by a ProseMirror transaction');
 assert.match(proseMirrorBundle, /list_item:\s*function\(state, node\)[\s\S]+\[x\][\s\S]+\[ \]/, 'checklist attrs should serialize back to Markdown markers');
-assert.match(proseMirrorBundle, /'Mod-0'[\s\S]+'Mod-1'[\s\S]+'Mod-6'/, 'ProseMirror should bind paragraph and heading shortcuts');
-assert.match(proseMirrorBundle, /'Shift-Mod-7'[\s\S]+'Shift-Mod-8'[\s\S]+'Shift-Mod-9'/, 'ProseMirror should bind numbered list, bullet list, and quote shortcuts');
+assert.doesNotMatch(proseMirrorBundle, /'Mod-[0-6]'|'Mod-b'|'Mod-i'|'Shift-Mod-[789]'/, 'configurable formatting shortcuts must not remain hard-coded in ProseMirror');
+assert.match(proseMirrorBundle, /'Mod-z': historyModule\.undo[\s\S]+'Mod-y': historyModule\.redo/, 'ProseMirror should retain editor-native undo and redo shortcuts');
 assert.match(proseMirrorBundle, /var delimiter = [^;]+\\\\\[/, 'ProseMirror display math parsing should recognize bracket delimiters');
 assert.match(proseMirrorBundle, /function\s+ImageNodeView\(node, editorView, getPos, options\)[\s\S]+data-pme-atom-node', 'image'[\s\S]+this\.render\(\)/, 'ProseMirror rich editor should render images through a node view');
 assert.match(proseMirrorBundle, /function\s+resolveImageNodeSrc\(src, options\)[\s\S]+options\.resolveImageSrc\(src\)/, 'ProseMirror image node views should resolve Markdown image src values through the app callback');

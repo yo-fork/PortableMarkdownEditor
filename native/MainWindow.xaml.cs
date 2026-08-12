@@ -29,6 +29,9 @@ namespace PortableMarkdownEditor.Desktop
 
         private readonly Dictionary<string, TaskCompletionSource<DocumentSnapshot>> _pendingSnapshots
             = new Dictionary<string, TaskCompletionSource<DocumentSnapshot>>(StringComparer.Ordinal);
+        private readonly Dictionary<string, string> _shortcutByCommand = CreateDefaultNativeShortcuts();
+        private readonly Dictionary<string, string> _commandByShortcut
+            = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         private string _documentPath;
         private string _webFileName = "untitled.md";
@@ -37,6 +40,7 @@ namespace PortableMarkdownEditor.Desktop
         private bool _editorReady;
         private bool _dirty;
         private bool _operationInProgress;
+        private bool _shortcutCaptureActive;
 
         public MainWindow()
         {
@@ -54,6 +58,8 @@ namespace PortableMarkdownEditor.Desktop
                 }
             }
 
+            RebuildNativeShortcutLookup();
+            UpdateShortcutMenuLabels();
             UpdateWindowState();
         }
 
@@ -84,36 +90,30 @@ namespace PortableMarkdownEditor.Desktop
 
         private async void MainWindow_PreviewKeyDown(object sender, KeyEventArgs eventArgs)
         {
-            ModifierKeys modifiers = Keyboard.Modifiers;
-            if (modifiers == ModifierKeys.Control && eventArgs.Key == Key.N)
+            if (_shortcutCaptureActive) return;
+            string command = ShortcutCommandForKeyEvent(eventArgs);
+            if (string.IsNullOrEmpty(command)) return;
+            eventArgs.Handled = true;
+            switch (command)
             {
-                eventArgs.Handled = true;
-                OpenNewDocumentWindow();
-            }
-            else if (modifiers == ModifierKeys.Control && eventArgs.Key == Key.O)
-            {
-                eventArgs.Handled = true;
-                await RunOperationAsync(OpenDocumentAsync);
-            }
-            else if (modifiers == (ModifierKeys.Control | ModifierKeys.Shift) && eventArgs.Key == Key.O)
-            {
-                eventArgs.Handled = true;
-                OpenDocumentInNewWindow();
-            }
-            else if (modifiers == ModifierKeys.Control && eventArgs.Key == Key.S)
-            {
-                eventArgs.Handled = true;
-                await RunOperationAsync(() => SaveDocumentAsync(false));
-            }
-            else if (modifiers == (ModifierKeys.Control | ModifierKeys.Shift) && eventArgs.Key == Key.S)
-            {
-                eventArgs.Handled = true;
-                await RunOperationAsync(() => SaveDocumentAsync(true));
-            }
-            else if (modifiers == ModifierKeys.Control && eventArgs.Key == Key.P)
-            {
-                eventArgs.Handled = true;
-                await RunOperationAsync(PrintAsync);
+                case "new-window":
+                    OpenNewDocumentWindow();
+                    break;
+                case "open":
+                    await RunOperationAsync(OpenDocumentAsync);
+                    break;
+                case "open-new-window":
+                    OpenDocumentInNewWindow();
+                    break;
+                case "save":
+                    await RunOperationAsync(() => SaveDocumentAsync(false));
+                    break;
+                case "save-as":
+                    await RunOperationAsync(() => SaveDocumentAsync(true));
+                    break;
+                case "print":
+                    await RunOperationAsync(PrintAsync);
+                    break;
             }
         }
 
@@ -164,33 +164,10 @@ namespace PortableMarkdownEditor.Desktop
 
         private void Shortcuts_Click(object sender, RoutedEventArgs eventArgs)
         {
-            MessageBox.Show(
-                this,
-                "Ctrl+0: 段落\n"
-                    + "Ctrl+1〜6: 見出し1〜6\n"
-                    + "Ctrl+B: 太字\n"
-                    + "Ctrl+I: 斜体\n"
-                    + "Ctrl+K: インラインコード\n"
-                    + "Ctrl+M: インライン数式\n"
-                    + "Ctrl+Shift+K: コードブロック\n"
-                    + "Ctrl+Shift+M: 数式ブロック\n"
-                    + "Ctrl+Shift+L: リンク\n"
-                    + "Ctrl+Shift+7: 番号リスト\n"
-                    + "Ctrl+Shift+8: 箇条書き\n"
-                    + "Ctrl+Shift+9: 引用\n"
-                    + "Ctrl+Alt+T: 表\n"
-                    + "Ctrl+Alt+I: 目次\n"
-                    + "Ctrl+Alt+M: Mermaid図\n"
-                    + "Ctrl+Alt+O: アウトライン表示切り替え\n\n"
-                    + "Ctrl+N: 新規ウィンドウ\n"
-                    + "Ctrl+O: 開く\n"
-                    + "Ctrl+Shift+O: 新しいウィンドウで開く\n"
-                    + "Ctrl+S: 保存\n"
-                    + "Ctrl+Shift+S: 名前を付けて保存\n"
-                    + "Ctrl+P: 印刷",
-                "キーボードショートカット",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
+            SendHostMessage(new Dictionary<string, object>
+            {
+                { "type", "host.showShortcutSettings" },
+            });
         }
 
         private async Task InitializeEditorAsync()
@@ -409,6 +386,12 @@ namespace PortableMarkdownEditor.Desktop
                     case "desktop.command":
                         await RunOperationAsync(() => ExecuteEditorCommandAsync(GetString(message, "command")));
                         break;
+                    case "desktop.shortcutsChanged":
+                        ApplyShortcutSettings(message);
+                        break;
+                    case "desktop.shortcutCaptureState":
+                        _shortcutCaptureActive = GetBoolean(message, "active");
+                        break;
                     case "desktop.saveAsset":
                         HandleAssetSave(message);
                         break;
@@ -432,8 +415,10 @@ namespace PortableMarkdownEditor.Desktop
         private async Task HandleEditorReadyAsync(Dictionary<string, object> message)
         {
             _editorReady = true;
+            _shortcutCaptureActive = false;
             _dirty = GetBoolean(message, "dirty");
             _webFileName = SafeDisplayFileName(GetString(message, "fileName"));
+            ApplyShortcutSettings(message);
             NativeStatusText.Text = "準備完了";
             UpdateWindowState();
 
@@ -450,6 +435,47 @@ namespace PortableMarkdownEditor.Desktop
             {
                 await OpenDocumentPathAsync(startupPath, true);
             }
+        }
+
+        private void ApplyShortcutSettings(Dictionary<string, object> message)
+        {
+            object rawShortcuts;
+            Dictionary<string, object> shortcuts;
+            if (!message.TryGetValue("shortcuts", out rawShortcuts)
+                || (shortcuts = rawShortcuts as Dictionary<string, object>) == null)
+            {
+                return;
+            }
+
+            Dictionary<string, string> next = CreateDefaultNativeShortcuts();
+            HashSet<string> used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string[] commands = { "new-window", "open", "open-new-window", "save", "save-as", "print" };
+            foreach (string command in commands)
+            {
+                object rawValue;
+                string value;
+                if (shortcuts.TryGetValue(command, out rawValue) && rawValue is string)
+                {
+                    value = (string)rawValue;
+                    if (value.Length == 0)
+                    {
+                        next[command] = string.Empty;
+                    }
+                    else
+                    {
+                        string normalized = NormalizeShortcut(value);
+                        if (!string.IsNullOrEmpty(normalized)) next[command] = normalized;
+                    }
+                }
+
+                string shortcut = next[command];
+                if (!string.IsNullOrEmpty(shortcut) && !used.Add(shortcut)) next[command] = string.Empty;
+            }
+
+            _shortcutByCommand.Clear();
+            foreach (KeyValuePair<string, string> entry in next) _shortcutByCommand[entry.Key] = entry.Value;
+            RebuildNativeShortcutLookup();
+            UpdateShortcutMenuLabels();
         }
 
         private void HandleDocumentState(Dictionary<string, object> message)
@@ -549,6 +575,9 @@ namespace PortableMarkdownEditor.Desktop
                 case "open":
                     await OpenDocumentAsync();
                     break;
+                case "openNewWindow":
+                    OpenDocumentInNewWindow();
+                    break;
                 case "save":
                     await SaveDocumentAsync(false);
                     break;
@@ -601,7 +630,7 @@ namespace PortableMarkdownEditor.Desktop
 
         private void OpenDocumentInNewWindow()
         {
-            if (!_editorReady || _operationInProgress)
+            if (!_editorReady)
             {
                 return;
             }
@@ -692,6 +721,126 @@ namespace PortableMarkdownEditor.Desktop
             }
 
             return "\"" + value + "\"";
+        }
+
+        private static Dictionary<string, string> CreateDefaultNativeShortcuts()
+        {
+            return new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                { "new-window", "Ctrl+N" },
+                { "open", "Ctrl+O" },
+                { "open-new-window", "Ctrl+Shift+O" },
+                { "save", "Ctrl+S" },
+                { "save-as", "Ctrl+Shift+S" },
+                { "print", "Ctrl+P" },
+            };
+        }
+
+        private void RebuildNativeShortcutLookup()
+        {
+            _commandByShortcut.Clear();
+            foreach (KeyValuePair<string, string> entry in _shortcutByCommand)
+            {
+                if (!string.IsNullOrEmpty(entry.Value)) _commandByShortcut[entry.Value] = entry.Key;
+            }
+        }
+
+        private void UpdateShortcutMenuLabels()
+        {
+            NewMenuItem.InputGestureText = _shortcutByCommand["new-window"];
+            OpenMenuItem.InputGestureText = _shortcutByCommand["open"];
+            OpenInNewWindowMenuItem.InputGestureText = _shortcutByCommand["open-new-window"];
+            SaveMenuItem.InputGestureText = _shortcutByCommand["save"];
+            SaveAsMenuItem.InputGestureText = _shortcutByCommand["save-as"];
+            PrintMenuItem.InputGestureText = _shortcutByCommand["print"];
+        }
+
+        private string ShortcutCommandForKeyEvent(KeyEventArgs eventArgs)
+        {
+            string shortcut = ShortcutFromKeyEvent(eventArgs);
+            string command;
+            return !string.IsNullOrEmpty(shortcut) && _commandByShortcut.TryGetValue(shortcut, out command)
+                ? command
+                : null;
+        }
+
+        private static string ShortcutFromKeyEvent(KeyEventArgs eventArgs)
+        {
+            ModifierKeys modifiers = Keyboard.Modifiers;
+            if ((modifiers & ModifierKeys.Control) == 0 || (modifiers & ModifierKeys.Windows) != 0) return null;
+            Key key = eventArgs.Key == Key.System ? eventArgs.SystemKey : eventArgs.Key;
+            string keyName = ShortcutKeyName(key);
+            if (string.IsNullOrEmpty(keyName)) return null;
+            StringBuilder shortcut = new StringBuilder("Ctrl");
+            if ((modifiers & ModifierKeys.Shift) != 0) shortcut.Append("+Shift");
+            if ((modifiers & ModifierKeys.Alt) != 0) shortcut.Append("+Alt");
+            shortcut.Append('+').Append(keyName);
+            return shortcut.ToString();
+        }
+
+        private static string ShortcutKeyName(Key key)
+        {
+            if (key >= Key.A && key <= Key.Z) return key.ToString();
+            if (key >= Key.D0 && key <= Key.D9) return key.ToString().Substring(1);
+            if (key >= Key.F1 && key <= Key.F12) return key.ToString();
+            return null;
+        }
+
+        private static string NormalizeShortcut(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value) || value.Length > 32) return null;
+            string[] parts = value.Split('+');
+            bool control = false;
+            bool shift = false;
+            bool alt = false;
+            string key = null;
+            foreach (string rawPart in parts)
+            {
+                string part = rawPart.Trim();
+                if (part.Equals("Ctrl", StringComparison.OrdinalIgnoreCase)
+                    || part.Equals("Control", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (control) return null;
+                    control = true;
+                }
+                else if (part.Equals("Shift", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (shift) return null;
+                    shift = true;
+                }
+                else if (part.Equals("Alt", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (alt) return null;
+                    alt = true;
+                }
+                else
+                {
+                    if (key != null) return null;
+                    key = NormalizeShortcutKey(part);
+                    if (key == null) return null;
+                }
+            }
+
+            if (!control || key == null) return null;
+            return "Ctrl" + (shift ? "+Shift" : string.Empty) + (alt ? "+Alt" : string.Empty) + "+" + key;
+        }
+
+        private static string NormalizeShortcutKey(string value)
+        {
+            string key = (value ?? string.Empty).Trim().ToUpperInvariant();
+            if (key.Length == 1 && ((key[0] >= 'A' && key[0] <= 'Z') || (key[0] >= '0' && key[0] <= '9')))
+            {
+                return key;
+            }
+
+            int functionNumber;
+            if (key.Length >= 2 && key[0] == 'F'
+                && int.TryParse(key.Substring(1), out functionNumber)
+                && functionNumber >= 1 && functionNumber <= 12)
+            {
+                return "F" + functionNumber;
+            }
+            return null;
         }
 
         private async Task OpenDocumentPathAsync(string path, bool confirmDiscard)
@@ -825,7 +974,7 @@ namespace PortableMarkdownEditor.Desktop
 
             SaveFileDialog dialog = new SaveFileDialog
             {
-                Title = "外部リンク許可設定を書き出す",
+                Title = "設定を書き出す",
                 Filter = "JSON (*.json)|*.json",
                 DefaultExt = ".json",
                 AddExtension = true,
@@ -839,11 +988,11 @@ namespace PortableMarkdownEditor.Desktop
             }
 
             PortableFileService.WriteSettingsExport(dialog.FileName, content);
-            NativeStatusText.Text = "外部リンク許可設定を書き出しました。";
+            NativeStatusText.Text = "設定を書き出しました。";
             SendHostMessage(new Dictionary<string, object>
             {
                 { "type", "host.status" },
-                { "message", "外部リンク許可設定を書き出しました" },
+                { "message", "設定を書き出しました" },
             });
             return Task.CompletedTask;
         }

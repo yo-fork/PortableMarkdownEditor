@@ -129,6 +129,7 @@ flowchart TD
     scrollSyncLock: false,
     mermaidPan: null,
     allowedLinkDomains: [],
+    shortcuts: {},
     assetUrls: new Map(),
     directoryHandle: null,
     pickerStartDirectoryHandle: null,
@@ -337,6 +338,34 @@ flowchart TD
     updateTaskCheckbox,
     wrapRenderedInlineAtoms,
   } = richEditorApi;
+  const shortcutManagerFactory = window.PMEShortcutManager?.createShortcutManager;
+  if (typeof shortcutManagerFactory !== 'function') {
+    throw new Error('Shortcut manager module is not available');
+  }
+  const shortcutManagerApi = shortcutManagerFactory({
+    state,
+    els,
+    dependencies: {
+      notifyDesktopShortcutCaptureState,
+      notifyDesktopShortcuts,
+      persistSettings,
+      setStatus,
+    },
+  });
+  const {
+    applyShortcutAssignments,
+    captureShortcutAssignment,
+    clearShortcutAssignment,
+    initializeShortcutUi,
+    resetShortcutAssignments,
+    restoreDefaultShortcutAssignments,
+    saveShortcutAssignments,
+    shortcutActionForEvent,
+    shortcutAssignmentsForExport,
+    showShortcutDialog,
+    updateElementShortcutHint,
+  } = shortcutManagerApi;
+
   const fileManagerFactory = window.PMEFileManager?.createFileManager;
   if (typeof fileManagerFactory !== 'function') {
     throw new Error('File manager module is not available');
@@ -408,6 +437,7 @@ flowchart TD
       applyMode,
       applyOutlineVisibility,
       applyTheme,
+      applyShortcutAssignments,
       basenamePath,
       buildExportHtml,
       confirmDocumentReplacement,
@@ -446,6 +476,7 @@ flowchart TD
       renderOutline,
       renderPreview,
       renderRich,
+      resetShortcutAssignments,
       replaceSourceRange,
       restoreRichCaret,
       richInlineInsertRangeFromSelection,
@@ -459,11 +490,13 @@ flowchart TD
       sourceScrollElement,
       sourceSelectionRange,
       splitDomainInput,
+      shortcutAssignmentsForExport,
       stripExtension,
       stripMarkdown,
       stripRichCaretTokens,
       suppressRichInlineActivation: (...args) => richInputControllerApi.suppressRichInlineActivation(...args),
       syncCodeMirrorSourceFromTextarea,
+      showShortcutDialog,
       updateStatusBar,
     },
   });
@@ -490,6 +523,7 @@ flowchart TD
       annotateRenderedBlockHtml,
       annotateRenderedInlineAtomRanges,
       applyFormat,
+      captureShortcutAssignment,
       buildBlockModel,
       buildHeadingIndex,
       cleanupRichCaretBoundaryMarkers,
@@ -526,10 +560,12 @@ flowchart TD
       normalizeNewlines,
       normalizeRichText,
       numericData,
+      newDocument,
       openMarkdownFile,
       parsePendingRichMathShortcutInBlock,
       placeCaretInInlineSource,
       printPreview,
+      requestDesktopCommand,
       refreshRichSourceRangesFromMarkdown,
       removeRichTaskCheckboxTransaction,
       renderAll,
@@ -560,6 +596,7 @@ flowchart TD
       serializeTableCellInlineNode,
       serializeTableCellInlineNodes,
       setStatus,
+      shortcutActionForEvent,
       showRichSourceEditor,
       sourceContentBaseOffset,
       stripRichCaretTokens,
@@ -638,6 +675,7 @@ flowchart TD
   function init() {
     cacheElements();
     restoreSettings();
+    initializeShortcutUi();
     restoreDraft();
     if (state.desktopHost) state.markdownRelativePath = '';
     bindEvents();
@@ -689,6 +727,9 @@ flowchart TD
     els.securityDialog = document.getElementById('securityDialog');
     els.linkDomainDialog = document.getElementById('linkDomainDialog');
     els.allowedDomainsInput = document.getElementById('allowedDomainsInput');
+    els.shortcutDialog = document.getElementById('shortcutDialog');
+    els.shortcutList = document.getElementById('shortcutList');
+    els.shortcutMessage = document.getElementById('shortcutMessage');
     els.markdownEntryDialog = document.getElementById('markdownEntryDialog');
     els.markdownEntryList = document.getElementById('markdownEntryList');
     els.markdownEntryCancel = document.getElementById('markdownEntryCancel');
@@ -708,6 +749,7 @@ flowchart TD
     state.mode = settings?.mode || 'rich';
     state.outlineCollapsed = Boolean(settings?.outlineCollapsed);
     state.allowedLinkDomains = normalizeDomainList(settings?.allowedLinkDomains || []);
+    state.shortcuts = window.PMEShortcutManager.normalizeShortcutAssignments(settings?.shortcuts);
   }
 
   function defaultTheme() {
@@ -1196,6 +1238,18 @@ flowchart TD
         break;
       case 'link-settings':
         showLinkDomainDialog();
+        break;
+      case 'shortcut-settings':
+        showShortcutDialog();
+        break;
+      case 'save-shortcuts':
+        saveShortcutAssignments();
+        break;
+      case 'reset-shortcuts':
+        restoreDefaultShortcutAssignments();
+        break;
+      case 'clear-shortcut':
+        clearShortcutAssignment(actionButton.dataset.shortcutCommand || '');
         break;
       case 'save-link-domains':
         saveLinkDomains();
@@ -3168,7 +3222,7 @@ flowchart TD
     if (!toggle) return;
     const visible = !state.outlineCollapsed;
     toggle.setAttribute('aria-pressed', String(visible));
-    toggle.title = `${visible ? 'アウトラインを隠す' : 'アウトラインを表示'} (Ctrl+Alt+O)`;
+    updateElementShortcutHint(toggle, 'toggle-outline', visible ? 'アウトラインを隠す' : 'アウトラインを表示');
   }
 
   function showSecurityDialog() {
@@ -3229,7 +3283,36 @@ flowchart TD
       mode: state.mode,
       outlineCollapsed: state.outlineCollapsed,
       allowedLinkDomains: state.allowedLinkDomains,
+      shortcuts: shortcutAssignmentsForExport(),
     });
+  }
+
+  function notifyDesktopShortcuts(shortcuts = state.shortcuts) {
+    if (!state.desktopHost || !window.chrome?.webview?.postMessage) return false;
+    try {
+      window.chrome.webview.postMessage({
+        type: 'desktop.shortcutsChanged',
+        shortcuts,
+      });
+      return true;
+    } catch (_) {
+      setStatus('Windowsアプリへショートカット設定を送信できませんでした');
+      return false;
+    }
+  }
+
+  function notifyDesktopShortcutCaptureState(active) {
+    if (!state.desktopHost || !window.chrome?.webview?.postMessage) return false;
+    try {
+      window.chrome.webview.postMessage({
+        type: 'desktop.shortcutCaptureState',
+        active: Boolean(active),
+      });
+      return true;
+    } catch (_) {
+      setStatus('Windowsアプリへショートカット設定状態を送信できませんでした');
+      return false;
+    }
   }
 
   function renderAll(reason) {

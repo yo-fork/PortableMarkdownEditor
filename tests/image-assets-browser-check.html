@@ -135,6 +135,7 @@
         <span>LOCAL</span>
         <span>NO CDN</span>
         <span>HTML OFF</span>
+        <button type="button" class="icon-button" data-action="shortcut-settings">⌨</button>
         <button type="button" class="icon-button" data-action="toggle-theme">◐</button>
         <button type="button" class="icon-button" data-action="security">🔒</button>
       </div>
@@ -180,6 +181,12 @@
   <datalist id="codeLanguageOptions"><option value="text"></option></datalist>
   <dialog id="securityDialog"><button type="button">閉じる</button></dialog>
   <dialog id="linkDomainDialog"><textarea id="allowedDomainsInput"></textarea></dialog>
+  <dialog id="shortcutDialog">
+    <p id="shortcutMessage"></p>
+    <div id="shortcutList"></div>
+    <button type="button" data-action="reset-shortcuts">既定値に戻す</button>
+    <button type="button" data-action="save-shortcuts">適用</button>
+  </dialog>
   <dialog id="markdownEntryDialog"><div id="markdownEntryList"></div><button id="markdownEntryCancel" type="button">閉じる</button></dialog>
   <dialog id="folderScanWarningDialog"><p id="folderScanWarningMessage"></p></dialog>
   <dialog id="inlineInsertDialog">
@@ -193,6 +200,7 @@
   <script src="../modules/rich-editor.js"></script>
   <script src="../modules/rich-input-controller.js"></script>
   <script src="../modules/file-manager.js"></script>
+  <script src="../modules/shortcut-manager.js"></script>
   <script src="../app.js"></script>
   <script>
     (() => {
@@ -285,9 +293,33 @@
         return true;
       }
 
+      async function testShortcutCustomization() {
+        document.querySelector('[data-action="shortcut-settings"]').click();
+        await waitFor(() => document.getElementById('shortcutDialog').open, 'shortcut settings dialog did not open');
+        const capture = document.querySelector('[data-shortcut-command="inline-code"]');
+        assert(capture, 'inline code shortcut assignment was not rendered');
+        capture.focus();
+        capture.dispatchEvent(new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+          altKey: true,
+          code: 'KeyC',
+          key: 'c',
+        }));
+        document.querySelector('[data-action="save-shortcuts"]').click();
+        await waitFor(() => !document.getElementById('shortcutDialog').open, 'shortcut settings dialog did not close after apply');
+        const settings = JSON.parse(localStorage.getItem('portable-markdown-editer:settings:v1') || '{}');
+        assert(settings.shortcuts?.['inline-code'] === 'Ctrl+Alt+C', 'custom shortcut was not persisted');
+        const toolbarButton = document.querySelector('[data-format="code"]');
+        assert(toolbarButton.getAttribute('aria-keyshortcuts') === 'Control+Alt+C', 'toolbar accessibility shortcut did not update');
+        assert(toolbarButton.title.includes('Ctrl+Alt+C'), 'toolbar shortcut title did not update');
+      }
+
       async function runStartPhase() {
         await window.__PME_IMAGE_TEST_READY;
         await waitFor(() => document.body.dataset.mode === 'rich', 'app did not initialize');
+        await testShortcutCustomization();
         document.querySelector('[data-action="open-folder"]').click();
         await waitFor(() => document.body.dataset.folderAccess === 'fsa', 'folder was not opened through File System Access API');
         assert(document.getElementById('sourceEditor').value.includes('existing.png'), 'sample Markdown was not opened');
@@ -315,9 +347,11 @@
         assert(source.includes('sample.assets/pasted.png'), 'pasted asset reference did not survive reload');
         assert(source.includes('sample.assets/dropped.png'), 'dropped asset reference did not survive reload');
         assert(document.querySelectorAll('#preview img[src^="blob:"]').length >= 2, 'asset images did not render from restored directory map');
+        const settings = JSON.parse(localStorage.getItem('portable-markdown-editer:settings:v1') || '{}');
+        assert(settings.shortcuts?.['inline-code'] === 'Ctrl+Alt+C', 'custom shortcut did not survive reload');
         await hasAsset('pasted.png');
         await hasAsset('dropped.png');
-        pass('paste/drop images saved to sample.assets, Markdown uses relative references, and FSA directory handle restored after reload.');
+        pass('custom shortcuts persisted across reload; paste/drop images saved to sample.assets, Markdown uses relative references, and FSA directory handle restored.');
       }
 
       window.addEventListener('DOMContentLoaded', () => {

@@ -8,6 +8,10 @@ ZIPを展開し、`PortableMarkdownEditor` フォルダ内の `PortableMarkdownE
 
 「新しいウィンドウで開く」、または `Ctrl+Shift+O` では、既存のMarkdownを独立したウィンドウで開けます。
 
+ショートカットは、「ヘルプ」メニューの「キーボードショートカット」から変更できます。
+
+同じキーを複数の操作へ割り当てることはできず、設定画面から解除または既定値への復元ができます。
+
 Visual Studio、Visual Studio Installer、MSBuildは不要です。
 
 `BuildPortableWindows.cmd` は実行しないでください。

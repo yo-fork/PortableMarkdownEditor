@@ -8,7 +8,8 @@ const markdownRendererModule = readFileSync(new URL('../modules/markdown-rendere
 const richEditorModule = readFileSync(new URL('../modules/rich-editor.js', import.meta.url), 'utf8');
 const richInputControllerModule = readFileSync(new URL('../modules/rich-input-controller.js', import.meta.url), 'utf8');
 const fileManagerModule = readFileSync(new URL('../modules/file-manager.js', import.meta.url), 'utf8');
-const app = `${appEntry}\n${markdownRendererModule}\n${richEditorModule}\n${richInputControllerModule}\n${fileManagerModule}`;
+const shortcutManagerModule = readFileSync(new URL('../modules/shortcut-manager.js', import.meta.url), 'utf8');
+const app = `${appEntry}\n${markdownRendererModule}\n${richEditorModule}\n${richInputControllerModule}\n${fileManagerModule}\n${shortcutManagerModule}`;
 const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
 const securitySample = readFileSync(new URL('../samples/security-check.md', import.meta.url), 'utf8');
 
@@ -28,6 +29,7 @@ assert.match(index, /modules\/markdown-renderer\.js[\s\S]+app\.js/, 'the Markdow
 assert.match(index, /modules\/rich-editor\.js[\s\S]+app\.js/, 'the rich editor module should load before the app entry point');
 assert.match(index, /modules\/rich-input-controller\.js[\s\S]+app\.js/, 'the rich input controller module should load before the app entry point');
 assert.match(index, /modules\/file-manager\.js[\s\S]+app\.js/, 'the file manager module should load before the app entry point');
+assert.match(index, /modules\/shortcut-manager\.js[\s\S]+app\.js/, 'the shortcut manager module should load before the app entry point');
 assert.doesNotMatch(index, /https?:\/\/.*\.(js|css)/i, 'no external JS/CSS');
 
 assert.match(app, /function\s+sanitizeLinkUrl/);
@@ -63,6 +65,8 @@ assert.match(index, /data-action="reset-settings"/, 'settings reset button shoul
 assert.match(index, /data-action="clear-allowed-domains"/, 'allowed domain deletion button should exist');
 assert.match(index, /data-action="clear-folder-permissions"/, 'folder permission record deletion button should exist');
 assert.match(index, /data-action="clear-all-local-data"/, 'all local data deletion button should exist');
+assert.match(index, /id="shortcutDialog"[\s\S]+data-action="reset-shortcuts"[\s\S]+data-action="save-shortcuts"/, 'shortcut settings should support default restoration and explicit apply');
+assert.match(index, /data-action="shortcut-settings"/, 'the shortcut settings dialog should be reachable from the topbar');
 assert.match(index, /class="icon-button" data-action="collapse-outline"[^>]+aria-pressed="true"/, 'the outline should have a persistent topbar toggle after the sidebar is hidden');
 assert.match(index, /data-format="bold"[^>]+aria-label="太字"[^>]+aria-keyshortcuts="Control\+B"/, 'symbol-only formatting buttons should expose descriptive accessible names and shortcuts');
 assert.match(index, /data-format="h1"[^>]+aria-keyshortcuts="Control\+1"/, 'heading buttons should expose their keyboard shortcuts');
@@ -102,11 +106,13 @@ assert.match(app, /function\s+sourceMarkdownValue/, 'source reads should go thro
 assert.match(app, /function\s+replaceSourceRange/, 'source writes should go through the CodeMirror-aware range replacement helper');
 assert.match(app, /function\s+sourceScrollElement/, 'source scroll sync should use the active editor scroll element');
 assert.match(app, /function\s+renderProseMirrorRich/, 'rich editing should prefer the ProseMirror transaction model when Markdown is supported');
-assert.match(app, /function\s+keyboardFormatShortcut[\s\S]+ordered-list[\s\S]+quote/, 'formatting keyboard shortcuts should cover headings, lists, and quotes');
+assert.match(app, /SHORTCUT_DEFINITIONS[\s\S]+paragraph[\s\S]+h6[\s\S]+ordered-list[\s\S]+quote/, 'configurable shortcuts should cover headings, lists, and quotes');
 assert.match(app, /addEventListener\('keydown', onKeyboardShortcutKeyDown, true\)/, 'app shortcuts should run in capture phase before editor-specific keymaps');
 assert.match(app, /function\s+onKeyboardShortcutKeyDown[\s\S]+event\.preventDefault\(\)[\s\S]+event\.stopPropagation\(\)[\s\S]+runKeyboardActionShortcut/, 'captured app shortcuts should prevent conflicting editor commands');
-assert.match(app, /function\s+keyboardActionShortcut[\s\S]+k:\s*'inline-code'[\s\S]+m:\s*'inline-math'[\s\S]+k:\s*'code-block'[\s\S]+m:\s*'math-block'[\s\S]+l:\s*'link'/, 'code, math, and link shortcuts should use the requested reassigned keys');
-assert.match(app, /function\s+keyboardActionShortcut[\s\S]+t:\s*'table'[\s\S]+i:\s*'toc'[\s\S]+m:\s*'mermaid'[\s\S]+o:\s*'toggle-outline'/, 'structural and outline shortcuts should use the Ctrl+Alt group');
+assert.match(app, /definition\('inline-code',[^\n]+Ctrl\+K[\s\S]+definition\('inline-math',[^\n]+Ctrl\+M[\s\S]+definition\('code-block',[^\n]+Ctrl\+Shift\+K[\s\S]+definition\('math-block',[^\n]+Ctrl\+Shift\+M[\s\S]+definition\('link',[^\n]+Ctrl\+Shift\+L/, 'code, math, and link defaults should preserve the requested keys');
+assert.match(app, /function\s+captureShortcutAssignment[\s\S]+conflict[\s\S]+割り当てられています/, 'shortcut capture should reject duplicate assignments');
+assert.match(app, /function\s+normalizeShortcutAssignments[\s\S]+used\.has[\s\S]+shortcut = ''/, 'imported duplicate shortcuts should fail closed');
+assert.match(app, /version:\s*2[\s\S]+allowedLinkDomains[\s\S]+shortcuts:/, 'exported settings should include shortcut assignments');
 assert.match(app, /function\s+runKeyboardActionShortcut[\s\S]+case 'math-block':[\s\S]+insertMathBlock\(\)/, 'keyboard commands should dispatch display-math insertion');
 assert.match(app, /function\s+insertMathBlock[\s\S]+\$\$\\n\$\{selected \|\| 'x = y'\}\\n\$\$/, 'display-math insertion should create a standalone Markdown block');
 assert.match(app, /function\s+handleProseMirrorRichChange/, 'ProseMirror rich edits should update Markdown source through one change path');
@@ -156,7 +162,7 @@ assert.match(app, /dataset\.folderAccess = state\.desktopDocumentReady[\s\S]+sta
 assert.match(app, /function\s+restorePersistedDirectoryHandle/, 'File System Access directory handles should be restorable after reopening');
 assert.match(app, /window\.indexedDB\.open\(FSA_DB_NAME,\s*1\)/, 'persisted File System Access handles should use local IndexedDB only');
 assert.match(app, /persistDirectoryHandle\(directoryHandle\)/, 'opened File System Access directory handle should be persisted for reopen');
-assert.match(app, /function\s+parseAllowedDomainsSettings/, 'settings file import should parse allowedLinkDomains explicitly');
+assert.match(app, /function\s+parseSettingsFile[\s\S]+allowedLinkDomains[\s\S]+shortcuts/, 'settings file import should parse allowedLinkDomains and shortcuts explicitly');
 assert.match(app, /function\s+exportSettingsFile/, 'settings file export should be available without network access');
 assert.match(app, /allowedLinkDomains:\s*normalizeDomainList\(state\.allowedLinkDomains\)/, 'settings export should write normalized link allowlist domains');
 assert.match(app, /CONFIG_SETTINGS_FILE_NAME\s*=\s*'portable-markdown-editor-settings\.json'/, 'settings folder should use a stable local config filename');
@@ -423,6 +429,7 @@ vm.runInContext(markdownRendererModule, context);
 vm.runInContext(richEditorModule, context);
 vm.runInContext(richInputControllerModule, context);
 vm.runInContext(fileManagerModule, context);
+vm.runInContext(shortcutManagerModule, context);
 const renderer = vm.runInContext(instrumented, context);
 
 renderer.state.dirty = false;

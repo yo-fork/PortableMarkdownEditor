@@ -1898,6 +1898,80 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.58); backdrop-filter: blur(4px
   gap: 0.45rem;
 }
 
+.shortcut-dialog-card {
+  width: min(44rem, calc(100vw - 2rem));
+  max-height: min(48rem, calc(100vh - 2rem));
+  overflow: hidden;
+}
+
+.shortcut-message {
+  min-height: 1.5em;
+  margin: 0.5rem 0;
+  color: var(--muted);
+}
+
+.shortcut-message.is-error { color: var(--danger); }
+
+.shortcut-list {
+  max-height: min(30rem, calc(100vh - 16rem));
+  overflow: auto;
+  padding: 0 0.25rem 0.5rem 0;
+}
+
+.shortcut-list h3 {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0.75rem 0 0.25rem;
+  padding: 0.45rem 0.5rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
+.shortcut-row {
+  display: grid;
+  grid-template-columns: minmax(10rem, 1fr) minmax(9rem, 11rem) auto;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.3rem 0.5rem;
+}
+
+.shortcut-label {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.shortcut-label small {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.shortcut-capture {
+  min-width: 9rem;
+  font-family: var(--mono);
+  font-weight: 650;
+}
+
+.shortcut-capture:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.shortcut-capture.is-unassigned {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.shortcut-clear { padding-inline: 0.65rem; }
+
+@media (max-width: 640px) {
+  .shortcut-row { grid-template-columns: 1fr auto; }
+  .shortcut-label { grid-column: 1 / -1; }
+  .shortcut-capture { min-width: 0; }
+}
+
 .dialog-field {
   display: grid;
   gap: 0.35rem;

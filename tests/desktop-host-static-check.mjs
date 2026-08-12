@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-const app = `${read('../app.js')}\n${read('../modules/markdown-renderer.js')}\n${read('../modules/rich-editor.js')}\n${read('../modules/rich-input-controller.js')}\n${read('../modules/file-manager.js')}`;
+const app = `${read('../app.js')}\n${read('../modules/markdown-renderer.js')}\n${read('../modules/rich-editor.js')}\n${read('../modules/rich-input-controller.js')}\n${read('../modules/file-manager.js')}\n${read('../modules/shortcut-manager.js')}`;
 const index = read('../index.html');
 const styles = read('../styles.css');
 const project = read('../native/PortableMarkdownEditor.Desktop.csproj');
@@ -40,6 +40,8 @@ assert.match(project, /Microsoft\.Web\.WebView2\.Wpf/);
 assert.match(windowXaml, /xmlns:wv2=/);
 assert.match(windowXaml, /Icon="Assets\/AppIcon\.ico"/);
 assert.match(windowXaml, /名前を付けて保存/);
+assert.match(windowXaml, /NewMenuItem[^\n]+Ctrl\+N/);
+assert.match(windowXaml, /SaveAsMenuItem[^\n]+Ctrl\+Shift\+S/);
 assert.match(windowXaml, /新規ウィンドウ[^\n]+Ctrl\+N[^\n]+New_Click/);
 assert.match(windowXaml, /NewButton[^\n]+新規ウィンドウ/);
 assert.match(windowXaml, /新しいウィンドウで開く[^\n]+Ctrl\+Shift\+O[^\n]+OpenInNewWindow_Click/);
@@ -58,10 +60,15 @@ assert.match(windowCode, /if \(!IsAppSource\(eventArgs\.Source\)\)/);
 assert.match(windowCode, /Core_NavigationStarting[\s\S]+eventArgs\.Cancel = true/);
 assert.match(windowCode, /Core_PermissionRequested[\s\S]+CoreWebView2PermissionState\.Deny/);
 assert.match(windowCode, /PostWebMessageAsJson/);
-assert.match(windowCode, /Shortcuts_Click[\s\S]+Ctrl\+1〜6[\s\S]+Ctrl\+K: インラインコード[\s\S]+Ctrl\+Shift\+M: 数式ブロック[\s\S]+Ctrl\+Shift\+L: リンク[\s\S]+Ctrl\+Alt\+O: アウトライン表示切り替え/);
+assert.match(windowCode, /Shortcuts_Click[\s\S]+host\.showShortcutSettings/);
 assert.match(windowCode, /NewDocumentArgument = "--new-document"/);
-assert.match(windowCode, /MainWindow_PreviewKeyDown[\s\S]+Key\.N[\s\S]+OpenNewDocumentWindow/);
-assert.match(windowCode, /MainWindow_PreviewKeyDown[\s\S]+ModifierKeys\.Control \| ModifierKeys\.Shift[\s\S]+Key\.O[\s\S]+OpenDocumentInNewWindow/);
+assert.match(windowCode, /MainWindow_PreviewKeyDown[\s\S]+ShortcutCommandForKeyEvent[\s\S]+case "new-window":[\s\S]+OpenNewDocumentWindow/);
+assert.match(windowCode, /MainWindow_PreviewKeyDown[\s\S]+case "open-new-window":[\s\S]+OpenDocumentInNewWindow/);
+assert.match(windowCode, /desktop\.shortcutsChanged[\s\S]+ApplyShortcutSettings/);
+assert.match(windowCode, /desktop\.shortcutCaptureState[\s\S]+_shortcutCaptureActive = GetBoolean\(message, "active"\)/);
+assert.match(windowCode, /MainWindow_PreviewKeyDown[\s\S]+if \(_shortcutCaptureActive\) return;/);
+assert.match(windowCode, /ApplyShortcutSettings[\s\S]+NormalizeShortcut[\s\S]+RebuildNativeShortcutLookup[\s\S]+UpdateShortcutMenuLabels/);
+assert.match(windowCode, /ShortcutFromKeyEvent[\s\S]+ModifierKeys\.Control[\s\S]+ModifierKeys\.Shift[\s\S]+ModifierKeys\.Alt/);
 assert.match(windowCode, /HandleEditorReadyAsync[\s\S]+_startWithNewDocument[\s\S]+LoadNewDocument/);
 assert.match(windowCode, /ExecuteEditorCommandAsync[\s\S]+case "new":[\s\S]+OpenNewDocumentWindow/);
 assert.match(windowCode, /OpenDocumentInNewWindow[\s\S]+File\.Exists\(fullPath\)[\s\S]+StartNewEditorProcess\(QuoteCommandLineArgument\(fullPath\)\)/);
@@ -103,6 +110,7 @@ assert.match(buildScript, /publishedNoticesPath[\s\S]+Copy-Item[^\n]+THIRD-PARTY
 assert.doesNotMatch(buildScript, /\b(?:npm|npx|pnpm|yarn|pip|uv|nuget|dotnet)\s+(?:install|add|restore|sync)\b/i);
 assert.match(releaseCheck, /publishedLicensePath[\s\S]+Published legal file differs from its source/);
 assert.match(releaseCheck, /publishedNoticesPath[\s\S]+Published legal file differs from its source/);
+assert.match(releaseCheck, /PortableMarkdownEditor\/app\/modules\/shortcut-manager\.js/);
 
 assert.match(notice, /Microsoft\.Web\.WebView2 1\.0\.2903\.40/);
 assert.match(notice, /Redistribution and use in source and binary forms/);
