@@ -32,10 +32,13 @@ assert.doesNotMatch(app, /readAsDataURL/);
 assert.doesNotMatch(project, /PackageReference|packages\.config|RestorePackages/);
 assert.match(project, /<TargetFrameworkVersion>v4\.8<\/TargetFrameworkVersion>/);
 assert.match(project, /<PlatformTarget>x64<\/PlatformTarget>/);
+assert.match(project, /<ApplicationIcon>Assets\\AppIcon\.ico<\/ApplicationIcon>/);
+assert.match(project, /<Resource Include="Assets\\AppIcon\.ico" \/>/);
 assert.match(project, /Microsoft\.Web\.WebView2\.Core/);
 assert.match(project, /Microsoft\.Web\.WebView2\.Wpf/);
 
 assert.match(windowXaml, /xmlns:wv2=/);
+assert.match(windowXaml, /Icon="Assets\/AppIcon\.ico"/);
 assert.match(windowXaml, /名前を付けて保存/);
 assert.match(windowXaml, /新しいウィンドウで開く[^\n]+Ctrl\+Shift\+O[^\n]+OpenInNewWindow_Click/);
 assert.match(windowXaml, /OpenInNewWindowButton[^\n]+別窓で開く/);

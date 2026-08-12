@@ -7,6 +7,7 @@ call :run node --check modules\markdown-renderer.js || goto :failed
 call :run node --check modules\rich-editor.js || goto :failed
 call :run node --check modules\rich-input-controller.js || goto :failed
 call :run node --check modules\file-manager.js || goto :failed
+call :run node tests\icon-assets-check.mjs || goto :failed
 call :run node tests\lint-security.mjs || goto :failed
 call :run node tests\security-smoke.mjs || goto :failed
 call :run node tests\desktop-host-static-check.mjs || goto :failed

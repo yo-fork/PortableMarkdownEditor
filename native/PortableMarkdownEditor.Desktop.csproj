@@ -8,6 +8,7 @@
     <OutputType>WinExe</OutputType>
     <RootNamespace>PortableMarkdownEditor.Desktop</RootNamespace>
     <AssemblyName>PortableMarkdownEditor</AssemblyName>
+    <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
@@ -77,6 +78,8 @@
     </Compile>
     <Compile Include="PortableFileService.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <Resource Include="Assets\AppIcon.ico" />
+    <None Include="Assets\AppIcon.png" />
     <None Include="App.config" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
