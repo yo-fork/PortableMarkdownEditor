@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
-    [switch]$SkipZip,
-    [switch]$Publish
+    [switch]$SkipZip
 )
 
 Set-StrictMode -Version Latest
@@ -19,16 +18,8 @@ $nativeChecksIntermediateOutput = Join-Path $buildRoot 'checks-obj'
 $distParent = Join-Path $repoRoot 'dist'
 $distRoot = Join-Path $distParent 'PortableMarkdownEditor'
 $zipPath = Join-Path $distParent 'PortableMarkdownEditor-win-x64.zip'
-$releaseRoot = Join-Path $repoRoot 'release'
-$publishedZipPath = Join-Path $releaseRoot 'PortableMarkdownEditor-win-x64.zip'
-$checksumPath = Join-Path $releaseRoot 'SHA256SUMS.txt'
-$publishedLicensePath = Join-Path $releaseRoot 'LICENSE'
-$publishedNoticesPath = Join-Path $releaseRoot 'THIRD-PARTY-NOTICES.txt'
+$assemblyInfoPath = Join-Path $repoRoot 'native\Properties\AssemblyInfo.cs'
 $requiredWebView2Version = '1.0.2903.40'
-
-if ($Publish -and $SkipZip) {
-    throw '-Publish and -SkipZip cannot be used together.'
-}
 
 function Assert-GeneratedPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -40,24 +31,6 @@ function Assert-GeneratedPath {
     }
 
     return $resolved
-}
-
-function Get-Sha256Hex {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    $stream = [IO.File]::OpenRead($Path)
-    try {
-        $sha256 = [Security.Cryptography.SHA256]::Create()
-        try {
-            return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
-        }
-        finally {
-            $sha256.Dispose()
-        }
-    }
-    finally {
-        $stream.Dispose()
-    }
 }
 
 function Find-WebView2Toolchain {
@@ -107,12 +80,6 @@ function Find-WebView2Toolchain {
 $buildRoot = Assert-GeneratedPath $buildRoot
 $distRoot = Assert-GeneratedPath $distRoot
 $zipPath = Assert-GeneratedPath $zipPath
-$releaseRoot = Assert-GeneratedPath $releaseRoot
-$publishedZipPath = Assert-GeneratedPath $publishedZipPath
-$checksumPath = Assert-GeneratedPath $checksumPath
-$publishedLicensePath = Assert-GeneratedPath $publishedLicensePath
-$publishedNoticesPath = Assert-GeneratedPath $publishedNoticesPath
-
 $toolchain = Find-WebView2Toolchain
 Write-Host "WebView2 SDK: $($toolchain.Version)"
 Write-Host "MSBuild: $($toolchain.MsBuild)"
@@ -220,8 +187,32 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $
 Copy-Item -LiteralPath (Join-Path $repoRoot 'native\README-WINDOWS.txt') -Destination (Join-Path $distRoot 'README.txt')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'native\THIRD-PARTY-NOTICES.txt') -Destination (Join-Path $distRoot 'THIRD-PARTY-NOTICES.txt')
 
+$assemblyInfo = [IO.File]::ReadAllText($assemblyInfoPath)
+$versionMatch = [regex]::Match($assemblyInfo, 'AssemblyInformationalVersion\("([0-9]+\.[0-9]+\.[0-9]+)"\)')
+if (!$versionMatch.Success) {
+    throw 'AssemblyInformationalVersion was not found in native\Properties\AssemblyInfo.cs.'
+}
+$applicationVersion = $versionMatch.Groups[1].Value
+
+$sourceRevisionOutput = @(& git.exe -C $repoRoot rev-parse HEAD 2>$null)
+if ($LASTEXITCODE -ne 0 -or $sourceRevisionOutput.Count -ne 1) {
+    throw 'The source Git revision could not be determined.'
+}
+$sourceRevision = $sourceRevisionOutput[0].Trim().ToLowerInvariant()
+if ($sourceRevision -notmatch '^[0-9a-f]{40}$') {
+    throw "The source Git revision is invalid: $sourceRevision"
+}
+$sourceStatus = @(& git.exe -C $repoRoot status --porcelain=v1 --untracked-files=normal 2>$null)
+if ($LASTEXITCODE -ne 0) {
+    throw 'The source Git tree status could not be determined.'
+}
+$sourceTreeState = if ($sourceStatus.Count -eq 0) { 'clean' } else { 'modified' }
+
 $buildInfo = @(
     'Portable Markdown Editor Windows portable build',
+    "Application version: $applicationVersion",
+    "Source revision: $sourceRevision",
+    "Source tree: $sourceTreeState",
     "WebView2 SDK: $($toolchain.Version)",
     'Target: .NET Framework 4.8 / Windows x64',
     "Built: $([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss zzz'))"
@@ -235,24 +226,8 @@ if (!$SkipZip) {
     Compress-Archive -LiteralPath $distRoot -DestinationPath $zipPath -CompressionLevel Optimal
 }
 
-if ($Publish) {
-    New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
-    Copy-Item -LiteralPath $zipPath -Destination $publishedZipPath -Force
-    $publishedHash = Get-Sha256Hex $publishedZipPath
-    $checksumLine = "$publishedHash  $([IO.Path]::GetFileName($publishedZipPath))`n"
-    [IO.File]::WriteAllText($checksumPath, $checksumLine, [Text.Encoding]::ASCII)
-    Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination $publishedLicensePath -Force
-    Copy-Item -LiteralPath (Join-Path $repoRoot 'native\THIRD-PARTY-NOTICES.txt') -Destination $publishedNoticesPath -Force
-}
-
 Write-Host ''
 Write-Host "Portable folder: $distRoot"
 if (!$SkipZip) {
     Write-Host "ZIP: $zipPath"
-}
-if ($Publish) {
-    Write-Host "Published ZIP: $publishedZipPath"
-    Write-Host "SHA-256: $checksumPath"
-    Write-Host "License: $publishedLicensePath"
-    Write-Host "Third-party notices: $publishedNoticesPath"
 }

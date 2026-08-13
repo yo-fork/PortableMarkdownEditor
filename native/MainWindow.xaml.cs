@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows;
@@ -37,11 +39,14 @@ namespace PortableMarkdownEditor.Desktop
         private string _documentPath;
         private string _webFileName = "untitled.md";
         private string _startupDocumentPath;
+        private readonly string _draftScope;
+        private readonly EventWaitHandle _draftScopeLease;
         private bool _startWithNewDocument;
         private bool _editorReady;
         private bool _dirty;
         private bool _operationInProgress;
         private bool _shortcutCaptureActive;
+        private long _documentRevision;
 
         public MainWindow()
         {
@@ -60,6 +65,15 @@ namespace PortableMarkdownEditor.Desktop
                     _startupDocumentPath = arguments[1];
                 }
             }
+
+            string preferredDraftScope = _startWithNewDocument
+                ? string.Empty
+                : !string.IsNullOrWhiteSpace(_startupDocumentPath)
+                    ? DraftScopeForDocumentPath(_startupDocumentPath)
+                    : "main";
+            EventWaitHandle draftScopeLease;
+            _draftScope = ClaimDraftScope(preferredDraftScope, out draftScopeLease);
+            _draftScopeLease = draftScopeLease;
 
             RebuildNativeShortcutLookup();
             UpdateShortcutMenuLabels();
@@ -94,6 +108,15 @@ namespace PortableMarkdownEditor.Desktop
             {
                 eventArgs.Cancel = true;
             }
+        }
+
+        protected override void OnClosed(EventArgs eventArgs)
+        {
+            if (_draftScopeLease != null)
+            {
+                _draftScopeLease.Dispose();
+            }
+            base.OnClosed(eventArgs);
         }
 
         private async void MainWindow_PreviewKeyDown(object sender, KeyEventArgs eventArgs)
@@ -214,7 +237,8 @@ namespace PortableMarkdownEditor.Desktop
                 "https://" + DocumentHost + "/*",
                 CoreWebView2WebResourceContext.Image);
             core.WebResourceRequested += Core_WebResourceRequested;
-            EditorWebView.Source = new Uri("https://" + AppHost + "/index.html?desktop=1");
+            EditorWebView.Source = new Uri(
+                "https://" + AppHost + "/index.html?desktop=1&draft=" + Uri.EscapeDataString(_draftScope));
             NativeStatusText.Text = "編集画面を読み込んでいます...";
         }
 
@@ -437,6 +461,7 @@ namespace PortableMarkdownEditor.Desktop
             _editorReady = true;
             _shortcutCaptureActive = false;
             _dirty = GetBoolean(message, "dirty");
+            _documentRevision = GetDocumentRevision(message);
             _webFileName = SafeDisplayFileName(GetString(message, "fileName"));
             ApplyShortcutSettings(message);
             ApplyThemeMessage(message);
@@ -515,6 +540,7 @@ namespace PortableMarkdownEditor.Desktop
         private void HandleDocumentState(Dictionary<string, object> message)
         {
             _dirty = GetBoolean(message, "dirty");
+            _documentRevision = GetDocumentRevision(message);
             _webFileName = SafeDisplayFileName(GetString(message, "fileName"));
             UpdateWindowState();
         }
@@ -536,7 +562,10 @@ namespace PortableMarkdownEditor.Desktop
                 return;
             }
 
-            completion.TrySetResult(new DocumentSnapshot(markdown, SafeDisplayFileName(GetString(message, "fileName"))));
+            completion.TrySetResult(new DocumentSnapshot(
+                markdown,
+                SafeDisplayFileName(GetString(message, "fileName")),
+                GetDocumentRevision(message)));
         }
 
         private void HandleAssetSave(Dictionary<string, object> message)
@@ -939,17 +968,20 @@ namespace PortableMarkdownEditor.Desktop
             await Task.Run(() => PortableFileService.WriteDocument(fullPath, snapshot.Markdown));
             _documentPath = fullPath;
             _webFileName = Path.GetFileName(fullPath);
-            _dirty = false;
+            _dirty = snapshot.Revision != _documentRevision;
             bool mapped = HasUsableDocumentDirectory(fullPath);
             SendHostMessage(new Dictionary<string, object>
             {
                 { "type", "host.documentSaved" },
                 { "fileName", _webFileName },
                 { "hasDocumentFolder", mapped },
+                { "savedRevision", snapshot.Revision },
             });
-            NativeStatusText.Text = mapped
-                ? "保存しました。"
-                : "保存しましたが、相対画像の参照先を設定できませんでした。";
+            NativeStatusText.Text = _dirty
+                ? "保存しました。保存中の変更は未保存です。"
+                : mapped
+                    ? "保存しました。"
+                    : "保存しましたが、相対画像の参照先を設定できませんでした。";
             UpdateWindowState();
         }
 
@@ -1194,6 +1226,82 @@ namespace PortableMarkdownEditor.Desktop
             return bool.TryParse(Convert.ToString(value), out parsed) && parsed;
         }
 
+        private static long GetDocumentRevision(Dictionary<string, object> message)
+        {
+            object value;
+            if (message == null || !message.TryGetValue("revision", out value) || value == null)
+            {
+                return 0;
+            }
+
+            try
+            {
+                long revision = Convert.ToInt64(value);
+                return revision >= 0 ? revision : 0;
+            }
+            catch (Exception exception) when (
+                exception is FormatException
+                || exception is InvalidCastException
+                || exception is OverflowException)
+            {
+                return 0;
+            }
+        }
+
+        private static string DraftScopeForDocumentPath(string path)
+        {
+            string normalized;
+            try
+            {
+                normalized = Path.GetFullPath(path ?? string.Empty).ToUpperInvariant();
+            }
+            catch (Exception)
+            {
+                normalized = path ?? string.Empty;
+            }
+
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                byte[] digest = sha256.ComputeHash(Encoding.UTF8.GetBytes(normalized));
+                StringBuilder value = new StringBuilder("file-", 29);
+                for (int index = 0; index < 12; index += 1)
+                {
+                    value.Append(digest[index].ToString("x2"));
+                }
+                return value.ToString();
+            }
+        }
+
+        private static string ClaimDraftScope(string preferredScope, out EventWaitHandle lease)
+        {
+            lease = null;
+            if (string.IsNullOrWhiteSpace(preferredScope))
+            {
+                return "window-" + Guid.NewGuid().ToString("N");
+            }
+
+            try
+            {
+                bool createdNew;
+                EventWaitHandle candidate = new EventWaitHandle(
+                    false,
+                    EventResetMode.ManualReset,
+                    @"Local\PortableMarkdownEditor.Draft." + preferredScope,
+                    out createdNew);
+                if (createdNew)
+                {
+                    lease = candidate;
+                    return preferredScope;
+                }
+                candidate.Dispose();
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+
+            return "window-" + Guid.NewGuid().ToString("N");
+        }
+
         private static string[] GetStringArray(
             Dictionary<string, object> message,
             string key,
@@ -1277,15 +1385,18 @@ namespace PortableMarkdownEditor.Desktop
 
         private sealed class DocumentSnapshot
         {
-            internal DocumentSnapshot(string markdown, string fileName)
+            internal DocumentSnapshot(string markdown, string fileName, long revision)
             {
                 Markdown = markdown;
                 FileName = fileName;
+                Revision = revision;
             }
 
             internal string Markdown { get; private set; }
 
             internal string FileName { get; private set; }
+
+            internal long Revision { get; private set; }
         }
     }
 }

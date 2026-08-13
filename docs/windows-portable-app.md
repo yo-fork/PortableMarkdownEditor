@@ -35,7 +35,7 @@ WebView2編集画面は、ProseMirror、CodeMirror、Markdownプレビュー、M
 |新規ウィンドウ|WPF|内部起動引数を同じ実行ファイルへ渡し、空文書を別プロセスで開きます。|
 |Markdown読込|WPF|UTF-8、10MB以下、許可拡張子を検証します。|
 |新しいウィンドウで開く|WPF|選択した文書パスを同じ実行ファイルへ渡し、別プロセスで開きます。|
-|保存と別名保存|WPF|BOMなしUTF-8で保存します。|
+|保存と別名保存|WPFとWebView2|保存開始時の本文とリビジョンを固定し、完了までに編集が進んだ場合は未保存状態を維持します。WPFはBOMなしUTF-8で保存します。|
 |ショートカット設定|WebView2とWPF|WebView2が設定を保存し、WPFがファイル操作の割り当てとメニュー表示を同期します。|
 |本文フォント設定|WebView2|ゴシックまたは明朝をローカル設定へ保存し、リッチ、プレビュー、集中モードへ共通適用します。|
 |表示テーマ|WebView2とWPF|WebView2が保存したライトまたはダーク設定をWPFへ通知し、編集画面、メニュー、ツールバー、ステータスバー、タイトルバーへ共通適用します。|
@@ -44,7 +44,7 @@ WebView2編集画面は、ProseMirror、CodeMirror、Markdownプレビュー、M
 |画像保存|WPF|画像署名、MIME、25MB上限、保存名を検証します。|
 |相対画像表示|WPFとWebView2|WPFが画像要求ごとに文書フォルダ内の実体を検証して返します。|
 |編集と描画|WebView2|既存のローカルWeb資産をそのまま使います。|
-|下書き復元|WebView2|ポータブルデータフォルダ内のlocalStorageを使います。|
+|下書き復元|WPFとWebView2|WPFが競合しないウィンドウスコープを割り当て、WebView2がポータブルデータフォルダ内のlocalStorageへ保存します。|
 |印刷|WPF|WebView2の内容をWindowsのシステム印刷画面へ渡します。|
 
 ## ブリッジ
@@ -52,8 +52,8 @@ WebView2編集画面は、ProseMirror、CodeMirror、Markdownプレビュー、M
 WebViewからネイティブ側へ送れる主なメッセージは次のとおりです。
 
 * `desktop.ready` は、編集画面の初期化完了を通知します。
-* `desktop.documentState` は、未保存状態と表示用ファイル名を通知します。
-* `desktop.documentSnapshot` は、ネイティブ側が要求した現在のMarkdownを返します。
+* `desktop.documentState` は、未保存状態、表示用ファイル名、文書リビジョンを通知します。
+* `desktop.documentSnapshot` は、ネイティブ側が要求した現在のMarkdownと文書リビジョンを返します。
 * `desktop.command` は、新規、開く、保存、別名保存、印刷のいずれかを要求します。
 * `desktop.shortcutsChanged` は、検証済みのショートカット設定をネイティブ側へ通知します。
 * `desktop.shortcutCaptureState` は、設定画面でキー入力を取得している間だけWPFのショートカット処理を停止します。
@@ -71,6 +71,10 @@ WebViewからネイティブ側へ送れる主なメッセージは次のとお�
 ホストオブジェクトは無効化しているため、JavaScriptから任意の.NETメソッドを呼べません。
 
 ネイティブ側は、現在の文書パス、フォルダ列挙結果、汎用ファイル読込関数をWebViewへ公開しません。
+
+各プロセスは下書きスコープを取得し、同じスコープを使用中の別プロセスがある場合は一意なウィンドウスコープへ切り替えます。
+
+これにより、複数ウィンドウのlocalStorage下書きが同じキーを共有しません。
 
 既存Markdownに絶対画像パスが含まれる場合は、最大64件をネイティブ側で検査します。
 
@@ -132,6 +136,10 @@ WebView2とWPFの両側で割り当て形式と重複を検証し、不正な設
 
 利用者は、リポジトリの `release/PortableMarkdownEditor-win-x64.zip` を展開し、`PortableMarkdownEditor.exe` を起動します。
 
+`release/PortableMarkdownEditor/` はローカル確認用の展開先であり、配布ZIPとの同期は保証しません。
+
+動作確認では、配布ZIPを新しいフォルダへ展開します。
+
 配布先にVisual Studio、Visual Studio Installer、MSBuildは不要です。
 
 `BuildPortableWindows.cmd` は、導入済みのVisual Studio Build ToolsとWebView2 SDKを探索します。
@@ -144,7 +152,13 @@ WebView2とWPFの両側で割り当て形式と重複を検証し、不正な設
 
 配布物はフォルダまたはZIPのままコピーして実行できます。
 
-`BuildPortableWindows.cmd -Publish` は、完成済みZIPを `release/` へコピーし、`SHA256SUMS.txt` を更新します。
+`BuildPortableWindows.cmd` は `dist/` にポータブルフォルダとZIPを生成しますが、`release/` は更新しません。
+
+公開前は `RunReleaseChecks.cmd -Publish` を使い、再ビルド、生成ZIPとソースの照合、全自動検査、配布ZIPとハッシュの更新、公開物の再検査を一続きで実行します。
+
+配布物の更新は、先行する検査がすべて成功した後だけ実行します。
+
+ZIP内の `BUILD-INFO.txt` には、アプリケーション版数、Gitリビジョン、ビルド時の作業ツリー状態を記録します。
 
 WebView2 Evergreen Runtimeと.NET Framework 4.8はOS側の実行条件であり、配布フォルダには含めません。
 

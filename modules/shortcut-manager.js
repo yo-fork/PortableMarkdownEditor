@@ -157,7 +157,7 @@
       if (els.shortcutDialog.open) return;
       pendingAssignments = { ...normalizeShortcutAssignments(state.shortcuts) };
       renderShortcutRows(pendingAssignments);
-      setShortcutDialogMessage('割り当て欄を選び、Ctrlを含むキーを押してください。BackspaceまたはDeleteで解除できます。', false);
+      setShortcutDialogMessage('', false);
       notifyDesktopShortcutCaptureState?.(true);
       if (typeof els.shortcutDialog.showModal === 'function') els.shortcutDialog.showModal();
       else els.shortcutDialog.setAttribute('open', '');

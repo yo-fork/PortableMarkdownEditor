@@ -1,8 +1,10 @@
 (() => {
   'use strict';
 
-  const STORAGE_KEY = 'portable-markdown-editer:draft:v1';
-  const SETTINGS_KEY = 'portable-markdown-editer:settings:v1';
+  const DRAFT_STORAGE_PREFIX = 'portable-markdown-editor:draft:v2';
+  const LEGACY_STORAGE_KEY = 'portable-markdown-editer:draft:v1';
+  const SETTINGS_KEY = 'portable-markdown-editor:settings:v2';
+  const LEGACY_SETTINGS_KEY = 'portable-markdown-editer:settings:v1';
   const FSA_DB_NAME = 'portable-markdown-editor:fsa:v1';
   const FSA_STORE_NAME = 'handles';
   const FSA_DIRECTORY_HANDLE_KEY = 'last-directory';
@@ -29,6 +31,11 @@
   const DEFAULT_MERMAID_ZOOM = 0.7;
   const MERMAID_ZOOM_FACTOR = 1.1;
   const MERMAID_WHEEL_ZOOM_SENSITIVITY = 0.0012;
+  const DESKTOP_DRAFT_SCOPE = desktopDraftScope(window.location);
+  const STORAGE_KEY = DESKTOP_DRAFT_SCOPE
+    ? `${DRAFT_STORAGE_PREFIX}:${DESKTOP_DRAFT_SCOPE}`
+    : DRAFT_STORAGE_PREFIX;
+  const SHOULD_MIGRATE_LEGACY_DRAFT = !DESKTOP_DRAFT_SCOPE || DESKTOP_DRAFT_SCOPE === 'main';
 
   const DEFAULT_MARKDOWN = `# Portable Markdown Editor
 
@@ -100,6 +107,7 @@ flowchart TD
     fileName: 'untitled.md',
     mode: 'rich',
     dirty: false,
+    documentRevision: 0,
     theme: 'light',
     outlineCollapsed: false,
     lastAutoSaved: null,
@@ -126,6 +134,7 @@ flowchart TD
     desktopImageReferenceRequestId: '',
     desktopLastReportedDirty: null,
     desktopLastReportedFileName: '',
+    desktopLastReportedRevision: -1,
     scrollSyncLock: false,
     mermaidPan: null,
     allowedLinkDomains: [],
@@ -421,6 +430,7 @@ flowchart TD
     constants: {
       ALLOWED_IMAGE_TYPES,
       CONFIG_SETTINGS_FILE_NAME,
+      DRAFT_STORAGE_PREFIX,
       DEFAULT_MARKDOWN,
       DESKTOP_ASSET_REQUEST_TIMEOUT_MS,
       FSA_DB_NAME,
@@ -428,6 +438,8 @@ flowchart TD
       FSA_PICKER_START_HANDLE_KEY,
       FSA_SETTINGS_DIRECTORY_HANDLE_KEY,
       FSA_STORE_NAME,
+      LEGACY_SETTINGS_KEY,
+      LEGACY_STORAGE_KEY,
       MAX_ASSET_IMAGE_BYTES,
       MAX_FOLDER_SCAN_DEPTH,
       MAX_FOLDER_SCAN_FILES,
@@ -437,6 +449,7 @@ flowchart TD
     },
     dependencies: {
       applyMode,
+      advanceDocumentRevision,
       applyDocumentFont,
       applyOutlineVisibility,
       applyTheme,
@@ -712,6 +725,22 @@ flowchart TD
     );
   }
 
+  function desktopDraftScope(currentLocation) {
+    if (
+      currentLocation?.protocol !== 'https:'
+      || currentLocation?.hostname !== DESKTOP_APP_HOST
+      || !/(?:^|[?&])desktop=1(?:&|$)/.test(currentLocation.search || '')
+    ) return '';
+    const match = String(currentLocation.search || '').match(/(?:^|[?&])draft=([^&]+)/);
+    if (!match) return 'main';
+    try {
+      const scope = decodeURIComponent(match[1]);
+      return /^[A-Za-z0-9_-]{1,100}$/.test(scope) ? scope : 'main';
+    } catch (_) {
+      return 'main';
+    }
+  }
+
   function desktopImageAliasKey(value) {
     return decodeLocalImagePath(String(value || '').trim()).replace(/\//g, '\\').toLowerCase();
   }
@@ -752,7 +781,7 @@ flowchart TD
   }
 
   function restoreSettings() {
-    const settings = readJson(SETTINGS_KEY);
+    const settings = readJsonWithMigration(SETTINGS_KEY, LEGACY_SETTINGS_KEY);
     state.theme = settings?.theme || defaultTheme();
     state.mode = settings?.mode || 'rich';
     state.outlineCollapsed = Boolean(settings?.outlineCollapsed);
@@ -767,13 +796,16 @@ flowchart TD
   }
 
   function restoreDraft() {
-    const draft = readJson(STORAGE_KEY);
+    const draft = SHOULD_MIGRATE_LEGACY_DRAFT
+      ? readJsonWithMigration(STORAGE_KEY, LEGACY_STORAGE_KEY)
+      : readJson(STORAGE_KEY);
     if (!draft || typeof draft.markdown !== 'string') return;
     state.markdown = stripRichCaretTokens(draft.markdown);
     state.fileName = safeFileName(draft.fileName || 'untitled.md');
     state.markdownRelativePath = normalizeAssetPath(draft.markdownRelativePath || '');
     state.lastAutoSaved = draft.savedAt || null;
     state.dirty = draft.dirty !== false;
+    advanceDocumentRevision();
   }
 
   function readJson(key) {
@@ -783,6 +815,19 @@ flowchart TD
     } catch (_) {
       return null;
     }
+  }
+
+  function readJsonWithMigration(key, legacyKey) {
+    const current = readJson(key);
+    if (current !== null) return current;
+    const legacy = readJson(legacyKey);
+    if (legacy === null) return null;
+    if (writeJson(key, legacy)) {
+      try {
+        localStorage.removeItem(legacyKey);
+      } catch (_) {}
+    }
+    return legacy;
   }
 
   function writeJson(key, value) {
@@ -1937,6 +1982,7 @@ flowchart TD
     if (!confirmDocumentReplacement('新規文書')) return;
     clearAssetUrls();
     state.markdown = '# 無題\n\nここにMarkdownを書いてください。\n';
+    advanceDocumentRevision();
     state.fileName = 'untitled.md';
     state.directoryHandle = null;
     state.directoryName = '';
@@ -3286,9 +3332,18 @@ flowchart TD
   }
 
   function markDirty() {
+    advanceDocumentRevision();
     state.dirty = true;
     updateStatusBar();
     notifyDesktopDocumentState();
+  }
+
+  function advanceDocumentRevision() {
+    state.documentRevision = Number.isSafeInteger(state.documentRevision)
+      && state.documentRevision < Number.MAX_SAFE_INTEGER
+      ? state.documentRevision + 1
+      : 1;
+    return state.documentRevision;
   }
 
   function scheduleRender(reason = 'edit') {

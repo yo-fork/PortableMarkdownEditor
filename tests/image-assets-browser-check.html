@@ -24,8 +24,10 @@
   </style>
   <script>
     (() => {
-      const STORAGE_KEY = 'portable-markdown-editer:draft:v1';
-      const SETTINGS_KEY = 'portable-markdown-editer:settings:v1';
+      const STORAGE_KEY = 'portable-markdown-editor:draft:v2';
+      const SETTINGS_KEY = 'portable-markdown-editor:settings:v2';
+      const LEGACY_STORAGE_KEY = 'portable-markdown-editer:draft:v1';
+      const LEGACY_SETTINGS_KEY = 'portable-markdown-editer:settings:v1';
       const DB_NAME = 'portable-markdown-editor:fsa:v1';
       const PHASE_KEY = 'pme-image-assets-browser-check:phase';
       const PHASE = sessionStorage.getItem(PHASE_KEY) || 'start';
@@ -65,6 +67,14 @@
         if (PHASE === 'start') {
           localStorage.removeItem(STORAGE_KEY);
           localStorage.removeItem(SETTINGS_KEY);
+          localStorage.removeItem(LEGACY_STORAGE_KEY);
+          localStorage.removeItem(LEGACY_SETTINGS_KEY);
+          localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify({
+            markdown: '# Legacy draft\n',
+            fileName: 'legacy.md',
+            dirty: false,
+          }));
+          localStorage.setItem(LEGACY_SETTINGS_KEY, JSON.stringify({ theme: 'light', mode: 'rich' }));
         }
         if (!navigator.storage || typeof navigator.storage.getDirectory !== 'function') {
           throw new Error('navigator.storage.getDirectory is unavailable');
@@ -298,6 +308,64 @@
         return true;
       }
 
+      async function testSaveRevisionRace() {
+        const prototype = FileSystemFileHandle.prototype;
+        const originalDescriptor = Object.getOwnPropertyDescriptor(prototype, 'createWritable');
+        assert(originalDescriptor?.value, 'FileSystemFileHandle.createWritable is unavailable');
+        const originalCreateWritable = originalDescriptor.value;
+        let intercepted = false;
+        let writeStarted = false;
+        let continueWrite;
+        const writeGate = new Promise((resolve) => { continueWrite = resolve; });
+
+        Object.defineProperty(prototype, 'createWritable', {
+          ...originalDescriptor,
+          value: async function (...args) {
+            const writable = await originalCreateWritable.apply(this, args);
+            if (intercepted || this.name !== 'sample.md') return writable;
+            intercepted = true;
+            return {
+              write: async (data) => {
+                writeStarted = true;
+                await writeGate;
+                return writable.write(data);
+              },
+              close: (...closeArgs) => writable.close(...closeArgs),
+            };
+          },
+        });
+
+        try {
+          document.querySelector('[data-action="mode"][data-mode="source"]').click();
+          await waitFor(() => document.body.dataset.mode === 'source', 'source mode did not activate');
+          const source = document.getElementById('sourceEditor');
+          source.value = `${source.value}\n\nrevision-before-save\n`;
+          source.dispatchEvent(new Event('input', { bubbles: true }));
+          document.querySelector('[data-action="save-md"]').click();
+          await waitFor(() => writeStarted, 'Markdown save did not reach the delayed write');
+
+          source.value = `${source.value}revision-during-save\n`;
+          source.dispatchEvent(new Event('input', { bubbles: true }));
+          continueWrite();
+          await waitFor(
+            () => document.getElementById('statusMessage').textContent.includes('保存中の変更は未保存です'),
+            'save completion cleared changes made during the write',
+          );
+          assert(document.getElementById('saveState').textContent.startsWith('未保存'), 'save state was cleared after a concurrent edit');
+
+          const savedHandle = await window.__PME_IMAGE_TEST_ROOT.getFileHandle('sample.md', { create: false });
+          const savedText = await (await savedHandle.getFile()).text();
+          assert(savedText.includes('revision-before-save'), 'the captured save snapshot was not written');
+          assert(!savedText.includes('revision-during-save'), 'the save wrote edits made after its snapshot');
+          const draft = JSON.parse(localStorage.getItem('portable-markdown-editor:draft:v2') || '{}');
+          assert(draft.dirty === true, 'the concurrent edit was persisted as a clean draft');
+          assert(draft.markdown?.includes('revision-during-save'), 'the concurrent edit was not retained in the draft');
+        } finally {
+          continueWrite();
+          Object.defineProperty(prototype, 'createWritable', originalDescriptor);
+        }
+      }
+
       async function testShortcutCustomization() {
         document.querySelector('[data-action="shortcut-settings"]').click();
         await waitFor(() => document.getElementById('shortcutDialog').open, 'shortcut settings dialog did not open');
@@ -314,7 +382,7 @@
         }));
         document.querySelector('[data-action="save-shortcuts"]').click();
         await waitFor(() => !document.getElementById('shortcutDialog').open, 'shortcut settings dialog did not close after apply');
-        const settings = JSON.parse(localStorage.getItem('portable-markdown-editer:settings:v1') || '{}');
+        const settings = JSON.parse(localStorage.getItem('portable-markdown-editor:settings:v2') || '{}');
         assert(settings.shortcuts?.['inline-code'] === 'Ctrl+Alt+C', 'custom shortcut was not persisted');
         const toolbarButton = document.querySelector('[data-format="code"]');
         assert(toolbarButton.getAttribute('aria-keyshortcuts') === 'Control+Alt+C', 'toolbar accessibility shortcut did not update');
@@ -327,7 +395,7 @@
         document.getElementById('documentFontSelect').value = 'serif';
         document.querySelector('[data-action="save-appearance"]').click();
         await waitFor(() => !document.getElementById('appearanceDialog').open, 'appearance settings dialog did not close after apply');
-        const settings = JSON.parse(localStorage.getItem('portable-markdown-editer:settings:v1') || '{}');
+        const settings = JSON.parse(localStorage.getItem('portable-markdown-editor:settings:v2') || '{}');
         assert(settings.documentFont === 'serif', 'document font was not persisted');
         assert(document.documentElement.dataset.documentFont === 'serif', 'document font was not applied to the document root');
         assert(getComputedStyle(document.getElementById('richEditor')).fontFamily.includes('Yu Mincho'), 'rich mode did not use the selected Mincho font');
@@ -337,6 +405,22 @@
       async function runStartPhase() {
         await window.__PME_IMAGE_TEST_READY;
         await waitFor(() => document.body.dataset.mode === 'rich', 'app did not initialize');
+        assert(localStorage.getItem('portable-markdown-editor:draft:v2'), 'legacy draft was not migrated');
+        assert(localStorage.getItem('portable-markdown-editor:settings:v2'), 'legacy settings were not migrated');
+        assert(localStorage.getItem('portable-markdown-editer:draft:v1') === null, 'legacy draft key was not removed');
+        assert(localStorage.getItem('portable-markdown-editer:settings:v1') === null, 'legacy settings key was not removed');
+
+        const sourceBeforeInvalidUtf8 = document.getElementById('sourceEditor').value;
+        const invalidUtf8 = new File([Uint8Array.of(0xc3, 0x28)], 'invalid.md', { type: 'text/markdown' });
+        const fileInput = document.getElementById('fileInput');
+        Object.defineProperty(fileInput, 'files', { configurable: true, value: [invalidUtf8] });
+        fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+        await waitFor(
+          () => document.getElementById('statusMessage').textContent.includes('UTF-8として読み込めませんでした'),
+          'malformed UTF-8 was not rejected',
+        );
+        assert(document.getElementById('sourceEditor').value === sourceBeforeInvalidUtf8, 'malformed UTF-8 replaced the current document');
+
         await testDocumentFontCustomization();
         await testShortcutCustomization();
         document.querySelector('[data-action="open-folder"]').click();
@@ -350,8 +434,9 @@
         await waitFor(() => document.getElementById('sourceEditor').value.includes('sample.assets/dropped.png'), 'dropped image was not inserted');
         await hasAsset('pasted.png');
         await hasAsset('dropped.png');
+        await testSaveRevisionRace();
         await waitFor(() => {
-          const draft = JSON.parse(localStorage.getItem('portable-markdown-editer:draft:v1') || '{}');
+          const draft = JSON.parse(localStorage.getItem('portable-markdown-editor:draft:v2') || '{}');
           return typeof draft.markdown === 'string' && draft.markdown.includes('sample.assets/dropped.png');
         }, 'draft did not persist inserted image references', 2000);
 
@@ -366,7 +451,7 @@
         assert(source.includes('sample.assets/pasted.png'), 'pasted asset reference did not survive reload');
         assert(source.includes('sample.assets/dropped.png'), 'dropped asset reference did not survive reload');
         assert(document.querySelectorAll('#preview img[src^="blob:"]').length >= 2, 'asset images did not render from restored directory map');
-        const settings = JSON.parse(localStorage.getItem('portable-markdown-editer:settings:v1') || '{}');
+        const settings = JSON.parse(localStorage.getItem('portable-markdown-editor:settings:v2') || '{}');
         assert(settings.shortcuts?.['inline-code'] === 'Ctrl+Alt+C', 'custom shortcut did not survive reload');
         assert(settings.documentFont === 'serif', 'document font did not survive reload');
         assert(document.documentElement.dataset.documentFont === 'serif', 'restored document font was not applied');

@@ -22,6 +22,10 @@ Visual Studio、Visual Studio Installer、MSBuildは、利用するWindows端末
 
 MIT Licenseと第三者ライセンス通知は、配布ZIP内に加えて [`release/LICENSE`](release/LICENSE) と [`release/THIRD-PARTY-NOTICES.txt`](release/THIRD-PARTY-NOTICES.txt) にも配置しています。
 
+`release/PortableMarkdownEditor/`はローカル確認時に生じる展開先であり、Git管理対象でも配布元でもありません。
+
+既存の展開先ではなく、検証済みの配布ZIPを新しいフォルダへ展開して起動してください。
+
 ## Windowsアプリ版の機能
 
 インストーラー、管理者権限、ユーザー登録、ログインは不要です。
@@ -62,6 +66,8 @@ Windowsアプリ版の動作条件は次のとおりです。
 
 アプリの下書きとWebView2プロファイルは、EXEと同じ場所の `data/WebView2/` に保存します。
 
+Windowsアプリ版の下書きはウィンドウごとに分離し、同時に開いた別ウィンドウが互いの下書きを上書きしないようにします。
+
 アプリを別の場所へ移す場合は、下書きを維持するなら `data/` も一緒に移してください。
 
 ### 開発者向けビルド
@@ -93,13 +99,15 @@ Windowsアプリ版の動作条件は次のとおりです。
 
 検査内容は、UTF-8の往復、BOMなし保存、画像署名とMIMEの一致、assetsファイル名の重複回避、Windows予約名の無害化です。
 
-配布用ZIPを `release/` へ更新し、SHA-256を生成する場合は次を実行します。
+`BuildPortableWindows.cmd` は `dist/` への生成だけを行い、`release/` の配布物は更新しません。
+
+配布用ZIPを検査してから `release/` へ更新し、SHA-256を生成する場合は次を実行します。
 
 ```powershell
-.\BuildPortableWindows.cmd -Publish
+.\RunReleaseChecks.cmd -Publish
 ```
 
-`-Publish`は配布ZIPとSHA-256に加え、MIT Licenseと第三者ライセンス通知も `release/` へ同期します。
+このコマンドは、ビルド、生成ZIPの照合、全自動検査が成功した後だけ、配布ZIP、SHA-256、MIT License、第三者ライセンス通知を `release/` へ同期します。
 
 ## ブラウザ版
 
@@ -120,6 +128,10 @@ Windowsアプリ版の動作条件は次のとおりです。
 フォルダ走査は最大5,000ファイル、最大8階層に制限します。
 
 上限を超えた部分は読み飛ばし、警告ダイアログとステータスに表示します。
+
+[`portable-markdown-editor-settings.json`](portable-markdown-editor-settings.json) は、外部リンク許可ドメイン、本文フォント、ショートカットを含むversion 3形式の設定例です。
+
+画面の「リンク許可」から読み込むか、設定フォルダへ配置して利用できます。
 
 必要に応じてローカルHTTPで確認する場合は、プロジェクト直下で次を実行し、`http://127.0.0.1:8773/index.html` を開きます。
 
@@ -149,7 +161,9 @@ python -m http.server 8773 --bind 127.0.0.1
 
 Windowsアプリ版ではMarkdownを10MB以下、挿入画像を1ファイル25MB以下に制限します。
 
-MarkdownファイルはUTF-8として読み込み、BOMなしUTF-8で保存します。
+Markdownファイルは厳密なUTF-8として読み込み、不正なバイト列を含むファイルは拒否します。
+
+保存形式はBOMなしUTF-8です。
 
 ## ショートカット
 
@@ -208,9 +222,19 @@ MarkdownファイルはUTF-8として読み込み、BOMなしUTF-8で保存し�
 
 依存関係の追加やパッケージマネージャーの実行は不要です。
 
-プロジェクト直下で `RunChecks.cmd` を実行すると、構文、セキュリティ、デスクトップ境界、描画、同梱ライブラリの整合性を検査します。
+プロジェクト直下で `RunChecks.cmd` を実行すると、構文、セキュリティ、デスクトップ境界、描画、同梱ライブラリ、配布ZIP、実ブラウザの整合性を検査します。
+
+実ブラウザ検査には、導入済みのMicrosoft EdgeまたはGoogle Chromeを使います。
+
+実ブラウザ検査を含む開発時検査には、WebSocket標準APIを備えたNode.js 22以降が必要です。
 
 Windows配布物の実ビルドとネイティブファイル処理検査は `BuildPortableWindows.cmd` が担当します。
+
+`RunReleaseChecks.cmd` はWindows版を再ビルドし、生成したZIPをソースと照合してから、公開済みZIPを除く全自動検査を実行します。
+
+配布ZIPも更新する場合は、`RunReleaseChecks.cmd -Publish`を実行します。
+
+`-Publish`を付けた場合も、`release/` の更新は先行する検査がすべて成功した後に限られ、更新後の配布物を再検査します。
 
 ブラウザでの確認項目は [`tests/manual-checklist.md`](tests/manual-checklist.md) に記載しています。
 

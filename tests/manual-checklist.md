@@ -41,7 +41,7 @@ Run these checks without npm, package managers, CDN, or network access.
 11. Open a folder containing Markdown plus PNG/JPEG/GIF/WebP images from the `フォルダ` button and confirm relative images render relative to the opened Markdown file. In supported browsers this should use the File System Access API folder picker and the status bar should show `FSAフォルダ`; otherwise it should fall back to folder file input.
 12. In a supported browser opened from `http://localhost` or `http://127.0.0.1`, paste an image with `Ctrl+V` and drop a PNG/JPEG/GIF/WebP file into the editor. Confirm the files are created in `MarkdownFileName.assets/` next to the Markdown file and the Markdown contains relative image references.
 13. Reopen the same folder from `フォルダ` and confirm the assets-folder images render again through the File System Access API directory mapping.
-14. Restart the browser and confirm relative images are not restored until the folder is selected again.
+14. Restart the browser while the stored folder permission remains granted and confirm relative images are restored. Then revoke or clear the stored folder permission, restart again, and confirm the images remain unavailable until the folder is selected again.
 15. Confirm `http`/`https` images remain blocked.
 16. Confirm normal external links open only after adding the domain in `リンク許可`; unlisted domains remain blocked.
 17. Open `tests/browser-selftest.html` directly and confirm every row reports `PASS`.
@@ -77,3 +77,6 @@ Run these checks without npm, package managers, CDN, or network access.
 18. Confirm the release ZIP contains `LICENSE` and `THIRD-PARTY-NOTICES.txt`, and the same legal files are present beside the ZIP under `release/`.
 19. Change a native file shortcut, confirm its Windows menu label updates, and confirm the new key works while the previous key no longer runs the command.
 20. Open `Help > Appearance`, select Mincho, and confirm rich, preview, focus, printing, and exported HTML use the selected document font.
+21. Open two Windows app windows, edit each document, reload both editing views, and confirm each window restores only its own draft.
+22. Start saving a large document, continue editing before the write finishes, and confirm the title and status remain in the unsaved state after the earlier snapshot is saved.
+23. Run `RunReleaseChecks.cmd -Publish` and confirm `release/` changes only after the generated ZIP and all automated checks pass.

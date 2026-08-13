@@ -17,6 +17,14 @@ assert.equal(defaults['math-block'], 'Ctrl+Shift+M');
 assert.equal(defaults.link, 'Ctrl+Shift+L');
 assert.equal(defaults['toggle-outline'], 'Ctrl+Alt+O');
 
+const settingsSample = JSON.parse(readFileSync(new URL('../portable-markdown-editor-settings.json', import.meta.url), 'utf8'));
+assert.equal(settingsSample.version, 3, 'the settings sample must use the current format version');
+assert.equal(settingsSample.documentFont, 'sans', 'the settings sample must include the document font');
+assert.deepEqual(Object.keys(settingsSample.shortcuts).sort(), Object.keys(defaults).sort(), 'the settings sample must list every configurable shortcut');
+for (const [command, shortcut] of Object.entries(defaults)) {
+  assert.equal(settingsSample.shortcuts[command], shortcut, `the settings sample shortcut must match the default: ${command}`);
+}
+
 assert.equal(api.canonicalShortcut('control+shift+k'), 'Ctrl+Shift+K');
 assert.equal(api.canonicalShortcut('Ctrl+Alt+F12'), 'Ctrl+Alt+F12');
 assert.equal(api.canonicalShortcut('Shift+K'), '', 'shortcuts without Ctrl must be rejected');

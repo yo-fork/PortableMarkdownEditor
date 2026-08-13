@@ -1,14 +1,32 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$ZipPath,
+    [string]$ChecksumPath,
+    [switch]$SkipChecksum,
+    [switch]$SkipPublishedLegalCopies
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$zipPath = Join-Path $repoRoot 'release\PortableMarkdownEditor-win-x64.zip'
-$checksumPath = Join-Path $repoRoot 'release\SHA256SUMS.txt'
+$resolvedZipPath = if ([string]::IsNullOrWhiteSpace($ZipPath)) {
+    Join-Path $repoRoot 'release\PortableMarkdownEditor-win-x64.zip'
+} elseif ([IO.Path]::IsPathRooted($ZipPath)) {
+    [IO.Path]::GetFullPath($ZipPath)
+} else {
+    [IO.Path]::GetFullPath((Join-Path $repoRoot $ZipPath))
+}
+$resolvedChecksumPath = if ([string]::IsNullOrWhiteSpace($ChecksumPath)) {
+    Join-Path $repoRoot 'release\SHA256SUMS.txt'
+} elseif ([IO.Path]::IsPathRooted($ChecksumPath)) {
+    [IO.Path]::GetFullPath($ChecksumPath)
+} else {
+    [IO.Path]::GetFullPath((Join-Path $repoRoot $ChecksumPath))
+}
 $publishedLicensePath = Join-Path $repoRoot 'release\LICENSE'
 $publishedNoticesPath = Join-Path $repoRoot 'release\THIRD-PARTY-NOTICES.txt'
+$assemblyInfoPath = Join-Path $repoRoot 'native\Properties\AssemblyInfo.cs'
 
 function Get-StreamSha256Hex {
     param([Parameter(Mandatory = $true)][IO.Stream]$Stream)
@@ -34,37 +52,63 @@ function Get-FileSha256Hex {
     }
 }
 
-foreach ($requiredPath in @($zipPath, $checksumPath, $publishedLicensePath, $publishedNoticesPath)) {
+$requiredPaths = @($resolvedZipPath)
+if (!$SkipChecksum) {
+    $requiredPaths += $resolvedChecksumPath
+}
+if (!$SkipPublishedLegalCopies) {
+    $requiredPaths += @($publishedLicensePath, $publishedNoticesPath)
+}
+foreach ($requiredPath in $requiredPaths) {
     if (!(Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "Release file was not found: $requiredPath"
     }
 }
 
-$releaseSourceCopies = @{
-    $publishedLicensePath = (Join-Path $repoRoot 'LICENSE')
-    $publishedNoticesPath = (Join-Path $repoRoot 'native\THIRD-PARTY-NOTICES.txt')
-}
-foreach ($publishedPath in $releaseSourceCopies.Keys) {
-    $publishedHash = Get-FileSha256Hex $publishedPath
-    $sourceHash = Get-FileSha256Hex $releaseSourceCopies[$publishedPath]
-    if ($publishedHash -ne $sourceHash) {
-        throw "Published legal file differs from its source: $publishedPath"
+if (!$SkipPublishedLegalCopies) {
+    $releaseSourceCopies = @{
+        $publishedLicensePath = (Join-Path $repoRoot 'LICENSE')
+        $publishedNoticesPath = (Join-Path $repoRoot 'native\THIRD-PARTY-NOTICES.txt')
+    }
+    foreach ($publishedPath in $releaseSourceCopies.Keys) {
+        $publishedHash = Get-FileSha256Hex $publishedPath
+        $sourceHash = Get-FileSha256Hex $releaseSourceCopies[$publishedPath]
+        if ($publishedHash -ne $sourceHash) {
+            throw "Published legal file differs from its source: $publishedPath"
+        }
     }
 }
 
-$checksumText = [IO.File]::ReadAllText($checksumPath).Trim()
-$checksumMatch = [regex]::Match($checksumText, '^([0-9a-f]{64})  PortableMarkdownEditor-win-x64\.zip$')
-if (!$checksumMatch.Success) {
-    throw 'SHA256SUMS.txt has an invalid format.'
+$assemblyInfo = [IO.File]::ReadAllText($assemblyInfoPath)
+$versionMatch = [regex]::Match($assemblyInfo, 'AssemblyInformationalVersion\("([0-9]+\.[0-9]+\.[0-9]+)"\)')
+if (!$versionMatch.Success) {
+    throw 'AssemblyInformationalVersion was not found in native\Properties\AssemblyInfo.cs.'
+}
+$expectedApplicationVersion = $versionMatch.Groups[1].Value
+$sourceRevisionOutput = @(& git.exe -C $repoRoot rev-parse HEAD 2>$null)
+if ($LASTEXITCODE -ne 0 -or $sourceRevisionOutput.Count -ne 1) {
+    throw 'The source Git revision could not be determined.'
+}
+$expectedSourceRevision = $sourceRevisionOutput[0].Trim().ToLowerInvariant()
+if ($expectedSourceRevision -notmatch '^[0-9a-f]{40}$') {
+    throw "The source Git revision is invalid: $expectedSourceRevision"
 }
 
-$actualZipHash = Get-FileSha256Hex $zipPath
-if ($actualZipHash -ne $checksumMatch.Groups[1].Value) {
-    throw "Release ZIP hash mismatch: expected $($checksumMatch.Groups[1].Value), got $actualZipHash"
+$actualZipHash = Get-FileSha256Hex $resolvedZipPath
+if (!$SkipChecksum) {
+    $checksumText = [IO.File]::ReadAllText($resolvedChecksumPath).Trim()
+    $expectedZipName = [regex]::Escape([IO.Path]::GetFileName($resolvedZipPath))
+    $checksumMatch = [regex]::Match($checksumText, "^([0-9a-f]{64})  $expectedZipName$")
+    if (!$checksumMatch.Success) {
+        throw 'SHA256SUMS.txt has an invalid format.'
+    }
+    if ($actualZipHash -ne $checksumMatch.Groups[1].Value) {
+        throw "Release ZIP hash mismatch: expected $($checksumMatch.Groups[1].Value), got $actualZipHash"
+    }
 }
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
+$archive = [IO.Compression.ZipFile]::OpenRead($resolvedZipPath)
 try {
     $entriesByName = @{}
     foreach ($entry in $archive.Entries) {
@@ -87,6 +131,7 @@ try {
         'PortableMarkdownEditor/README.txt',
         'PortableMarkdownEditor/LICENSE',
         'PortableMarkdownEditor/THIRD-PARTY-NOTICES.txt',
+        'PortableMarkdownEditor/BUILD-INFO.txt',
         'PortableMarkdownEditor/app/index.html',
         'PortableMarkdownEditor/app/app.js',
         'PortableMarkdownEditor/app/modules/file-manager.js',
@@ -106,6 +151,38 @@ try {
         throw 'The developer build command must not be included in the release ZIP.'
     }
 
+    $buildInfoStream = $entriesByName['PortableMarkdownEditor/BUILD-INFO.txt'].Open()
+    try {
+        $buildInfoReader = [IO.StreamReader]::new($buildInfoStream, [Text.Encoding]::UTF8, $true, 1024, $true)
+        try {
+            $buildInfo = $buildInfoReader.ReadToEnd()
+        }
+        finally {
+            $buildInfoReader.Dispose()
+        }
+    }
+    finally {
+        $buildInfoStream.Dispose()
+    }
+    $escapedVersion = [regex]::Escape($expectedApplicationVersion)
+    $escapedRevision = [regex]::Escape($expectedSourceRevision)
+    if ($buildInfo -notmatch "(?m)^Application version: $escapedVersion\r?$") {
+        throw "BUILD-INFO.txt does not identify application version $expectedApplicationVersion."
+    }
+    if ($buildInfo -notmatch "(?m)^Source revision: $escapedRevision\r?$") {
+        throw "BUILD-INFO.txt does not identify source revision $expectedSourceRevision."
+    }
+    if ($buildInfo -notmatch '(?m)^Source tree: (clean|modified)\r?$') {
+        throw 'BUILD-INFO.txt does not identify whether the source tree was clean or modified.'
+    }
+
+    $userDataEntries = @($archive.Entries | Where-Object {
+        $_.FullName.StartsWith('PortableMarkdownEditor/data/WebView2/', [StringComparison]::Ordinal)
+    })
+    if ($userDataEntries.Count -ne 0) {
+        throw "WebView2 user data must not be included in the release ZIP: $($userDataEntries[0].FullName)"
+    }
+
     $sourceByEntry = @{
         'PortableMarkdownEditor/app/index.html' = (Join-Path $repoRoot 'index.html')
         'PortableMarkdownEditor/app/app.js' = (Join-Path $repoRoot 'app.js')
@@ -119,7 +196,26 @@ try {
         'PortableMarkdownEditor/LICENSE' = (Join-Path $repoRoot 'LICENSE')
         'PortableMarkdownEditor/THIRD-PARTY-NOTICES.txt' = (Join-Path $repoRoot 'native\THIRD-PARTY-NOTICES.txt')
     }
+    foreach ($sourceDirectoryName in @('modules', 'vendor')) {
+        $sourceDirectory = Join-Path $repoRoot $sourceDirectoryName
+        foreach ($sourceFile in Get-ChildItem -LiteralPath $sourceDirectory -Recurse -File) {
+            $relativeSourcePath = $sourceFile.FullName.Substring($repoRoot.TrimEnd('\').Length + 1).Replace('\', '/')
+            $sourceByEntry["PortableMarkdownEditor/app/$relativeSourcePath"] = $sourceFile.FullName
+        }
+    }
+
+    $appEntries = @($archive.Entries | Where-Object {
+        ![string]::IsNullOrEmpty($_.Name) -and $_.FullName.StartsWith('PortableMarkdownEditor/app/', [StringComparison]::Ordinal)
+    })
+    foreach ($entry in $appEntries) {
+        if (!$sourceByEntry.ContainsKey($entry.FullName)) {
+            throw "Release ZIP contains an unexpected application file: $($entry.FullName)"
+        }
+    }
     foreach ($entryName in $sourceByEntry.Keys) {
+        if (!$entriesByName.ContainsKey($entryName) -or $entriesByName[$entryName].Length -eq 0) {
+            throw "Source application file is missing from the release ZIP: $entryName"
+        }
         $entryStream = $entriesByName[$entryName].Open()
         try {
             $entryHash = Get-StreamSha256Hex $entryStream

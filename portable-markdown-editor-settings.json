@@ -1,7 +1,37 @@
 {
   "app": "Portable Markdown Editor",
-  "version": 1,
+  "version": 3,
   "allowedLinkDomains": [
     "example.com"
-  ]
+  ],
+  "documentFont": "sans",
+  "shortcuts": {
+    "new-window": "Ctrl+N",
+    "open": "Ctrl+O",
+    "open-new-window": "Ctrl+Shift+O",
+    "save": "Ctrl+S",
+    "save-as": "Ctrl+Shift+S",
+    "print": "Ctrl+P",
+    "paragraph": "Ctrl+0",
+    "h1": "Ctrl+1",
+    "h2": "Ctrl+2",
+    "h3": "Ctrl+3",
+    "h4": "Ctrl+4",
+    "h5": "Ctrl+5",
+    "h6": "Ctrl+6",
+    "bold": "Ctrl+B",
+    "italic": "Ctrl+I",
+    "inline-code": "Ctrl+K",
+    "inline-math": "Ctrl+M",
+    "ordered-list": "Ctrl+Shift+7",
+    "list": "Ctrl+Shift+8",
+    "quote": "Ctrl+Shift+9",
+    "code-block": "Ctrl+Shift+K",
+    "math-block": "Ctrl+Shift+M",
+    "link": "Ctrl+Shift+L",
+    "table": "Ctrl+Alt+T",
+    "toc": "Ctrl+Alt+I",
+    "mermaid": "Ctrl+Alt+M",
+    "toggle-outline": "Ctrl+Alt+O"
+  }
 }

@@ -67,6 +67,8 @@ assert.match(index, /data-action="clear-folder-permissions"/, 'folder permission
 assert.match(index, /data-action="clear-all-local-data"/, 'all local data deletion button should exist');
 assert.match(index, /id="shortcutDialog"[\s\S]+data-action="reset-shortcuts"[\s\S]+data-action="save-shortcuts"/, 'shortcut settings should support default restoration and explicit apply');
 assert.match(index, /data-action="shortcut-settings"/, 'the shortcut settings dialog should be reachable from the topbar');
+assert.match(index, /id="shortcutDescription"[^>]*>[\s\S]*BackspaceまたはDeleteで解除できます。/, 'the shortcut instructions should explain how to clear an assignment');
+assert.doesNotMatch(shortcutManagerModule, /setShortcutDialogMessage\('割り当て欄を選び/, 'the shortcut dialog should not repeat its static instructions in the live status area');
 assert.match(index, /data-action="appearance-settings"/, 'document font settings should be reachable from the topbar');
 assert.match(index, /id="appearanceDialog"[\s\S]+id="documentFontSelect"[\s\S]+value="sans"[\s\S]+value="serif"[\s\S]+data-action="save-appearance"/, 'appearance settings should offer Gothic and Mincho document fonts');
 assert.match(index, /class="icon-button" data-action="collapse-outline"[^>]+aria-pressed="true"/, 'the outline should have a persistent topbar toggle after the sidebar is hidden');
@@ -153,11 +155,18 @@ assert.match(app, /async function\s+onImageChosen[\s\S]+insertImageFilesAsAssets
 assert.doesNotMatch(app, /readAsDataURL/, 'image picker must not embed selected images as large Data URLs');
 assert.match(app, /createWritable\(\)/, 'assets image insertion should write through File System Access API');
 assert.match(app, /async function\s+saveMarkdownToOpenedFile/, 'save should overwrite the opened Markdown file when File System Access folder permission exists');
+assert.match(app, /function\s+currentDocumentSaveSnapshot[\s\S]+revision:\s*state\.documentRevision/, 'save should capture the document revision with the Markdown snapshot');
+assert.match(app, /async function\s+saveMarkdownToOpenedFile\(snapshot\)[\s\S]+snapshot\.revision === state\.documentRevision[\s\S]+if \(savedCurrentRevision\) state\.dirty = false/, 'save completion should only clear dirty state for the revision that was written');
+assert.match(app, /function\s+downloadMarkdown\(\)[\s\S]+state\.dirty = false;[\s\S]+persistDraft\(\)/, 'download save should persist the clean draft state');
 assert.match(app, /function\s+confirmDocumentReplacement[\s\S]+state\.dirty[\s\S]+confirm\(/, 'document replacement should use one unsaved-change confirmation guard');
 assert.match(app, /function\s+restoreDraft[\s\S]+state\.dirty = draft\.dirty !== false/, 'restored and legacy drafts should retain unsaved-change protection');
 assert.match(app, /function\s+persistDraft[\s\S]+dirty:\s*state\.dirty/, 'draft persistence should record whether the document still needs an explicit save');
+assert.match(app, /DRAFT_STORAGE_PREFIX\s*=\s*'portable-markdown-editor:draft:v2'/, 'new drafts should use the corrected application key');
+assert.match(app, /function\s+readJsonWithMigration[\s\S]+localStorage\.removeItem\(legacyKey\)/, 'legacy misspelled storage keys should migrate once');
 assert.match(app, /async function\s+openSingleMarkdownFile[\s\S]+confirmDocumentReplacement\('選択したファイル'\)[\s\S]+readTextFile\(file\)/, 'opening a file should confirm before replacing unsaved content');
-assert.match(app, /async function\s+openFolderEntries[\s\S]+confirmDocumentReplacement\('選択したファイル'\)[\s\S]+new FileReader\(\)/, 'opening a file from a folder should confirm before replacing unsaved content');
+assert.match(app, /async function\s+openFolderEntries[\s\S]+confirmDocumentReplacement\('選択したファイル'\)[\s\S]+readTextFile\(chosen\.file\)/, 'opening a file from a folder should confirm before replacing unsaved content');
+assert.match(app, /function\s+readTextFile[\s\S]+new TextDecoder\('utf-8', \{ fatal: true \}\)/, 'browser Markdown reads should reject malformed UTF-8');
+assert.doesNotMatch(app, /readAsText\([^)]*,\s*['"]utf-8['"]\)/, 'browser Markdown reads should not use replacement-character decoding');
 assert.match(app, /function\s+renderBlockedImage/, 'blocked or unresolved images should show an explanatory placeholder');
 assert.match(app, /RICH_INLINE_SOURCE_SELECTOR[\s\S]+\.blocked-image/, 'unresolved image placeholders should participate in inline source editing');
 assert.match(app, /classList\?\.contains\('blocked-image'\)[\s\S]+serializeBlockedImageElement/, 'unresolved image placeholders should restore Markdown image source while editing');

@@ -13,11 +13,14 @@
       CONFIG_SETTINGS_FILE_NAME,
       DEFAULT_MARKDOWN,
       DESKTOP_ASSET_REQUEST_TIMEOUT_MS,
+      DRAFT_STORAGE_PREFIX,
       FSA_DB_NAME,
       FSA_DIRECTORY_HANDLE_KEY,
       FSA_PICKER_START_HANDLE_KEY,
       FSA_SETTINGS_DIRECTORY_HANDLE_KEY,
       FSA_STORE_NAME,
+      LEGACY_SETTINGS_KEY,
+      LEGACY_STORAGE_KEY,
       MAX_ASSET_IMAGE_BYTES,
       MAX_FOLDER_SCAN_DEPTH,
       MAX_FOLDER_SCAN_FILES,
@@ -27,6 +30,7 @@
     } = constants;
     const {
       applyMode,
+      advanceDocumentRevision,
       applyDocumentFont,
       applyOutlineVisibility,
       applyShortcutAssignments,
@@ -102,6 +106,7 @@
         type: 'desktop.ready',
         dirty: state.dirty,
         fileName: state.fileName,
+        revision: state.documentRevision,
         shortcuts: shortcutAssignmentsForExport(),
         theme: state.theme,
       });
@@ -139,13 +144,16 @@
         !force
         && state.desktopLastReportedDirty === state.dirty
         && state.desktopLastReportedFileName === state.fileName
+        && state.desktopLastReportedRevision === state.documentRevision
       ) return;
       state.desktopLastReportedDirty = state.dirty;
       state.desktopLastReportedFileName = state.fileName;
+      state.desktopLastReportedRevision = state.documentRevision;
       postDesktopMessage({
         type: 'desktop.documentState',
         dirty: state.dirty,
         fileName: state.fileName,
+        revision: state.documentRevision,
       });
     }
 
@@ -208,6 +216,7 @@
       state.fileHandle = null;
       state.desktopDocumentReady = message.hasDocumentFolder === true;
       state.markdown = stripRichCaretTokens(normalizeNewlines(String(message.markdown || '')));
+      advanceDocumentRevision();
       state.fileName = safeFileName(message.fileName || 'untitled.md');
       state.markdownRelativePath = state.desktopDocumentReady ? state.fileName : '';
       state.dirty = message.dirty === true;
@@ -227,6 +236,7 @@
         requestId,
         markdown: state.markdown,
         fileName: state.fileName,
+        revision: state.documentRevision,
       });
     }
 
@@ -234,14 +244,17 @@
       state.fileName = safeFileName(message.fileName || state.fileName || 'untitled.md');
       state.desktopDocumentReady = message.hasDocumentFolder === true;
       state.markdownRelativePath = state.desktopDocumentReady ? state.fileName : '';
-      state.dirty = false;
+      const savedRevision = Number.isSafeInteger(message.savedRevision) ? message.savedRevision : -1;
+      state.dirty = savedRevision !== state.documentRevision;
       resetDesktopImageReferenceAliases();
       renderPreview();
       state.proseMirrorRich?.refreshImages?.();
       persistDraft();
       updateStatusBar();
       notifyDesktopDocumentState(true);
-      setStatus(`${state.fileName} を保存しました`);
+      setStatus(state.dirty
+        ? `${state.fileName} を保存しました。保存中の変更は未保存です`
+        : `${state.fileName} を保存しました`);
     }
 
     function resolveDesktopAssetRequest(message) {
@@ -724,9 +737,14 @@
       return handle;
     }
 
-    async function markdownFileHandle() {
-      const directoryHandle = await markdownDirectoryHandle();
-      const fileName = basenamePath(state.markdownRelativePath) || ensureExtension(state.fileName || 'untitled.md', '.md');
+    async function markdownFileHandleForSnapshot(snapshot) {
+      let directoryHandle = snapshot.directoryHandle;
+      const parts = dirnamePath(snapshot.markdownRelativePath).split('/').filter(Boolean);
+      for (const part of parts) {
+        directoryHandle = await directoryHandle.getDirectoryHandle(part, { create: false });
+      }
+      const fileName = basenamePath(snapshot.markdownRelativePath)
+        || ensureExtension(snapshot.fileName || 'untitled.md', '.md');
       return directoryHandle.getFileHandle(fileName, { create: true });
     }
 
@@ -994,6 +1012,7 @@
         const text = await readTextFile(file);
         const previousDirectoryHandle = state.directoryHandle;
         state.markdown = normalizeNewlines(text);
+        advanceDocumentRevision();
         state.fileName = safeFileName(file.name || 'untitled.md');
         state.fileHandle = options.fileHandle || null;
         state.dirty = false;
@@ -1015,7 +1034,7 @@
         await requestDirectoryForOpenedMarkdown(file, options.fileHandle || null);
       } catch (error) {
         warnSafeError('open single markdown failed', error);
-        setStatus('ファイルの読み込みに失敗しました');
+        setStatus(fileReadFailureMessage(error));
       }
     }
 
@@ -1049,13 +1068,21 @@
       }
     }
 
-    function readTextFile(file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ''));
-        reader.onerror = () => reject(reader.error || new Error('ファイルの読み込みに失敗しました'));
-        reader.readAsText(file, 'utf-8');
-      });
+    async function readTextFile(file) {
+      const buffer = await file.arrayBuffer();
+      try {
+        return new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+      } catch (_) {
+        const error = new Error('UTF-8として読み込めませんでした');
+        error.name = 'InvalidUtf8Error';
+        throw error;
+      }
+    }
+
+    function fileReadFailureMessage(error) {
+      return error?.name === 'InvalidUtf8Error'
+        ? 'UTF-8として読み込めませんでした。ファイルの文字コードをUTF-8へ変換してください'
+        : 'ファイルの読み込みに失敗しました';
     }
 
     async function requestDirectoryForOpenedMarkdown(file, fileHandle) {
@@ -1406,10 +1433,11 @@
       }
       if (!confirmDocumentReplacement('選択したファイル')) return;
 
-      const reader = new FileReader();
-      reader.onload = async () => {
+      try {
+        const markdown = await readTextFile(chosen.file);
         clearAssetUrls();
-        state.markdown = normalizeNewlines(String(reader.result || ''));
+        state.markdown = normalizeNewlines(markdown);
+        advanceDocumentRevision();
         state.fileName = safeFileName(chosen.file.name || 'untitled.md');
         state.markdownRelativePath = normalizeAssetPath(chosen.relativePath || chosen.file.name || '');
         state.directoryHandle = directoryHandle;
@@ -1434,9 +1462,10 @@
         const assetsHint = directoryHandle ? '。貼り付け/ドロップ画像はassetsフォルダに保存できます' : '';
         setStatus(`${state.fileName} をフォルダ基準で開きました${suffix} (${access})。画像候補: ${count}${assetsHint}${folderScanStatusSuffix()}`);
         warnFolderScanLimitIfNeeded();
-      };
-      reader.onerror = () => setStatus('ファイルの読み込みに失敗しました');
-      reader.readAsText(chosen.file, 'utf-8');
+      } catch (error) {
+        warnSafeError('open folder markdown failed', error);
+        setStatus(fileReadFailureMessage(error));
+      }
     }
 
     async function onImageChosen(event) {
@@ -1481,34 +1510,49 @@
     }
 
     async function saveMarkdown() {
+      captureCurrentMarkdownFromEditor();
       if (requestDesktopCommand('save')) return;
-      if (await saveMarkdownToOpenedFile()) return;
+      const snapshot = currentDocumentSaveSnapshot();
+      if (await saveMarkdownToOpenedFile(snapshot)) return;
       downloadMarkdown();
     }
 
-    async function saveMarkdownToOpenedFile() {
-      if (!state.directoryHandle || !state.markdownRelativePath) return false;
+    function currentDocumentSaveSnapshot() {
+      return {
+        markdown: state.markdown,
+        revision: state.documentRevision,
+        directoryHandle: state.directoryHandle,
+        markdownRelativePath: state.markdownRelativePath,
+        fileName: state.fileName,
+      };
+    }
+
+    async function saveMarkdownToOpenedFile(snapshot) {
+      if (!snapshot.directoryHandle || !snapshot.markdownRelativePath) return false;
       if (!window.isSecureContext) {
         setStatus('上書き保存にはlocalhostなどの安全なHTTP環境が必要です。ダウンロード保存に切り替えます');
         return false;
       }
-      if (!await ensureDirectoryPermission(state.directoryHandle, 'readwrite')) {
+      if (!await ensureDirectoryPermission(snapshot.directoryHandle, 'readwrite')) {
         setStatus('Markdownファイルの上書き保存に必要なフォルダ書き込み権限がありません。ダウンロード保存に切り替えます');
         return false;
       }
 
       try {
-        const fileHandle = await markdownFileHandle();
+        const fileHandle = await markdownFileHandleForSnapshot(snapshot);
         const writable = await fileHandle.createWritable();
         try {
-          await writable.write(new Blob([state.markdown], { type: 'text/markdown;charset=utf-8' }));
+          await writable.write(new Blob([snapshot.markdown], { type: 'text/markdown;charset=utf-8' }));
         } finally {
           await writable.close();
         }
-        state.dirty = false;
+        const savedCurrentRevision = snapshot.revision === state.documentRevision;
+        if (savedCurrentRevision) state.dirty = false;
         persistDraft();
         updateStatusBar();
-        setStatus(`${state.markdownRelativePath} に上書き保存しました`);
+        setStatus(savedCurrentRevision
+          ? `${snapshot.markdownRelativePath} に上書き保存しました`
+          : `${snapshot.markdownRelativePath} に保存しました。保存中の変更は未保存です`);
         return true;
       } catch (_) {
         setStatus('Markdownファイルの上書き保存に失敗しました。ダウンロード保存に切り替えます');
@@ -1517,9 +1561,11 @@
     }
 
     function downloadMarkdown() {
+      captureCurrentMarkdownFromEditor();
       const name = ensureExtension(state.fileName || 'untitled.md', '.md');
       downloadBlob(name, state.markdown, 'text/markdown;charset=utf-8');
       state.dirty = false;
+      persistDraft();
       updateStatusBar();
       setStatus(`${name} をダウンロード保存しました`);
     }
@@ -1594,6 +1640,7 @@
     function clearDraftData(options = {}) {
       try {
         localStorage.removeItem(STORAGE_KEY);
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
       } catch (_) {}
       resetDocumentState();
       if (options.status !== false) setStatus('下書きを削除し、文書を初期状態に戻しました');
@@ -1605,6 +1652,7 @@
       window.clearTimeout(state.richReparseTimer);
       clearAssetUrls();
       state.markdown = DEFAULT_MARKDOWN;
+      advanceDocumentRevision();
       state.fileName = 'untitled.md';
       state.markdownRelativePath = '';
       state.directoryHandle = null;
@@ -1622,6 +1670,7 @@
     function resetSettingsData(options = {}) {
       try {
         localStorage.removeItem(SETTINGS_KEY);
+        localStorage.removeItem(LEGACY_SETTINGS_KEY);
       } catch (_) {}
       state.theme = defaultTheme();
       state.mode = 'rich';
@@ -1672,13 +1721,25 @@
       resetSettingsData({ status: false });
       await clearFolderPermissionRecords({ status: false });
       try {
-        localStorage.removeItem(STORAGE_KEY);
+        removeAllDraftStorageKeys();
         localStorage.removeItem(SETTINGS_KEY);
+        localStorage.removeItem(LEGACY_SETTINGS_KEY);
       } catch (_) {}
       state.allowedLinkDomains = [];
       if (els.allowedDomainsInput) els.allowedDomainsInput.value = '';
       renderAll('local-data-clear');
       setStatus('すべてのローカルデータを削除しました。保存済みMarkdownファイルやassets画像は削除していません');
+    }
+
+    function removeAllDraftStorageKeys() {
+      const keys = [];
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (key === LEGACY_STORAGE_KEY || key === DRAFT_STORAGE_PREFIX || key?.startsWith(`${DRAFT_STORAGE_PREFIX}:`)) {
+          keys.push(key);
+        }
+      }
+      keys.forEach((key) => localStorage.removeItem(key));
     }
 
     function showLinkDomainDialog() {
