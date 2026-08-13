@@ -248,6 +248,62 @@ async function checkAppStartup(baseUrl, sessionId) {
   );
   assert.equal(result.title, 'Portable Markdown Editor');
   assert.match(result.mode, /^(?:rich|split|source|preview|focus)$/);
+
+  const codeMarkdown = '# Code language check\n\n```js\nconst value = 1;\n```\n';
+  await evaluate(
+    `(() => { const source = document.getElementById('sourceEditor'); source.value = ${JSON.stringify(codeMarkdown)}; source.dispatchEvent(new Event('input', { bubbles: true })); return source.value; })()`,
+    sessionId,
+  );
+  await clickSelector('[data-action="mode"][data-mode="rich"]', sessionId);
+  await poll(
+    `(() => ({ mode: document.body.dataset.mode || '', codeLanguageReady: Boolean(document.querySelector('.pme-code-language-input')) }))()`,
+    (value) => value?.mode === 'rich' && value.codeLanguageReady,
+    sessionId,
+    'rich code language input startup',
+  );
+  await clickSelector('.pme-code-language-input', sessionId);
+  await delay(50);
+  const focusState = await evaluate(
+    `(() => { const active = document.activeElement; return { matches: active?.matches('.pme-code-language-input') === true, tagName: active?.tagName || '', className: active?.className || '', id: active?.id || '' }; })()`,
+    sessionId,
+  );
+  assert.equal(focusState.matches, true, `clicking the rich code language input must not move focus elsewhere: ${JSON.stringify(focusState)}`);
+
+  await evaluate(
+    `(() => { const input = document.querySelector('.pme-code-language-input'); input.setSelectionRange(0, input.value.length); return input.value; })()`,
+    sessionId,
+  );
+  await connection.send('Input.insertText', { text: 'python' }, sessionId);
+  const languageResult = await poll(
+    `(() => ({ value: document.querySelector('.pme-code-language-input')?.value || '', markdown: document.getElementById('sourceEditor')?.value || '', listId: document.querySelector('.pme-code-language-input')?.list?.id || '' }))()`,
+    (value) => value?.value === 'python' && value.markdown.includes('```python\n'),
+    sessionId,
+    'rich code language selection',
+  );
+  assert.equal(languageResult.listId, 'codeLanguageOptions', 'the rich code language input must retain its suggestion list');
+}
+
+async function clickSelector(selector, sessionId) {
+  const point = await evaluate(
+    `(() => { const element = document.querySelector(${JSON.stringify(selector)}); if (!element) return null; element.scrollIntoView({ block: 'center', inline: 'nearest' }); const rect = element.getBoundingClientRect(); const x = rect.left + rect.width / 2; const y = rect.top + rect.height / 2; const hit = document.elementFromPoint(x, y); return { x, y, visible: rect.width > 0 && rect.height > 0, hitWithinTarget: Boolean(hit && (hit === element || element.contains(hit))), hitTagName: hit?.tagName || '', hitClassName: hit?.className || '' }; })()`,
+    sessionId,
+  );
+  assert.ok(point?.visible, `browser click target is not visible: ${selector}`);
+  assert.equal(point.hitWithinTarget, true, `browser click hit the wrong element for ${selector}: ${point.hitTagName}.${point.hitClassName}`);
+  await connection.send('Input.dispatchMouseEvent', {
+    type: 'mousePressed',
+    x: point.x,
+    y: point.y,
+    button: 'left',
+    clickCount: 1,
+  }, sessionId);
+  await connection.send('Input.dispatchMouseEvent', {
+    type: 'mouseReleased',
+    x: point.x,
+    y: point.y,
+    button: 'left',
+    clickCount: 1,
+  }, sessionId);
 }
 
 function collectBrowserError(message, sessionId) {

@@ -1052,6 +1052,11 @@ flowchart TD
     return Boolean(target && els.rich?.contains(target) && nodeElement(target)?.closest?.('.ProseMirror'));
   }
 
+  function isProseMirrorControlTarget(target) {
+    const element = nodeElement(target);
+    return Boolean(element?.closest?.('input, textarea, select, option, button'));
+  }
+
   function prosemirrorAtomSourceElement(target) {
     return nodeElement(target)?.closest?.('.pme-image-node, .pme-math-node, .pme-mermaid-node, .pme-toc-node') || null;
   }
@@ -1099,6 +1104,8 @@ flowchart TD
 
   function focusProseMirrorSelection() {
     if (!isProseMirrorRichActive()) return false;
+    const active = nodeElement(document.activeElement);
+    if (active && els.rich?.contains(active) && isProseMirrorControlTarget(active)) return true;
     const selection = window.getSelection?.();
     const proseMirror = nodeElement(selection?.anchorNode)?.closest?.('.ProseMirror');
     if (!proseMirror || !els.rich?.contains(proseMirror)) return false;
@@ -1478,9 +1485,9 @@ flowchart TD
 
   function onRichPointerDownCapture(event) {
     const target = eventTargetElement(event);
+    if (isProseMirrorControlTarget(target)) return;
     const atomSource = prosemirrorAtomSourceElement(target);
     if (atomSource) {
-      if (nodeElement(target)?.closest?.('button, a, input, textarea, select, option')) return;
       if (typeof atomSource.__pmeOpenSourceEditor === 'function') {
         event.preventDefault();
         event.stopPropagation();
@@ -1502,7 +1509,7 @@ flowchart TD
       return;
     }
     if (isProseMirrorRichTarget(target)) {
-      focusProseMirrorTarget(target);
+      if (!isProseMirrorControlTarget(target)) focusProseMirrorTarget(target);
       return;
     }
 

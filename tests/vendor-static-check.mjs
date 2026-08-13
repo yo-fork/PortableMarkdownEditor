@@ -152,6 +152,7 @@ assert.match(app, /function\s+renderReadOnlyRichFallback/, 'ProseMirror fallback
 assert.match(app, /removeAttribute\('contenteditable'\)/, 'rich fallback should remove legacy contenteditable editing');
 assert.match(app, /function\s+focusProseMirrorTarget/, 'ProseMirror clicks should explicitly focus the inner editor surface');
 assert.match(app, /function\s+focusProseMirrorSelection/, 'ProseMirror selections should keep focus on the inner editor surface');
+assert.match(app, /function\s+focusProseMirrorSelection[\s\S]+document\.activeElement[\s\S]+isProseMirrorControlTarget\(active\)[\s\S]+return true;/, 'selection changes must not take focus back from an active ProseMirror form control');
 assert.match(app, /function\s+scheduleProseMirrorFocus/, 'ProseMirror focus should be deferred until the browser has applied the clicked DOM selection');
 assert.match(app, /focus\(\{\s*preventScroll:\s*true\s*\}\)/, 'ProseMirror focus restoration should preserve the clicked DOM selection');
 assert.match(app, /if \(focusProseMirrorSelection\(\)\) return;/, 'selection changes inside ProseMirror should bypass legacy rich selection handling');
@@ -163,11 +164,14 @@ assert.match(app, /case 'math':[\s\S]+insertRichInlineMarkdownSource\(`\$\$\{ric
 assert.match(app, /addEventListener\('pointerdown', onRichPointerDownCapture, true\)/, 'ProseMirror should receive DOM focus before browser click selection');
 assert.match(app, /function\s+prosemirrorAtomSourceElement[\s\S]+pme-image-node[\s\S]+pme-math-node[\s\S]+pme-mermaid-node[\s\S]+pme-toc-node/, 'app.js should find ProseMirror atom source nodes as local interactive targets');
 assert.match(app, /function\s+isProseMirrorAtomSourceTarget[\s\S]+pme-node-source-editor, \.pme-link-href-editor[\s\S]+prosemirrorAtomSourceElement/, 'app.js should recognize ProseMirror atom and inline href source editors as local interactive targets');
+assert.match(app, /function\s+isProseMirrorControlTarget[\s\S]+input, textarea, select, option, button/, 'app.js should recognize form controls inside ProseMirror as independently focusable targets');
+assert.match(app, /function\s+onRichPointerDownCapture[\s\S]+if \(isProseMirrorControlTarget\(target\)\) return;/, 'rich pointer capture must not steal focus from ProseMirror form controls');
+assert.match(app, /if \(isProseMirrorRichTarget\(target\)\)[\s\S]+if \(!isProseMirrorControlTarget\(target\)\) focusProseMirrorTarget\(target\)/, 'rich clicks must keep form-control focus instead of restoring the ProseMirror root');
 assert.match(app, /async function\s+onRichPaste\(event\)[\s\S]+const imageFiles = imageFilesFromClipboard\(event\.clipboardData\);[\s\S]+if \(isProseMirrorRichEventContext\(event\)\) \{[\s\S]+insertImageFilesAsAssets\(imageFiles, createImageInsertionContext\(event\), '貼り付け'\)/, 'ProseMirror rich paste should save pasted image files through the assets pipeline before falling through to ProseMirror paste');
 assert.match(app, /function\s+onRichPointerDownCapture[\s\S]+__pmeOpenSourceEditor[\s\S]+if\s+\(isProseMirrorAtomSourceTarget\(target\)\) return;[\s\S]+focusProseMirrorElement\(proseMirror\);/, 'pointerdown focus should delegate atom source opening instead of stealing focus from ProseMirror atom source editors');
 assert.match(app, /function\s+onRichClick[\s\S]+if\s+\(isProseMirrorAtomSourceTarget\(target\)\) \{[\s\S]+event\.stopPropagation\(\);[\s\S]+return;[\s\S]+focusProseMirrorTarget\(target\);/, 'click focus restoration should not steal focus from ProseMirror atom source editors');
 assert.match(app, /function\s+onRichPointerDownCapture[\s\S]*?focusProseMirrorElement\(proseMirror\);/, 'pointerdown focus should use DOM focus without scheduling restoration before the clicked selection exists');
-assert.match(app, /if \(isProseMirrorRichTarget\(target\)\) \{\s*focusProseMirrorTarget\(target\);\s*return;\s*\}/, 'legacy rich click handling should not steal ProseMirror clicks');
+assert.match(app, /if \(isProseMirrorRichTarget\(target\)\) \{\s*if \(!isProseMirrorControlTarget\(target\)\) focusProseMirrorTarget\(target\);\s*return;\s*\}/, 'legacy rich click handling should preserve ProseMirror form-control focus');
 assert.match(app, /function\s+isProseMirrorRichEventContext[\s\S]+document\.activeElement[\s\S]+selection\?\.anchorNode/, 'legacy rich event guards should recognize ProseMirror paste contexts even when the event target is the outer rich container');
 assert.match(app, /function\s+onRichPaste[\s\S]+if \(isProseMirrorRichEventContext\(event\)\) \{[\s\S]+if \(imageFiles\.length\)[\s\S]+return;[\s\S]+const control = eventTargetElement/, 'legacy rich paste handling should not duplicate ProseMirror-managed paste transactions after handling image files');
 
