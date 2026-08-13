@@ -20592,6 +20592,78 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     return match ? match[0] : '';
   }
 
+  var richCodeHighlightPluginKey = new state.PluginKey('pmeRichCodeHighlight');
+  var MAX_RICH_CODE_HIGHLIGHT_CHARS = 120000;
+
+  function highlightScopeClassName(scope) {
+    var value = String(scope || '');
+    if (!value) return '';
+    if (value.indexOf('language:') === 0) return 'language-' + value.slice('language:'.length);
+    var parts = value.split('.');
+    var classNames = ['hljs-' + parts.shift()];
+    for (var index = 0; index < parts.length; index += 1) {
+      classNames.push(parts[index] + '_'.repeat(index + 1));
+    }
+    return classNames.join(' ');
+  }
+
+  function collectHighlightRanges(node, offset, ranges) {
+    if (typeof node === 'string') return offset + node.length;
+    if (!node || !Array.isArray(node.children)) return offset;
+    var start = offset;
+    for (var index = 0; index < node.children.length; index += 1) {
+      offset = collectHighlightRanges(node.children[index], offset, ranges);
+    }
+    var className = highlightScopeClassName(node.scope);
+    if (className && offset > start) ranges.push({ from: start, to: offset, className: className });
+    return offset;
+  }
+
+  function highlightedCodeRanges(code, language) {
+    var highlighter = global.hljs;
+    if (!language || code.length > MAX_RICH_CODE_HIGHLIGHT_CHARS || !highlighter
+      || typeof highlighter.highlight !== 'function' || typeof highlighter.getLanguage !== 'function'
+      || !highlighter.getLanguage(language)) return [];
+    try {
+      var result = highlighter.highlight(code, { language: language, ignoreIllegals: true });
+      var rootNode = result && result._emitter && result._emitter.rootNode;
+      if (!rootNode) return [];
+      var ranges = [];
+      return collectHighlightRanges(rootNode, 0, ranges) === code.length ? ranges : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function richCodeHighlightDecorations(doc) {
+    var decorations = [];
+    doc.descendants(function(node, pos) {
+      if (node.type !== schema.nodes.code_block) return true;
+      var ranges = highlightedCodeRanges(node.textContent, safeCodeBlockLanguage(node.attrs && node.attrs.params));
+      for (var index = 0; index < ranges.length; index += 1) {
+        var range = ranges[index];
+        decorations.push(view.Decoration.inline(pos + 1 + range.from, pos + 1 + range.to, { class: range.className }));
+      }
+      return false;
+    });
+    return view.DecorationSet.create(doc, decorations);
+  }
+
+  function richCodeHighlightPlugin() {
+    return new state.Plugin({
+      key: richCodeHighlightPluginKey,
+      state: {
+        init: function(_, editorState) { return richCodeHighlightDecorations(editorState.doc); },
+        apply: function(transaction, decorations) {
+          return transaction.docChanged ? richCodeHighlightDecorations(transaction.doc) : decorations;
+        }
+      },
+      props: {
+        decorations: function(editorState) { return richCodeHighlightPluginKey.getState(editorState); }
+      }
+    });
+  }
+
   function CodeBlockNodeView(node, editorView, getPos) {
     this.node = node;
     this.editorView = editorView;
@@ -20642,6 +20714,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     else this.dom.removeAttribute('data-params');
     var language = safeCodeBlockLanguage(params);
     if (this.languageInput.value !== language) this.languageInput.value = language;
+    this.contentDOM.className = 'hljs' + (language ? ' language-' + language : '');
     return true;
   };
 
@@ -20785,6 +20858,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
         markdownShapeNormalizationPlugin(),
         emptyTextblockStoredMarksCleanupPlugin(),
         editableTrailingParagraphPlugin(),
+        richCodeHighlightPlugin(),
         inlineVisualAffordancePlugin(),
         tocRefreshPlugin(),
         tableToolbarPlugin(),

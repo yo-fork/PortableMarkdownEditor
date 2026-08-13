@@ -249,7 +249,7 @@ async function checkAppStartup(baseUrl, sessionId) {
   assert.equal(result.title, 'Portable Markdown Editor');
   assert.match(result.mode, /^(?:rich|split|source|preview|focus)$/);
 
-  const codeMarkdown = '# Code language check\n\n```js\nconst value = 1;\n```\n';
+  const codeMarkdown = '# Code language check\n\n```text\ndef hello(name):\n    return f"Hello {name}"\n```\n';
   await evaluate(
     `(() => { const source = document.getElementById('sourceEditor'); source.value = ${JSON.stringify(codeMarkdown)}; source.dispatchEvent(new Event('input', { bubbles: true })); return source.value; })()`,
     sessionId,
@@ -275,12 +275,14 @@ async function checkAppStartup(baseUrl, sessionId) {
   );
   await connection.send('Input.insertText', { text: 'python' }, sessionId);
   const languageResult = await poll(
-    `(() => ({ value: document.querySelector('.pme-code-language-input')?.value || '', markdown: document.getElementById('sourceEditor')?.value || '', listId: document.querySelector('.pme-code-language-input')?.list?.id || '' }))()`,
-    (value) => value?.value === 'python' && value.markdown.includes('```python\n'),
+    `(() => { const code = document.querySelector('.pme-code-block code'); const keyword = code?.querySelector('.hljs-keyword'); return { value: document.querySelector('.pme-code-language-input')?.value || '', markdown: document.getElementById('sourceEditor')?.value || '', listId: document.querySelector('.pme-code-language-input')?.list?.id || '', codeClassName: code?.className || '', keywordText: keyword?.textContent || '', keywordColor: keyword ? getComputedStyle(keyword).color : '', codeColor: code ? getComputedStyle(code).color : '' }; })()`,
+    (value) => value?.value === 'python' && value.markdown.includes('```python\n') && /(?:def|return)/.test(value.keywordText),
     sessionId,
     'rich code language selection',
   );
   assert.equal(languageResult.listId, 'codeLanguageOptions', 'the rich code language input must retain its suggestion list');
+  assert.match(languageResult.codeClassName, /(?:^|\s)hljs(?:\s|$)/, 'the rich code block should use the Highlight.js theme');
+  assert.notEqual(languageResult.keywordColor, languageResult.codeColor, 'the selected language should visibly highlight Python keywords');
 }
 
 async function clickSelector(selector, sessionId) {
