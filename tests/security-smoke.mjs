@@ -75,6 +75,7 @@ assert.match(index, /class="icon-button" data-action="collapse-outline"[^>]+aria
 assert.match(index, /data-format="bold"[^>]+aria-label="太字"[^>]+aria-keyshortcuts="Control\+B"/, 'symbol-only formatting buttons should expose descriptive accessible names and shortcuts');
 assert.match(index, /data-format="h1"[^>]+aria-keyshortcuts="Control\+1"/, 'heading buttons should expose their keyboard shortcuts');
 assert.match(index, /data-format="ordered-list"[^>]+aria-keyshortcuts="Control\+Shift\+7"/, 'the numbered-list shortcut should be discoverable from the toolbar');
+assert.match(index, /data-format="checklist"[^>]+aria-label="チェックリスト"[^>]+aria-keyshortcuts="Control\+Alt\+C"/, 'the checklist button and shortcut should be discoverable from the toolbar');
 assert.match(index, /data-format="code"[^>]+aria-label="インラインコード"[^>]+aria-keyshortcuts="Control\+K"/, 'the inline-code shortcut should be discoverable from the toolbar');
 assert.match(index, /data-action="insert-code-block"[^>]+aria-keyshortcuts="Control\+Shift\+K"/, 'the code-block shortcut should be discoverable from the toolbar');
 assert.match(index, /data-format="math"[^>]+aria-keyshortcuts="Control\+M"/, 'the inline-math shortcut should be discoverable from the toolbar');
@@ -116,8 +117,12 @@ assert.match(app, /function\s+initializeCodeMirrorSourceEditor/, 'source editor 
 assert.match(app, /function\s+sourceMarkdownValue/, 'source reads should go through the CodeMirror-aware source value helper');
 assert.match(app, /function\s+replaceSourceRange/, 'source writes should go through the CodeMirror-aware range replacement helper');
 assert.match(app, /function\s+sourceScrollElement/, 'source scroll sync should use the active editor scroll element');
+assert.match(app, /function\s+captureSourceScrollAnchor[\s\S]+captureScrollAnchor\(viewportY\)/, 'source scroll sync should use CodeMirror visual line measurements when available');
+assert.match(app, /function\s+captureRenderedScrollAnchor[\s\S]+renderedProgress[\s\S]+function\s+restoreRenderedScrollAnchor[\s\S]+rect\.height \* progress/, 'preview scroll sync should preserve progress inside long rendered blocks');
 assert.match(app, /function\s+renderProseMirrorRich/, 'rich editing should prefer the ProseMirror transaction model when Markdown is supported');
-assert.match(app, /SHORTCUT_DEFINITIONS[\s\S]+paragraph[\s\S]+h6[\s\S]+ordered-list[\s\S]+quote/, 'configurable shortcuts should cover headings, lists, and quotes');
+assert.match(app, /SHORTCUT_DEFINITIONS[\s\S]+paragraph[\s\S]+h6[\s\S]+ordered-list[\s\S]+checklist[\s\S]+quote/, 'configurable shortcuts should cover headings, lists, checklists, and quotes');
+assert.match(app, /case 'checklist':[\s\S]+prefixLines\(selected \|\| '項目', '- \[ \] '\)/, 'source-mode checklist insertion should emit unchecked Markdown task items');
+assert.match(app, /case 'checklist':[\s\S]+applyFormat\(action\)/, 'the configurable checklist shortcut should dispatch through the shared format action');
 assert.match(app, /addEventListener\('keydown', onKeyboardShortcutKeyDown, true\)/, 'app shortcuts should run in capture phase before editor-specific keymaps');
 assert.match(app, /function\s+onKeyboardShortcutKeyDown[\s\S]+event\.preventDefault\(\)[\s\S]+event\.stopPropagation\(\)[\s\S]+runKeyboardActionShortcut/, 'captured app shortcuts should prevent conflicting editor commands');
 assert.match(app, /definition\('inline-code',[^\n]+Ctrl\+K[\s\S]+definition\('inline-math',[^\n]+Ctrl\+M[\s\S]+definition\('code-block',[^\n]+Ctrl\+Shift\+K[\s\S]+definition\('math-block',[^\n]+Ctrl\+Shift\+M[\s\S]+definition\('link',[^\n]+Ctrl\+Shift\+L/, 'code, math, and link defaults should preserve the requested keys');

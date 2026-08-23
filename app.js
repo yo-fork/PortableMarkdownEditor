@@ -184,6 +184,7 @@ flowchart TD
     hasRasterImageExtension,
     hashString,
     imageBlockReason,
+    inlineMathTokenAt,
     isLocalAbsoluteImageReference,
     isRelativeImageReference,
     onPreviewImageError,
@@ -566,6 +567,7 @@ flowchart TD
       insertLink,
       insertMathBlock,
       insertMermaid,
+      inlineMathTokenAt,
       isEmptyRichParagraph,
       isProseMirrorRichActive,
       isProseMirrorRichEventContext,
@@ -2021,7 +2023,7 @@ flowchart TD
     let start = selection.start;
     let end = selection.end;
     const sourceValue = sourceMarkdownValue();
-    if (start === end && /^(?:paragraph|quote|list|ordered-list|h[1-6])$/.test(format)) {
+    if (start === end && /^(?:paragraph|quote|list|ordered-list|checklist|h[1-6])$/.test(format)) {
       start = sourceValue.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
       const nextNewline = sourceValue.indexOf('\n', end);
       end = nextNewline < 0 ? sourceValue.length : nextNewline;
@@ -2068,6 +2070,9 @@ flowchart TD
         break;
       case 'ordered-list':
         replacement = (selected || '項目').split('\n').map((line, index) => `${index + 1}. ${line}`).join('\n');
+        break;
+      case 'checklist':
+        replacement = prefixLines(selected || '項目', '- [ ] ');
         break;
       case 'table':
         replacement = selected || '| 項目 | 内容 |\n| --- | --- |\n| 例 | テキスト |';
@@ -2122,6 +2127,9 @@ flowchart TD
       case 'list':
         if (applyRichBlockFormatTransaction('list')) return true;
         replaceRichCurrentBlockWithList();
+        return true;
+      case 'checklist':
+        insertRichMarkdownBlock(prefixLines(richSelectedText() || '項目', '- [ ] '), 'チェックリストを挿入しました');
         return true;
       case 'table':
         insertRichMarkdownBlock('| 項目 | 内容 |\n| --- | --- |\n| 例 | テキスト |', '表を挿入しました');
@@ -3633,8 +3641,17 @@ flowchart TD
   function captureSourceScrollAnchor() {
     const scroller = sourceScrollElement();
     const value = sourceMarkdownValue() || normalizeNewlines(state.markdown || '');
+    const viewportY = scrollAnchorViewportY(scroller);
+    if (isCodeMirrorSourceReady() && typeof state.codeMirrorSource.captureScrollAnchor === 'function') {
+      return {
+        type: 'source',
+        ...state.codeMirrorSource.captureScrollAnchor(viewportY),
+        ratio: scrollRatio(scroller),
+      };
+    }
     const lineHeight = textareaLineHeight(scroller);
-    const lineIndex = Math.max(0, Math.floor((scroller?.scrollTop || 0) / lineHeight));
+    const documentY = (scroller?.scrollTop || 0) + viewportY;
+    const lineIndex = Math.max(0, Math.floor(documentY / lineHeight));
     const lineStarts = markdownLineStarts(value);
     const boundedLine = Math.min(lineIndex, Math.max(0, lineStarts.length - 1));
     const offset = lineStarts[boundedLine] || 0;
@@ -3642,7 +3659,8 @@ flowchart TD
       type: 'source',
       offset,
       lineIndex: boundedLine,
-      lineTop: (scroller?.scrollTop || 0) - boundedLine * lineHeight,
+      sourceLineY: documentY - boundedLine * lineHeight,
+      viewportY,
       ratio: scrollRatio(scroller),
     };
   }
@@ -3650,24 +3668,34 @@ flowchart TD
   function restoreSourceScrollAnchor(anchor) {
     const scroller = sourceScrollElement();
     if (!anchor || !scroller) return false;
+    const viewportY = scrollAnchorViewportY(scroller, anchor.viewportY);
+    if (isCodeMirrorSourceReady() && typeof state.codeMirrorSource.restoreScrollAnchor === 'function') {
+      const sourceAnchor = {
+        offset: anchor.offset || 0,
+        viewportY,
+      };
+      if (Number.isFinite(Number(anchor.sourceLineY))) sourceAnchor.sourceLineY = Number(anchor.sourceLineY);
+      return state.codeMirrorSource.restoreScrollAnchor(sourceAnchor);
+    }
     const value = sourceMarkdownValue() || normalizeNewlines(state.markdown || '');
     const lineIndex = markdownLineIndexAtOffset(value, anchor.offset || 0);
     const lineHeight = textareaLineHeight(scroller);
-    scroller.scrollTop = Math.max(0, lineIndex * lineHeight + (anchor.lineTop || 0));
+    scroller.scrollTop = Math.max(0, lineIndex * lineHeight + (anchor.sourceLineY || 0) - viewportY);
     return true;
   }
 
   function captureRenderedScrollAnchor(container) {
     if (!container) return null;
+    const viewportY = scrollAnchorViewportY(container);
     const elements = renderedSourceElements(container);
     if (!elements.length) return {
       type: 'rendered',
       offset: 0,
-      y: 0,
+      viewportY,
       ratio: scrollRatio(container),
     };
     const containerRect = container.getBoundingClientRect();
-    const targetY = containerRect.top + Math.min(72, Math.max(16, container.clientHeight * 0.12));
+    const targetY = containerRect.top + viewportY;
     let candidate = null;
     for (const element of elements) {
       const rect = element.getBoundingClientRect();
@@ -3679,11 +3707,17 @@ flowchart TD
     }
     if (!candidate) candidate = elements[0];
     const rect = candidate.getBoundingClientRect();
+    const start = numericData(candidate, 'sourceStart');
+    const end = numericData(candidate, 'sourceEnd');
+    const renderedProgress = rect.height > 0
+      ? Math.max(0, Math.min(1, (targetY - rect.top) / rect.height))
+      : 0;
     return {
       type: 'rendered',
-      offset: numericData(candidate, 'sourceStart'),
-      end: numericData(candidate, 'sourceEnd'),
-      y: Math.max(0, targetY - rect.top),
+      offset: Math.round(start + Math.max(0, end - start) * renderedProgress),
+      end,
+      renderedProgress,
+      viewportY,
       ratio: scrollRatio(container),
     };
   }
@@ -3693,10 +3727,23 @@ flowchart TD
     const target = renderedElementForOffset(container, anchor.offset || 0);
     if (!target) return false;
     const containerRect = container.getBoundingClientRect();
-    const targetY = containerRect.top + Math.min(72, Math.max(16, container.clientHeight * 0.12));
+    const targetY = containerRect.top + scrollAnchorViewportY(container, anchor.viewportY);
     const rect = target.getBoundingClientRect();
-    container.scrollTop += rect.top - (targetY - (anchor.y || 0));
+    const start = numericData(target, 'sourceStart');
+    const end = numericData(target, 'sourceEnd');
+    const sourceLength = Math.max(0, end - start);
+    const progress = sourceLength > 0
+      ? Math.max(0, Math.min(1, ((anchor.offset || 0) - start) / sourceLength))
+      : Math.max(0, Math.min(1, anchor.renderedProgress || 0));
+    container.scrollTop += rect.top + rect.height * progress - targetY;
     return true;
+  }
+
+  function scrollAnchorViewportY(element, preferred) {
+    if (!element) return 0;
+    const fallback = Math.min(72, Math.max(16, element.clientHeight * 0.12));
+    const value = Number.isFinite(Number(preferred)) ? Number(preferred) : fallback;
+    return Math.max(0, Math.min(element.clientHeight, value));
   }
 
   function renderedElementForOffset(container, offset) {

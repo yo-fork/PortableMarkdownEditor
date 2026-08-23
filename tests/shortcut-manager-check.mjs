@@ -15,6 +15,7 @@ assert.equal(defaults['inline-math'], 'Ctrl+M');
 assert.equal(defaults['code-block'], 'Ctrl+Shift+K');
 assert.equal(defaults['math-block'], 'Ctrl+Shift+M');
 assert.equal(defaults.link, 'Ctrl+Shift+L');
+assert.equal(defaults.checklist, 'Ctrl+Alt+C');
 assert.equal(defaults['toggle-outline'], 'Ctrl+Alt+O');
 
 const settingsSample = JSON.parse(readFileSync(new URL('../portable-markdown-editor-settings.json', import.meta.url), 'utf8'));
@@ -35,20 +36,24 @@ assert.equal(api.shortcutFromKeyboardEvent({ metaKey: true, shiftKey: false, alt
 assert.equal(api.shortcutFromKeyboardEvent({ ctrlKey: false, shiftKey: false, altKey: false, code: 'KeyQ', key: 'q' }), '');
 
 const customized = api.normalizeShortcutAssignments({
-  'inline-code': 'Ctrl+Alt+C',
+  'inline-code': 'Ctrl+Alt+Q',
   'inline-math': '',
 });
-assert.equal(customized['inline-code'], 'Ctrl+Alt+C');
+assert.equal(customized['inline-code'], 'Ctrl+Alt+Q');
 assert.equal(customized['inline-math'], '');
 assert.equal(customized.bold, 'Ctrl+B', 'unspecified commands must keep defaults');
 assert.equal(api.shortcutActionForAssignments(
-  { ctrlKey: true, shiftKey: false, altKey: true, code: 'KeyC', key: 'c' },
+  { ctrlKey: true, shiftKey: false, altKey: true, code: 'KeyQ', key: 'q' },
   customized,
 ), 'inline-code');
 assert.equal(api.shortcutActionForAssignments(
   { ctrlKey: true, shiftKey: false, altKey: false, code: 'KeyK', key: 'k' },
   customized,
 ), '', 'previous assignment must stop dispatching after customization');
+assert.equal(api.shortcutActionForAssignments(
+  { ctrlKey: true, shiftKey: false, altKey: true, code: 'KeyC', key: 'c' },
+  defaults,
+), 'checklist');
 
 const duplicated = api.normalizeShortcutAssignments({
   'new-window': 'Ctrl+Q',

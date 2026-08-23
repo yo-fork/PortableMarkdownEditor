@@ -8,19 +8,19 @@
   <title>Portable Markdown Editor</title>
   <link rel="stylesheet" href="./vendor/highlight/styles/github-dark.min.css">
   <link rel="stylesheet" href="./vendor/katex/katex.min.css">
-  <link rel="stylesheet" href="./styles.css?v=rich-edit-controls-6">
+  <link rel="stylesheet" href="./styles.css?v=rich-edit-controls-7">
   <script src="./vendor/markdown-it/markdown-it.min.js" defer></script>
   <script src="./vendor/highlight/highlight.min.js" defer></script>
   <script src="./vendor/mermaid/mermaid.min.js" defer></script>
   <script src="./vendor/katex/katex.min.js" defer></script>
-  <script src="./vendor/prosemirror/prosemirror-editor.js?v=rich-edit-controls-8" defer></script>
-  <script src="./vendor/codemirror6/source-editor.bundle.js?v=table-toolbar-1" defer></script>
-  <script src="./modules/markdown-renderer.js?v=app-modules-1" defer></script>
+  <script src="./vendor/prosemirror/prosemirror-editor.js?v=rich-edit-controls-11" defer></script>
+  <script src="./vendor/codemirror6/source-editor.bundle.js?v=scroll-sync-1" defer></script>
+  <script src="./modules/markdown-renderer.js?v=app-modules-2" defer></script>
   <script src="./modules/rich-editor.js?v=app-modules-3" defer></script>
-  <script src="./modules/rich-input-controller.js?v=app-modules-4" defer></script>
+  <script src="./modules/rich-input-controller.js?v=app-modules-5" defer></script>
   <script src="./modules/file-manager.js?v=app-modules-2" defer></script>
-  <script src="./modules/shortcut-manager.js?v=app-modules-1" defer></script>
-  <script src="./app.js?v=app-modules-5" defer></script>
+  <script src="./modules/shortcut-manager.js?v=app-modules-2" defer></script>
+  <script src="./app.js?v=app-modules-7" defer></script>
 </head>
 <body data-mode="rich">
   <a class="skip-link" href="#mainWorkspace">本文へ移動</a>
@@ -57,6 +57,7 @@
         <button type="button" data-action="format" data-format="quote" title="引用 (Ctrl+Shift+9)" aria-label="引用" aria-keyshortcuts="Control+Shift+9">&gt;</button>
         <button type="button" data-action="format" data-format="list" title="箇条書き (Ctrl+Shift+8)" aria-label="箇条書き" aria-keyshortcuts="Control+Shift+8">•</button>
         <button type="button" data-action="format" data-format="ordered-list" title="番号リスト (Ctrl+Shift+7)" aria-label="番号リスト" aria-keyshortcuts="Control+Shift+7">1.</button>
+        <button type="button" data-action="format" data-format="checklist" title="チェックリスト (Ctrl+Alt+C)" aria-label="チェックリスト" aria-keyshortcuts="Control+Alt+C">☑</button>
         <button type="button" data-action="format" data-format="table" title="表 (Ctrl+Alt+T)" aria-keyshortcuts="Control+Alt+T">表</button>
         <button type="button" data-action="format" data-format="toc" title="目次 (Ctrl+Alt+I)" aria-label="目次" aria-keyshortcuts="Control+Alt+I">TOC</button>
         <button type="button" data-action="format" data-format="math" title="インライン数式 (Ctrl+M)" aria-keyshortcuts="Control+M">数式</button>

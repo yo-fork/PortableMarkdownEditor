@@ -25,6 +25,7 @@
     "inline-math": "Ctrl+M",
     "ordered-list": "Ctrl+Shift+7",
     "list": "Ctrl+Shift+8",
+    "checklist": "Ctrl+Alt+C",
     "quote": "Ctrl+Shift+9",
     "code-block": "Ctrl+Shift+K",
     "math-block": "Ctrl+Shift+M",

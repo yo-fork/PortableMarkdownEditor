@@ -271,7 +271,7 @@
         while (close >= 0 && isEscapedCharacter(source, close)) close = source.indexOf('\\)', close + 2);
         if (close < 0) return null;
         const value = source.slice(start + 2, close);
-        if (!value || value.includes('\n') || /^\s|\s$/.test(value)) return null;
+        if (value.includes('\n') || /^\s|\s$/.test(value)) return null;
         return { value, end: close + 2 };
       }
 
@@ -284,8 +284,6 @@
         close = source.indexOf('$', close);
         if (close < 0) return null;
         if (!isEscapedCharacter(source, close)
-          && source[close - 1] !== '$'
-          && source[close + 1] !== '$'
           && !/\s/.test(source[close - 1] || '')) {
           const value = source.slice(start + 1, close);
           if (value && !value.includes('\n')) return { value, end: close + 1 };
@@ -2090,6 +2088,7 @@
       hasRasterImageExtension,
       hashString,
       imageBlockReason,
+      inlineMathTokenAt,
       isLocalAbsoluteImageReference,
       isRelativeImageReference,
       onPreviewImageError,

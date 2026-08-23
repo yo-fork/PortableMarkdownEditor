@@ -377,16 +377,16 @@
           cancelable: true,
           ctrlKey: true,
           altKey: true,
-          code: 'KeyC',
-          key: 'c',
+          code: 'KeyQ',
+          key: 'q',
         }));
         document.querySelector('[data-action="save-shortcuts"]').click();
         await waitFor(() => !document.getElementById('shortcutDialog').open, 'shortcut settings dialog did not close after apply');
         const settings = JSON.parse(localStorage.getItem('portable-markdown-editor:settings:v2') || '{}');
-        assert(settings.shortcuts?.['inline-code'] === 'Ctrl+Alt+C', 'custom shortcut was not persisted');
+        assert(settings.shortcuts?.['inline-code'] === 'Ctrl+Alt+Q', 'custom shortcut was not persisted');
         const toolbarButton = document.querySelector('[data-format="code"]');
-        assert(toolbarButton.getAttribute('aria-keyshortcuts') === 'Control+Alt+C', 'toolbar accessibility shortcut did not update');
-        assert(toolbarButton.title.includes('Ctrl+Alt+C'), 'toolbar shortcut title did not update');
+        assert(toolbarButton.getAttribute('aria-keyshortcuts') === 'Control+Alt+Q', 'toolbar accessibility shortcut did not update');
+        assert(toolbarButton.title.includes('Ctrl+Alt+Q'), 'toolbar shortcut title did not update');
       }
 
       async function testDocumentFontCustomization() {
@@ -452,7 +452,7 @@
         assert(source.includes('sample.assets/dropped.png'), 'dropped asset reference did not survive reload');
         assert(document.querySelectorAll('#preview img[src^="blob:"]').length >= 2, 'asset images did not render from restored directory map');
         const settings = JSON.parse(localStorage.getItem('portable-markdown-editor:settings:v2') || '{}');
-        assert(settings.shortcuts?.['inline-code'] === 'Ctrl+Alt+C', 'custom shortcut did not survive reload');
+        assert(settings.shortcuts?.['inline-code'] === 'Ctrl+Alt+Q', 'custom shortcut did not survive reload');
         assert(settings.documentFont === 'serif', 'document font did not survive reload');
         assert(document.documentElement.dataset.documentFont === 'serif', 'restored document font was not applied');
         await hasAsset('pasted.png');

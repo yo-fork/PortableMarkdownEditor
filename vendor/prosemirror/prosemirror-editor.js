@@ -17639,8 +17639,15 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
         return ['li', attrs, 0];
       }
     });
+    var headingSpec = markdown.schema.spec.nodes.get('heading');
+    var mathHeadingSpec = extendObject(headingSpec, {
+      content: '(text | image | math_inline)*'
+    });
     return new model.Schema({
-      nodes: markdown.schema.spec.nodes.update('list_item', taskListItemSpec).append(extendedNodes),
+      nodes: markdown.schema.spec.nodes
+        .update('list_item', taskListItemSpec)
+        .update('heading', mathHeadingSpec)
+        .append(extendedNodes),
       marks: markdown.schema.spec.marks
     });
   }
@@ -17747,7 +17754,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       }
       if (parenClose < 0) return null;
       var parenValue = source.slice(start + 2, parenClose);
-      if (!parenValue || parenValue.indexOf('\n') >= 0 || /^\s|\s$/.test(parenValue)) return null;
+      if (parenValue.indexOf('\n') >= 0 || /^\s|\s$/.test(parenValue)) return null;
       return { value: parenValue, end: parenClose + 2 };
     }
 
@@ -17760,8 +17767,6 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       close = source.indexOf('$', close);
       if (close < 0) return null;
       if (!isEscapedMarkdownCharacter(source, close)
-        && source.charAt(close - 1) !== '$'
-        && source.charAt(close + 1) !== '$'
         && !/\s/.test(source.charAt(close - 1))) {
         var value = source.slice(start + 1, close);
         if (value && value.indexOf('\n') < 0) return { value: value, end: close + 1 };
@@ -17769,6 +17774,52 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       close += 1;
     }
     return null;
+  }
+
+  function escapeTablePipesInInlineMathSource(source) {
+    var value = String(source || '');
+    var escaped = '';
+    for (var index = 0; index < value.length; index += 1) {
+      if (value.charAt(index) === '|' && value.charAt(index - 1) !== '\\') escaped += '\\';
+      escaped += value.charAt(index);
+    }
+    return escaped;
+  }
+
+  function escapeInlineMathPipesInTableLine(line) {
+    var source = String(line || '');
+    var output = '';
+    var last = 0;
+    var cursor = 0;
+    while (cursor < source.length) {
+      var match = inlineMathMatchAt(source, cursor);
+      if (!match) {
+        cursor += 1;
+        continue;
+      }
+      output += source.slice(last, cursor);
+      output += escapeTablePipesInInlineMathSource(source.slice(cursor, match.end));
+      cursor = match.end;
+      last = cursor;
+    }
+    return last ? output + source.slice(last) : source;
+  }
+
+  function isMarkdownTableDelimiterLine(line) {
+    return /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(String(line || ''));
+  }
+
+  function escapeInlineMathPipesInMarkdownTables(markdownText) {
+    var lines = normalizeNewlines(markdownText || '').split('\n');
+    for (var index = 1; index < lines.length; index += 1) {
+      if (!isMarkdownTableDelimiterLine(lines[index]) || lines[index - 1].indexOf('|') < 0) continue;
+      lines[index - 1] = escapeInlineMathPipesInTableLine(lines[index - 1]);
+      for (var rowIndex = index + 1; rowIndex < lines.length; rowIndex += 1) {
+        if (!lines[rowIndex].trim() || lines[rowIndex].indexOf('|') < 0) break;
+        lines[rowIndex] = escapeInlineMathPipesInTableLine(lines[rowIndex]);
+      }
+    }
+    return lines.join('\n');
   }
 
   function addMathInlineRule(tokenizer) {
@@ -17897,7 +17948,30 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
   }
 
   function escapeInlineMath(latex) {
-    return String(latex || '').replace(/\$/g, '\\$');
+    var value = String(latex || '');
+    var escaped = '';
+    for (var index = 0; index < value.length; index += 1) {
+      if (value.charAt(index) === '$' && !isEscapedMarkdownCharacter(value, index)) escaped += '\\';
+      escaped += value.charAt(index);
+    }
+    return escaped;
+  }
+
+  function inlineMathHasAmbiguousDollarNeighbor(parent, index) {
+    if (!parent || typeof index !== 'number') return false;
+    var previous = index > 0 ? parent.child(index - 1) : null;
+    var next = index + 1 < parent.childCount ? parent.child(index + 1) : null;
+    return Boolean(
+      previous && (previous.type === schema.nodes.math_inline || previous.isText && /\$$/.test(previous.text || ''))
+      || next && (next.type === schema.nodes.math_inline || next.isText && /^\$/.test(next.text || ''))
+    );
+  }
+
+  function inlineMathMarkdownSource(node, parent, index) {
+    var latex = escapeInlineMath(node && node.attrs && node.attrs.latex);
+    if (!latex) return '\\(\\)';
+    if (inlineMathHasAmbiguousDollarNeighbor(parent, index)) return '\\(' + latex + '\\)';
+    return '$' + latex + '$';
   }
 
   function tableDelimiterForCell(cell) {
@@ -17977,8 +18051,8 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
           : '';
         state.write('![' + state.esc(node.attrs.alt || '') + '](' + target + title + ')');
       },
-      math_inline: function(state, node) {
-        state.write('$' + escapeInlineMath(node.attrs.latex) + '$');
+      math_inline: function(state, node, parent, index) {
+        state.write(inlineMathMarkdownSource(node, parent, index));
       },
       math_display: function(state, node) {
         state.write('$$\n');
@@ -18008,7 +18082,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
   }
 
   function parseMarkdown(markdownText) {
-    return parser.parse(markdownText || '');
+    return parser.parse(escapeInlineMathPipesInMarkdownTables(markdownText));
   }
 
   function isEmptyParagraphNode(node) {
@@ -18713,7 +18787,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
   }
 
   function splitPipeTableLine(line) {
-    var text = String(line || '').trim();
+    var text = escapeInlineMathPipesInTableLine(line).trim();
     if (text.charAt(0) === '|') text = text.slice(1);
     if (text.charAt(text.length - 1) === '|') text = text.slice(0, -1);
     var cells = [];
@@ -19656,20 +19730,25 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     control.className = 'pme-node-source-editor ' + (options.className || '');
     var valueInput = control;
     if (options.inlineTokens) {
+      var inlineSourceRow = document.createElement('span');
       var beforeToken = document.createElement('span');
       var afterToken = document.createElement('span');
       valueInput = document.createElement('input');
+      inlineSourceRow.className = 'pme-inline-math-source-row';
       beforeToken.className = 'pme-node-source-delimiter pme-inline-source-token pme-inline-source-token--before';
       afterToken.className = 'pme-node-source-delimiter pme-inline-source-token pme-inline-source-token--after';
       valueInput.className = 'pme-node-source-editor-input';
       beforeToken.textContent = options.inlineTokens[0] || '';
       afterToken.textContent = options.inlineTokens[1] || '';
       valueInput.type = 'text';
-      control.appendChild(beforeToken);
-      control.appendChild(valueInput);
-      control.appendChild(afterToken);
+      inlineSourceRow.appendChild(beforeToken);
+      inlineSourceRow.appendChild(valueInput);
+      inlineSourceRow.appendChild(afterToken);
+      control.appendChild(inlineSourceRow);
       control.__pmeValueInput = valueInput;
       control.__pmeInlineTokens = options.inlineTokens;
+      control.__pmeBeforeToken = beforeToken;
+      control.__pmeAfterToken = afterToken;
       Object.defineProperty(control, 'value', {
         configurable: true,
         get: function() {
@@ -19864,17 +19943,24 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     var margin = 12;
     var availableWidth = Math.max(180, viewportWidth - margin * 2);
     if (isInlineMathSourceEditor(control)) {
-      var inlineWidth = clampNumber(Math.max(rect.width || 0, String(control.value || '').length * 8.5 + 6), 24, Math.min(420, availableWidth));
+      var inlineGap = 10;
+      var inlineWidth = clampNumber(Math.max(240, rect.width || 0, String(control.value || '').length * 8.5 + 64), 180, Math.min(460, availableWidth));
       control.style.position = 'fixed';
       control.style.left = clampNumber(rect.left, margin, viewportWidth - inlineWidth - margin) + 'px';
       control.style.top = margin + 'px';
       control.style.width = inlineWidth + 'px';
       control.style.maxWidth = availableWidth + 'px';
-      control.style.maxHeight = '2.6rem';
+      control.style.maxHeight = Math.max(120, Math.min(240, viewportHeight - margin * 2)) + 'px';
       control.style.zIndex = '1000';
       autoSizeNodeSourceEditor(control);
       var inlineRect = control.getBoundingClientRect();
-      var inlineTop = rect.top + (rect.height - inlineRect.height) / 2;
+      var belowTop = rect.bottom + inlineGap;
+      var aboveTop = rect.top - inlineRect.height - inlineGap;
+      var inlineTop = belowTop + inlineRect.height <= viewportHeight - margin
+        ? belowTop
+        : aboveTop >= margin
+          ? aboveTop
+          : clampNumber(belowTop, margin, viewportHeight - inlineRect.height - margin);
       control.style.top = clampNumber(inlineTop, margin, viewportHeight - inlineRect.height - margin) + 'px';
       return;
     }
@@ -20038,7 +20124,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
 
   function mathSourceEditorValue(latex, displayMode) {
     latex = normalizeNewlines(latex || '');
-    return displayMode ? latex : '$' + latex + '$';
+    return displayMode ? latex : latex ? '$' + latex + '$' : '\\(\\)';
   }
 
   function latexFromMathSourceEditorValue(value, displayMode) {
@@ -20049,6 +20135,31 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     var parenMatch = value.match(/^\\\(([\s\S]*)\\\)$/);
     if (parenMatch) return parenMatch[1];
     return value.replace(/^\$/, '').replace(/\$$/, '');
+  }
+
+  function setInlineMathSourceEditorTokens(control, latex) {
+    if (!control || !control.__pmeInlineTokens) return;
+    var tokens = latex ? ['$', '$'] : ['\\(', '\\)'];
+    control.__pmeInlineTokens = tokens;
+    if (control.__pmeBeforeToken) control.__pmeBeforeToken.textContent = tokens[0];
+    if (control.__pmeAfterToken) control.__pmeAfterToken.textContent = tokens[1];
+  }
+
+  function normalizeInlineMathEditorInput(input, fallbackValue) {
+    var latex = input && typeof input.value === 'string'
+      ? input.value
+      : latexFromMathSourceEditorValue(fallbackValue, false);
+    var normalized = escapeInlineMath(latex);
+    if (!input || normalized === latex) return normalized;
+    var selectionStart = typeof input.selectionStart === 'number' ? input.selectionStart : null;
+    var selectionEnd = typeof input.selectionEnd === 'number' ? input.selectionEnd : null;
+    var nextStart = selectionStart == null ? null : escapeInlineMath(latex.slice(0, selectionStart)).length;
+    var nextEnd = selectionEnd == null ? null : escapeInlineMath(latex.slice(0, selectionEnd)).length;
+    input.value = normalized;
+    if (nextStart != null && nextEnd != null && typeof input.setSelectionRange === 'function') {
+      input.setSelectionRange(nextStart, nextEnd);
+    }
+    return normalized;
   }
 
   function MathNodeView(node, editorView, getPos) {
@@ -20063,26 +20174,42 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     this.preview.className = 'pme-node-rendered-preview';
     this.preview.setAttribute('contenteditable', 'false');
     this.editPreview = null;
+    this.editPreviewValue = null;
     if (!this.displayMode) {
       this.editPreview = document.createElement('span');
       this.editPreview.className = 'pme-inline-math-edit-preview';
       this.editPreview.setAttribute('contenteditable', 'false');
-      this.editPreview.setAttribute('aria-hidden', 'true');
+      this.editPreview.setAttribute('aria-label', '数式の表示プレビュー');
+      var editPreviewLabel = document.createElement('span');
+      editPreviewLabel.className = 'pme-inline-math-edit-preview-label';
+      editPreviewLabel.textContent = '表示';
+      this.editPreviewValue = document.createElement('span');
+      this.editPreviewValue.className = 'pme-inline-math-edit-preview-value';
+      this.editPreview.appendChild(editPreviewLabel);
+      this.editPreview.appendChild(this.editPreviewValue);
     }
     var self = this;
     this.sourceEditor = createNodeSourceEditor({
       multiline: this.displayMode,
       className: this.displayMode ? 'pme-node-source-editor--math-display' : 'pme-node-source-editor--math-inline',
-      label: this.displayMode ? 'display math source' : 'inline math source',
+      label: this.displayMode ? '表示数式のソース' : 'インライン数式のソース',
       inlineTokens: this.displayMode ? null : ['$', '$'],
       value: mathSourceEditorValue(node.attrs.latex || '', this.displayMode),
-      onInput: function(value) {
-        updateNodeViewAttrs(self.editorView, self.getPos, self.node, { latex: latexFromMathSourceEditorValue(value, self.displayMode) }, { selectAfterNode: !self.displayMode });
+      onInput: function(value, event) {
+        var latex = self.displayMode
+          ? latexFromMathSourceEditorValue(value, true)
+          : normalizeInlineMathEditorInput(event && event.target, value);
+        updateNodeViewAttrs(self.editorView, self.getPos, self.node, { latex: latex }, { selectAfterNode: !self.displayMode });
       },
       onConfirm: function() {
         setSelectionAfterNodeView(self.editorView, self.getPos, self.node);
       },
       onDeleteBoundary: function(side) {
+        if (!self.displayMode) {
+          if (side === 'before') setSelectionBeforeNodeView(self.editorView, self.getPos, self.node);
+          else setSelectionAfterNodeView(self.editorView, self.getPos, self.node);
+          return;
+        }
         deleteNodeView(self.editorView, self.getPos, self.node, side === 'before' ? -1 : 1);
       },
       onExitBoundary: function(side) {
@@ -20090,18 +20217,28 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
         else setSelectionAfterNodeView(self.editorView, self.getPos, self.node);
       }
     });
+    if (!this.displayMode) {
+      var editorLabel = document.createElement('span');
+      editorLabel.className = 'pme-inline-math-editor-label';
+      editorLabel.textContent = 'インライン数式を編集';
+      this.sourceEditor.insertBefore(editorLabel, this.sourceEditor.firstChild);
+      this.sourceEditor.appendChild(this.editPreview);
+      this.sourceEditor.setAttribute('role', 'group');
+    }
     this.dom.appendChild(this.preview);
-    if (this.editPreview) this.dom.appendChild(this.editPreview);
     bindNodeSourceEditorActivation(this.dom, this.sourceEditor);
     this.render();
   }
 
   MathNodeView.prototype.render = function() {
-    this.dom.setAttribute('data-latex', this.node.attrs.latex || '');
-    renderMathInto(this.preview, this.node.attrs.latex || '', this.displayMode);
-    if (this.editPreview) renderMathInto(this.editPreview, this.node.attrs.latex || '', false);
+    var latex = this.node.attrs.latex || '';
+    this.dom.setAttribute('data-latex', latex);
+    this.dom.setAttribute('aria-label', latex ? (this.displayMode ? '表示数式: ' : 'インライン数式: ') + latex : (this.displayMode ? '空の表示数式' : '空のインライン数式'));
+    setInlineMathSourceEditorTokens(this.sourceEditor, latex);
+    renderMathInto(this.preview, latex, this.displayMode);
+    if (this.editPreviewValue) renderMathInto(this.editPreviewValue, latex, false);
     this.dom.classList.toggle('is-error', this.preview.classList.contains('is-error'));
-    setSourceEditorValue(this.sourceEditor, mathSourceEditorValue(this.node.attrs.latex || '', this.displayMode));
+    setSourceEditorValue(this.sourceEditor, mathSourceEditorValue(latex, this.displayMode));
     autoSizeNodeSourceEditor(this.sourceEditor);
   };
 
@@ -20779,6 +20916,71 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     });
   }
 
+  function taskListItemDepth($pos) {
+    for (var depth = $pos.depth; depth > 0; depth -= 1) {
+      if ($pos.node(depth).type === schema.nodes.list_item) return depth;
+    }
+    return -1;
+  }
+
+  function taskListItemInputRule() {
+    if (!schema.nodes.list_item) return null;
+    return new inputRulesModule.InputRule(/^\[([ xX])\]\s$/, function(editorState, match, start, end) {
+      var $start = editorState.doc.resolve(start);
+      var itemDepth = taskListItemDepth($start);
+      if (itemDepth < 0) return null;
+      var itemPos = $start.before(itemDepth);
+      var item = editorState.doc.nodeAt(itemPos);
+      if (!item || item.type !== schema.nodes.list_item || item.attrs.task != null) return null;
+      var attrs = extendObject(item.attrs || {}, { task: match[1].toLowerCase() === 'x' });
+      return clearStoredMarks(editorState.tr.delete(start, end).setNodeMarkup(itemPos, null, attrs));
+    });
+  }
+
+  function selectedListItemPositions(doc, selection) {
+    var positions = [];
+    doc.descendants(function(node, pos) {
+      if (node.type !== schema.nodes.list_item) return true;
+      var from = pos + 1;
+      var to = pos + node.nodeSize - 1;
+      var selected = selection.empty
+        ? from <= selection.from && selection.from <= to
+        : selection.from < to && selection.to > from;
+      if (selected) positions.push(pos);
+      return true;
+    });
+    return positions;
+  }
+
+  function setChecklistAttrs(transaction) {
+    var positions = selectedListItemPositions(transaction.doc, transaction.selection);
+    for (var index = 0; index < positions.length; index += 1) {
+      var item = transaction.doc.nodeAt(positions[index]);
+      if (!item || item.type !== schema.nodes.list_item || item.attrs.task != null) continue;
+      transaction.setNodeMarkup(positions[index], null, extendObject(item.attrs || {}, { task: false }));
+    }
+    return positions.length > 0;
+  }
+
+  function applyChecklistFormatCommand(editorState, dispatch) {
+    if (!schema.nodes.list_item || !schema.nodes.bullet_list) return false;
+    var positions = selectedListItemPositions(editorState.doc, editorState.selection);
+    if (positions.length) {
+      if (dispatch) {
+        var tr = editorState.tr;
+        setChecklistAttrs(tr);
+        dispatch(tr.scrollIntoView());
+      }
+      return true;
+    }
+    var wrap = schemaList.wrapInList(schema.nodes.bullet_list);
+    if (!dispatch) return wrap(editorState);
+    return wrap(editorState, function(transaction) {
+      setChecklistAttrs(transaction);
+      dispatch(transaction.scrollIntoView());
+    });
+  }
+
   function markdownInputRules() {
     var rules = [];
     var mathDisplay = mathDisplayInputRule();
@@ -20809,6 +21011,8 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
         function(match) { return { level: match[1].length }; }
       ));
     }
+    var taskListItem = taskListItemInputRule();
+    if (taskListItem) rules.push(taskListItem);
     if (schema.nodes.bullet_list) {
       rules.push(inputRulesModule.wrappingInputRule(/^\s*([-+*])\s$/, schema.nodes.bullet_list));
     }
@@ -21152,11 +21356,11 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       setMarkdown: function(markdownText) {
         if (destroyed) return false;
         if (unsupportedMarkdownReason(markdownText)) return false;
-        var current = serializeMarkdown(editorView.state.doc);
         var nextSource = normalizeNewlines(markdownText || '');
-        if (current === nextSource) return true;
+        var nextState = createState(nextSource);
+        if (editorView.state.doc.eq(nextState.doc)) return true;
         applyingExternal = true;
-        try { editorView.updateState(createState(nextSource)); }
+        try { editorView.updateState(nextState); }
         finally { applyingExternal = false; }
         return true;
       },
@@ -21181,6 +21385,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
           case 'quote': return run(commands.wrapIn(schema.nodes.blockquote));
           case 'list': return schema.nodes.bullet_list ? run(schemaList.wrapInList(schema.nodes.bullet_list)) : false;
           case 'ordered-list': return schema.nodes.ordered_list ? run(schemaList.wrapInList(schema.nodes.ordered_list)) : false;
+          case 'checklist': return run(applyChecklistFormatCommand);
           default: return false;
         }
       },

@@ -139,14 +139,40 @@ assert.equal((inlineMath.match(/class="katex"/g) || []).length, 2, 'inline math 
 assert.match(inlineMath, /data-math-source="E=mc\^2"/, 'dollar inline math preserves its source');
 assert.match(inlineMath, /data-math-source="a\^2\+b\^2=c\^2"/, 'paren inline math preserves its source');
 
+const escapedDollarInlineMath = renderer.renderMarkdownHtml(String.raw`価格は $\$$。`);
+assert.equal((escapedDollarInlineMath.match(/class="math-inline"/g) || []).length, 1, 'an escaped literal dollar should remain inside one inline formula');
+assert.ok(escapedDollarInlineMath.includes(String.raw`data-math-source="\$"`), 'an escaped literal dollar should keep exactly one backslash in rendered source metadata');
+
+const emptyInlineMath = renderer.renderMarkdownHtml(String.raw`空の式 \(\)`);
+assert.equal((emptyInlineMath.match(/class="math-inline"/g) || []).length, 1, 'empty parenthesis delimiters should remain an inline formula instead of becoming display math');
+assert.match(emptyInlineMath, /data-math-source=""/, 'empty inline math should preserve an empty source value');
+
+const adjacentInlineMath = renderer.renderMarkdownHtml('$x$$y$');
+assert.equal((adjacentInlineMath.match(/class="math-inline"/g) || []).length, 2, 'adjacent dollar-delimited formulas should render as two formulas');
+assert.match(adjacentInlineMath, /data-math-source="x"/, 'the first adjacent formula should retain its own source');
+assert.match(adjacentInlineMath, /data-math-source="y"/, 'the second adjacent formula should retain its own source');
+
+const headingMath = renderer.renderMarkdownHtml('# 物理の見出し $E=mc^2$');
+assert.match(headingMath, /<h1[^>]*>物理の見出し <span class="math-inline"[^>]*><span class="katex"/, 'inline math should render through KaTeX inside headings');
+
+const tableMath = renderer.renderMarkdownHtml([
+  '| 種別 | 数式 |',
+  '| --- | --- |',
+  '| エネルギー | $E=mc^2$ |',
+  '| 絶対値 | $|x|$ |',
+].join('\n'));
+assert.equal((tableMath.match(/class="math-inline"/g) || []).length, 2, 'inline math should render in table cells even when the LaTeX contains pipe characters');
+assert.equal((tableMath.match(/class="katex"/g) || []).length, 2, 'table-cell math should be rendered by KaTeX');
+assert.match(tableMath, /<td[^>]*><span class="math-inline"[^>]*data-math-source="\|x\|"/, 'table-cell math should preserve formula pipes as LaTeX instead of treating them as column separators');
+
 const nonMath = renderer.renderMarkdownHtml('Price \\$100 and code `$raw$`.');
 assert.equal((nonMath.match(/class="math-inline"/g) || []).length, 0, 'escaped dollars and code spans do not become math');
 assert.match(nonMath, /<code>\$raw\$<\/code>/, 'code spans preserve math-looking text');
 
 const mathGalleryRendered = renderer.renderMarkdownHtml(mathGallery);
-assert.equal((mathGalleryRendered.match(/class="math-inline"/g) || []).length, 2, 'math gallery covers both inline delimiter styles');
+assert.equal((mathGalleryRendered.match(/class="math-inline"/g) || []).length, 6, 'math gallery covers inline delimiters, heading math, and table-cell math');
 assert.equal((mathGalleryRendered.match(/class="math-display"/g) || []).length, 4, 'math gallery covers one-line and multiline display delimiter styles');
-assert.ok((mathGalleryRendered.match(/class="katex"/g) || []).length >= 6, 'all gallery formulas render through KaTeX');
+assert.ok((mathGalleryRendered.match(/class="katex"/g) || []).length >= 10, 'all gallery formulas render through KaTeX');
 
 const consecutiveMathBlocks = renderer.renderMarkdownHtml([
   '## KaTeX display',

@@ -618,26 +618,43 @@ textarea.pme-node-source-editor.pme-node-source-popover {
 }
 
 .pme-node-source-editor.pme-node-source-popover.pme-node-source-editor--math-inline {
-  background: transparent;
-  border-color: transparent;
-  border-radius: 0;
-  box-shadow: none;
+  align-items: stretch;
+  background: var(--panel);
+  border-color: color-mix(in srgb, var(--border) 62%, var(--accent));
+  border-radius: 8px;
+  box-shadow: 0 10px 28px color-mix(in srgb, #000 28%, transparent);
   caret-color: var(--accent);
   color: var(--text);
-  display: inline-flex;
-  gap: 0;
-  align-items: baseline;
+  display: flex;
+  flex-direction: column;
+  gap: 0.34rem;
   font-family: var(--mono);
   font-size: 0.92rem;
   line-height: 1.35;
-  min-width: 0;
-  padding: 0;
+  min-width: min(15rem, calc(100vw - 1.5rem));
+  overflow: auto;
+  padding: 0.48rem 0.58rem 0.52rem;
 }
 
 .pme-node-source-editor.pme-node-source-popover.pme-node-source-editor--math-inline:focus,
 .pme-node-source-editor.pme-node-source-popover.pme-node-source-editor--math-inline:focus-within {
-  border-color: transparent;
-  box-shadow: none;
+  border-color: var(--accent);
+  box-shadow: 0 10px 28px color-mix(in srgb, #000 28%, transparent), 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.pme-inline-math-editor-label {
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.pme-inline-math-source-row {
+  align-items: baseline;
+  display: flex;
+  min-width: 0;
+  width: 100%;
 }
 
 .pme-node-source-editor--math-inline .pme-node-source-delimiter {
@@ -660,10 +677,11 @@ textarea.pme-node-source-editor.pme-node-source-popover {
   font: inherit;
   line-height: inherit;
   margin: 0;
+  flex: 1 1 auto;
   min-width: 1ch;
   outline: none;
   padding: 0;
-  width: auto;
+  width: 100%;
 }
 
 textarea.pme-node-source-editor.pme-node-source-popover {
@@ -683,35 +701,43 @@ textarea.pme-node-source-editor.pme-node-source-popover {
   vertical-align: -0.08em;
 }
 
+.rich-editor .math-inline.pme-math-node[data-latex=""] .pme-node-rendered-preview::before {
+  color: var(--muted);
+  content: "空の数式";
+  font-family: var(--sans);
+  font-size: 0.78em;
+  white-space: nowrap;
+}
+
 .rich-editor .math-inline.pme-math-node .pme-node-source-editor {
   width: auto;
   max-width: min(52vw, 32rem);
   vertical-align: baseline;
 }
 
-.rich-editor .math-inline.pme-math-node.is-editing-source .pme-node-rendered-preview {
-  display: none;
-}
-
-.rich-editor .math-inline.pme-math-node .pme-inline-math-edit-preview {
-  background: color-mix(in srgb, var(--panel-soft) 94%, var(--accent));
-  border: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
-  border-radius: 5px;
-  box-shadow: 0 6px 18px color-mix(in srgb, #000 24%, transparent);
-  display: none;
-  font-size: 0.86em;
-  left: 0;
-  line-height: 1.35;
-  padding: 0.08rem 0.24rem;
+.pme-node-source-editor--math-inline .pme-inline-math-edit-preview {
+  align-items: center;
+  border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  display: flex;
+  font-family: var(--sans);
+  gap: 0.5rem;
+  line-height: 1.45;
+  min-height: 1.7rem;
+  overflow-x: auto;
+  padding-top: 0.34rem;
   pointer-events: none;
-  position: absolute;
-  top: calc(100% + 0.65rem);
   white-space: nowrap;
-  z-index: 4;
 }
 
-.rich-editor .math-inline.pme-math-node.is-editing-source .pme-inline-math-edit-preview {
-  display: inline-block;
+.pme-inline-math-edit-preview-label {
+  color: var(--muted);
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.pme-inline-math-edit-preview-value {
+  flex: 0 0 auto;
 }
 
 .rich-editor .math-display.pme-math-node {
@@ -763,8 +789,11 @@ textarea.pme-node-source-editor.pme-node-source-popover {
 }
 
 .rich-editor .math-inline.pme-math-node.is-editing-source {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-radius: 3px;
   min-width: 1ch;
-  outline: none;
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: 3px;
 }
 
 .rich-editor pre.code-block.is-editing-source {

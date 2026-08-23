@@ -52,8 +52,14 @@ Run these checks without npm, package managers, CDN, or network access.
 22. Open a fenced code block in rich mode, change its language field, and confirm the Markdown fence info string updates without losing code text.
 23. Move the caret to the end of a rich link and press `ArrowRight`. Confirm the URL editor opens without clicking and a long URL wraps without clipping.
 24. Open link insertion, image insertion, and an existing rich image source editor with long targets. Confirm each target can be read and edited without horizontal clipping.
-25. Open the keyboard shortcut dialog, change inline code to `Ctrl+Alt+C`, and confirm the tooltip, key action, reload persistence, duplicate rejection, assignment removal, and default reset all work.
+25. Open the keyboard shortcut dialog, change inline code to `Ctrl+Alt+Q`, and confirm the tooltip, key action, reload persistence, duplicate rejection, assignment removal, and default reset all work.
 26. Open appearance settings, switch the document font between Gothic and Mincho, and confirm rich, preview, and focus modes use the same selection while normal source mode and rendered code remain monospaced. Reload and confirm the selection persists.
+27. In rich mode, type `- [ ] ` at the start of an empty paragraph and confirm it becomes an unchecked checklist item instead of a plain bullet item containing `[ ]`.
+28. In rich mode, use both the checklist toolbar button and `Ctrl+Alt+C`, and confirm each converts the current paragraph into a checklist item without losing its text.
+29. In split mode, use a document with long wrapped paragraphs, scroll the source and preview panes in both directions, and confirm the corresponding section remains aligned near the top of the other pane.
+30. In rich mode, click an inline formula and confirm its rendered position remains highlighted while an opaque source editor opens above or below it without covering the formula. Confirm the editor contains both the LaTeX source and a live rendered preview.
+31. Place the rich caret in a heading, press `Ctrl+M`, and confirm the inserted inline formula remains inside the heading in both rich and preview modes and round-trips as heading Markdown.
+32. In rich mode, load a table containing `$E=mc^2$` and `$P(A|B)$`, then press `Ctrl+M` in another cell. Confirm all formulas render in rich and preview modes, formula pipes do not create extra columns, and editing the formula preserves the table structure.
 
 ## Windows portable app
 

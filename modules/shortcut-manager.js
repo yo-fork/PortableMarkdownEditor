@@ -21,6 +21,7 @@
     definition('inline-math', 'インライン数式', '書式', 'Ctrl+M', '[data-action="format"][data-format="math"]'),
     definition('ordered-list', '番号リスト', '書式', 'Ctrl+Shift+7', '[data-action="format"][data-format="ordered-list"]'),
     definition('list', '箇条書き', '書式', 'Ctrl+Shift+8', '[data-action="format"][data-format="list"]'),
+    definition('checklist', 'チェックリスト', '書式', 'Ctrl+Alt+C', '[data-action="format"][data-format="checklist"]'),
     definition('quote', '引用', '書式', 'Ctrl+Shift+9', '[data-action="format"][data-format="quote"]'),
     definition('code-block', 'コードブロック', '挿入', 'Ctrl+Shift+K', '[data-action="insert-code-block"]'),
     definition('math-block', '数式ブロック', '挿入', 'Ctrl+Shift+M', '[data-action="insert-math-block"]'),

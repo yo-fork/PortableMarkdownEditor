@@ -139,6 +139,7 @@ function launchBrowser() {
     '--no-pings',
     '--remote-allow-origins=*',
     '--remote-debugging-port=0',
+    '--window-size=1440,1000',
     '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',
     `--user-data-dir=${profileDirectory}`,
     'about:blank',
@@ -283,6 +284,469 @@ async function checkAppStartup(baseUrl, sessionId) {
   assert.equal(languageResult.listId, 'codeLanguageOptions', 'the rich code language input must retain its suggestion list');
   assert.match(languageResult.codeClassName, /(?:^|\s)hljs(?:\s|$)/, 'the rich code block should use the Highlight.js theme');
   assert.notEqual(languageResult.keywordColor, languageResult.codeColor, 'the selected language should visibly highlight Python keywords');
+
+  await checkRichInlineMathEditingAndHeading(sessionId);
+  await checkRichInlineMathRoundTrips(sessionId);
+  await checkRichTableMathEditing(sessionId);
+  await checkRichChecklistEditing(sessionId);
+  await checkSplitScrollSync(sessionId);
+}
+
+async function checkRichInlineMathEditingAndHeading(sessionId) {
+  await setAppMarkdown('# 物理の見出し\n\n編集対象の前に本文があります。\n', sessionId);
+  await switchMode('rich', sessionId);
+  await poll(
+    `(() => Boolean(document.querySelector('.ProseMirror h1')))()`,
+    Boolean,
+    sessionId,
+    'rich heading startup',
+  );
+  await clickSelector('.ProseMirror h1', sessionId);
+  await pressKey({ key: 'End', code: 'End', windowsVirtualKeyCode: 35 }, sessionId);
+  await connection.send('Input.insertText', { text: ' ' }, sessionId);
+  await pressShortcut({ key: 'm', code: 'KeyM', modifiers: 2 }, sessionId);
+  const headingMath = await poll(
+    `(() => ({
+      markdown: document.getElementById('sourceEditor')?.value || '',
+      richMath: Boolean(document.querySelector('.ProseMirror h1 .pme-math-node .katex')),
+      previewMath: Boolean(document.querySelector('#preview h1 .math-inline .katex')),
+    }))()`,
+    (value) => value?.markdown.includes('# 物理の見出し $x$') && value.richMath && value.previewMath,
+    sessionId,
+    'math inside a heading',
+  );
+  assert.equal(headingMath.richMath, true, 'inline math inserted in a heading should render in rich mode');
+  assert.equal(headingMath.previewMath, true, 'inline math inserted in a heading should render in preview mode');
+
+  await clickSelector('.ProseMirror h1 .pme-math-node', sessionId);
+  const editorLayout = await poll(
+    `(() => {
+      const target = document.querySelector('.ProseMirror h1 .pme-math-node');
+      const rendered = target?.querySelector('.pme-node-rendered-preview');
+      const editor = document.querySelector('.pme-node-source-editor--math-inline.is-source-popover-open');
+      const editPreview = editor?.querySelector('.pme-inline-math-edit-preview');
+      if (!target || !rendered || !editor || !editPreview) return null;
+      const targetRect = target.getBoundingClientRect();
+      const renderedRect = rendered.getBoundingClientRect();
+      const editorRect = editor.getBoundingClientRect();
+      const editorStyle = getComputedStyle(editor);
+      const renderedStyle = getComputedStyle(rendered);
+      const targetStyle = getComputedStyle(target);
+      return {
+        targetRect: { left: targetRect.left, top: targetRect.top, right: targetRect.right, bottom: targetRect.bottom, width: targetRect.width, height: targetRect.height },
+        renderedRect: { width: renderedRect.width, height: renderedRect.height },
+        editorRect: { left: editorRect.left, top: editorRect.top, right: editorRect.right, bottom: editorRect.bottom, width: editorRect.width, height: editorRect.height },
+        renderedDisplay: renderedStyle.display,
+        editorBackground: editorStyle.backgroundColor,
+        editorBorderStyle: editorStyle.borderStyle,
+        targetOutlineStyle: targetStyle.outlineStyle,
+        targetOutlineWidth: targetStyle.outlineWidth,
+        inputLabel: editor.querySelector('.pme-node-source-editor-input')?.getAttribute('aria-label') || '',
+        previewVisible: getComputedStyle(editPreview).display !== 'none' && editPreview.getBoundingClientRect().height > 0,
+      };
+    })()`,
+    (value) => Boolean(value?.editorRect?.width && value?.previewVisible),
+    sessionId,
+    'inline math editor layout',
+  );
+  const verticallySeparated = editorLayout.editorRect.bottom <= editorLayout.targetRect.top - 4
+    || editorLayout.editorRect.top >= editorLayout.targetRect.bottom + 4;
+  assert.notEqual(editorLayout.renderedDisplay, 'none', 'the original rendered formula should remain visible while its source is edited');
+  assert.ok(editorLayout.renderedRect.width > 0 && editorLayout.renderedRect.height > 0, 'the edited formula should remain identifiable in the heading');
+  assert.equal(verticallySeparated, true, `the inline math editor must not overlap its rendered formula: ${JSON.stringify(editorLayout)}`);
+  assert.doesNotMatch(editorLayout.editorBackground, /rgba?\([^)]*,\s*0(?:\.0+)?\)$/i, 'the inline math editor should have an opaque surface over surrounding body text');
+  assert.notEqual(editorLayout.editorBorderStyle, 'none', 'the inline math editor should have a visible boundary');
+  assert.notEqual(editorLayout.targetOutlineStyle, 'none', 'the formula being edited should have a visible target indicator');
+  assert.notEqual(editorLayout.targetOutlineWidth, '0px', 'the formula target indicator should have a visible width');
+  assert.equal(editorLayout.inputLabel, 'インライン数式のソース', 'the inline math source input should identify its purpose');
+
+  await evaluate(
+    `(() => {
+      const input = document.querySelector('.pme-node-source-editor--math-inline.is-source-popover-open .pme-node-source-editor-input');
+      input.focus();
+      input.setSelectionRange(0, input.value.length);
+      return input.value;
+    })()`,
+    sessionId,
+  );
+  await connection.send('Input.insertText', { text: 'F=ma' }, sessionId);
+  await poll(
+    `(() => ({
+      markdown: document.getElementById('sourceEditor')?.value || '',
+      preview: document.querySelector('.pme-node-source-editor--math-inline.is-source-popover-open .pme-inline-math-edit-preview')?.textContent || '',
+    }))()`,
+    (value) => value?.markdown.includes('# 物理の見出し $F=ma$') && value.preview.includes('F'),
+    sessionId,
+    'inline math live source editing',
+  );
+}
+
+async function checkRichInlineMathRoundTrips(sessionId) {
+  await setAppMarkdown('価格は $x$ です。', sessionId);
+  await switchMode('rich', sessionId);
+  await poll(
+    `document.querySelector('.ProseMirror .pme-math-node')?.getAttribute('data-latex') || ''`,
+    (value) => value === 'x',
+    sessionId,
+    'inline math round-trip startup',
+  );
+
+  await clickSelector('.ProseMirror .pme-math-node', sessionId);
+  await evaluate(
+    `(() => { const input = document.querySelector('.pme-node-source-editor--math-inline.is-source-popover-open .pme-node-source-editor-input'); input.focus(); input.setSelectionRange(input.value.length, input.value.length); return input.value; })()`,
+    sessionId,
+  );
+  await connection.send('Input.insertText', { text: '+1' }, sessionId);
+  await poll(
+    `document.getElementById('sourceEditor')?.value || ''`,
+    (value) => value === '価格は $x+1$ です。',
+    sessionId,
+    'partial inline math edit',
+  );
+
+  await evaluate(
+    `(() => { const input = document.querySelector('.pme-node-source-editor--math-inline.is-source-popover-open .pme-node-source-editor-input'); input.setSelectionRange(input.value.length, input.value.length); return input.value; })()`,
+    sessionId,
+  );
+  await connection.send('Input.insertText', { text: '$' }, sessionId);
+  const escapedDollarMarkdown = String.raw`価格は $x+1\$$ です。`;
+  const escapedDollarLatex = String.raw`x+1\$`;
+  const escapedDollarState = await poll(
+    `(() => ({
+      input: document.querySelector('.pme-node-source-editor--math-inline.is-source-popover-open .pme-node-source-editor-input')?.value || '',
+      latex: document.querySelector('.ProseMirror .pme-math-node')?.getAttribute('data-latex') || '',
+      markdown: document.getElementById('sourceEditor')?.value || '',
+    }))()`,
+    (value) => value?.input === escapedDollarLatex && value.latex === escapedDollarLatex && value.markdown === escapedDollarMarkdown,
+    sessionId,
+    'literal dollar inside inline math',
+  );
+  assert.equal(escapedDollarState.input, escapedDollarLatex, 'an unescaped dollar typed in the formula editor should become a single escaped literal');
+
+  await switchMode('source', sessionId);
+  assert.equal(await evaluate(`document.getElementById('sourceEditor')?.value || ''`, sessionId), escapedDollarMarkdown, 'switching away from rich mode should preserve escaped-dollar math');
+  await switchMode('rich', sessionId);
+  await poll(
+    `document.querySelector('.ProseMirror .pme-math-node')?.getAttribute('data-latex') || ''`,
+    (value) => value === escapedDollarLatex,
+    sessionId,
+    'escaped-dollar math after mode switch',
+  );
+
+  await clickSelector('.ProseMirror .pme-math-node', sessionId);
+  await evaluate(
+    `(() => { const input = document.querySelector('.pme-node-source-editor--math-inline.is-source-popover-open .pme-node-source-editor-input'); input.setSelectionRange(0, 0); return input.value; })()`,
+    sessionId,
+  );
+  await pressKey({ key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 }, sessionId);
+  const boundaryState = await poll(
+    `(() => ({
+      markdown: document.getElementById('sourceEditor')?.value || '',
+      latex: document.querySelector('.ProseMirror .pme-math-node')?.getAttribute('data-latex') || '',
+      editorOpen: Boolean(document.querySelector('.pme-node-source-editor--math-inline.is-source-popover-open')),
+    }))()`,
+    (value) => value?.markdown === escapedDollarMarkdown && value.latex === escapedDollarLatex && !value.editorOpen,
+    sessionId,
+    'inline math Backspace boundary',
+  );
+  assert.equal(boundaryState.markdown, escapedDollarMarkdown, 'Backspace at the start of formula content should exit without deleting the whole formula');
+
+  await clickSelector('.ProseMirror .pme-math-node', sessionId);
+  await evaluate(
+    `(() => { const input = document.querySelector('.pme-node-source-editor--math-inline.is-source-popover-open .pme-node-source-editor-input'); input.setSelectionRange(0, input.value.length); return input.value; })()`,
+    sessionId,
+  );
+  await pressKey({ key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 }, sessionId);
+  const emptyMathMarkdown = String.raw`価格は \(\) です。`;
+  const emptyMathState = await poll(
+    `(() => {
+      const node = document.querySelector('.ProseMirror .pme-math-node');
+      const editor = document.querySelector('.pme-node-source-editor--math-inline.is-source-popover-open');
+      const before = editor?.querySelector('.pme-inline-source-token--before')?.textContent || '';
+      const after = editor?.querySelector('.pme-inline-source-token--after')?.textContent || '';
+      const placeholder = node?.querySelector('.pme-node-rendered-preview');
+      return {
+        markdown: document.getElementById('sourceEditor')?.value || '',
+        latex: node?.getAttribute('data-latex') ?? null,
+        before,
+        after,
+        placeholder: placeholder ? getComputedStyle(placeholder, '::before').content : '',
+      };
+    })()`,
+    (value) => value?.markdown === emptyMathMarkdown && value.latex === '' && value.before === '\\(' && value.after === '\\)',
+    sessionId,
+    'empty inline math normalization',
+  );
+  assert.match(emptyMathState.placeholder, /空の数式/, 'an empty inline formula should remain visible and selectable in rich mode');
+  assert.doesNotMatch(emptyMathState.markdown, /\$\$/, 'empty inline math must not turn into display-math delimiters');
+
+  await switchMode('source', sessionId);
+  assert.equal(await evaluate(`document.getElementById('sourceEditor')?.value || ''`, sessionId), emptyMathMarkdown, 'empty inline math should remain stable outside rich mode');
+  await switchMode('rich', sessionId);
+  await poll(
+    `(() => ({ count: document.querySelectorAll('.ProseMirror .pme-math-node').length, latex: document.querySelector('.ProseMirror .pme-math-node')?.getAttribute('data-latex') ?? null }))()`,
+    (value) => value?.count === 1 && value.latex === '',
+    sessionId,
+    'empty inline math after mode switch',
+  );
+
+  await clickSelector('.ProseMirror .pme-math-node', sessionId);
+  await connection.send('Input.insertText', { text: 'z' }, sessionId);
+  await poll(
+    `document.getElementById('sourceEditor')?.value || ''`,
+    (value) => value === '価格は $z$ です。',
+    sessionId,
+    'resume editing empty inline math',
+  );
+  await pressKey({ key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 }, sessionId);
+  await connection.send('Input.insertText', { text: '$' }, sessionId);
+  const adjacentDollarMarkdown = String.raw`価格は \(z\)$ です。`;
+  await poll(
+    `(() => ({ markdown: document.getElementById('sourceEditor')?.value || '', mathCount: document.querySelectorAll('.ProseMirror .pme-math-node').length, latex: document.querySelector('.ProseMirror .pme-math-node')?.getAttribute('data-latex') || '' }))()`,
+    (value) => value?.markdown === adjacentDollarMarkdown && value.mathCount === 1 && value.latex === 'z',
+    sessionId,
+    'literal dollar adjacent to inline math',
+  );
+  await switchMode('source', sessionId);
+  assert.equal(await evaluate(`document.getElementById('sourceEditor')?.value || ''`, sessionId), adjacentDollarMarkdown, 'an adjacent literal dollar should retain a distinct formula during mode switching');
+  await switchMode('rich', sessionId);
+  await poll(
+    `(() => ({ count: document.querySelectorAll('.ProseMirror .pme-math-node').length, latex: document.querySelector('.ProseMirror .pme-math-node')?.getAttribute('data-latex') || '' }))()`,
+    (value) => value?.count === 1 && value.latex === 'z',
+    sessionId,
+    'adjacent literal dollar after mode switch',
+  );
+
+  await setAppMarkdown('隣接: $x$$y$', sessionId);
+  await switchMode('rich', sessionId);
+  await poll(
+    `document.querySelectorAll('.ProseMirror .pme-math-node').length`,
+    (value) => value === 2,
+    sessionId,
+    'adjacent inline formulas',
+  );
+  await switchMode('source', sessionId);
+  assert.equal(
+    await evaluate(`document.getElementById('sourceEditor')?.value || ''`, sessionId),
+    String.raw`隣接: \(x\)\(y\)`,
+    'adjacent formulas should keep separate unambiguous delimiters after leaving rich mode',
+  );
+}
+
+async function checkRichTableMathEditing(sessionId) {
+  await setAppMarkdown([
+    '| 種別 | 数式 |',
+    '| --- | --- |',
+    '| エネルギー | $E=mc^2$ |',
+    '| 絶対値 | $|x|$ |',
+    '| 追加 | 値 |',
+  ].join('\n'), sessionId);
+  await switchMode('rich', sessionId);
+  const loadedMath = await poll(
+    `(() => ({
+      richCount: document.querySelectorAll('.ProseMirror table .pme-math-node .katex').length,
+      previewCount: document.querySelectorAll('#preview table .math-inline .katex').length,
+      absoluteSource: document.querySelector('.ProseMirror tbody tr:nth-child(3) td:nth-child(2) .pme-math-node')?.getAttribute('data-latex') || '',
+    }))()`,
+    (value) => value?.richCount === 2 && value.previewCount === 2 && value.absoluteSource === '|x|',
+    sessionId,
+    'table-cell math startup',
+  );
+  assert.equal(loadedMath.absoluteSource, '|x|', 'formula pipes inside a table cell should remain LaTeX content');
+
+  await clickSelector('.ProseMirror tbody tr:nth-child(4) td:nth-child(2)', sessionId);
+  await pressKey({ key: 'End', code: 'End', windowsVirtualKeyCode: 35 }, sessionId);
+  await connection.send('Input.insertText', { text: ' ' }, sessionId);
+  await pressShortcut({ key: 'm', code: 'KeyM', modifiers: 2 }, sessionId);
+  await poll(
+    `(() => ({
+      markdown: document.getElementById('sourceEditor')?.value || '',
+      richCount: document.querySelectorAll('.ProseMirror table .pme-math-node .katex').length,
+      previewCount: document.querySelectorAll('#preview table .math-inline .katex').length,
+    }))()`,
+    (value) => value?.richCount === 3 && value.previewCount === 3 && value.markdown.includes('| 追加 | 値 $x$ |'),
+    sessionId,
+    'table-cell math shortcut insertion',
+  );
+
+  await clickSelector('.ProseMirror tbody tr:nth-child(3) td:nth-child(2) .pme-math-node', sessionId);
+  const sourceValue = await poll(
+    `document.querySelector('.pme-node-source-editor--math-inline.is-source-popover-open .pme-node-source-editor-input')?.value || ''`,
+    (value) => value === '|x|',
+    sessionId,
+    'table-cell math source editor',
+  );
+  assert.equal(sourceValue, '|x|', 'table-cell math editor should show the original LaTeX pipe characters');
+
+  await evaluate(
+    `(() => {
+      const input = document.querySelector('.pme-node-source-editor--math-inline.is-source-popover-open .pme-node-source-editor-input');
+      input.focus();
+      input.setSelectionRange(0, input.value.length);
+      return input.value;
+    })()`,
+    sessionId,
+  );
+  await connection.send('Input.insertText', { text: 'P(A|B)' }, sessionId);
+  await poll(
+    `(() => ({
+      markdown: document.getElementById('sourceEditor')?.value || '',
+      previewSource: document.querySelector('#preview tbody tr:nth-child(2) td:nth-child(2) .math-inline')?.getAttribute('data-math-source') || '',
+    }))()`,
+    (value) => value?.markdown.includes('$P(A\\|B)$') && value.previewSource === 'P(A|B)',
+    sessionId,
+    'table-cell math source round trip',
+  );
+}
+
+async function checkRichChecklistEditing(sessionId) {
+  await setAppMarkdown('', sessionId);
+  await switchMode('rich', sessionId);
+  await poll(
+    `(() => Boolean(document.querySelector('.ProseMirror p')))()`,
+    Boolean,
+    sessionId,
+    'empty rich paragraph startup',
+  );
+  await clickSelector('.ProseMirror p', sessionId);
+  for (const text of ['-', ' ', '[', ' ', ']', ' ', '入力項目']) {
+    await connection.send('Input.insertText', { text }, sessionId);
+  }
+  const typedChecklist = await poll(
+    `(() => ({ markdown: document.getElementById('sourceEditor')?.value || '', checkbox: Boolean(document.querySelector('.ProseMirror .pme-task-checkbox')), text: document.querySelector('.ProseMirror li')?.textContent || '' }))()`,
+    (value) => value?.checkbox && value.markdown.includes('- [ ] 入力項目'),
+    sessionId,
+    'typed rich checklist conversion',
+  );
+  assert.match(typedChecklist.text, /入力項目/, 'typed checklist content should remain editable');
+
+  await setAppMarkdown('ボタン項目\n', sessionId);
+  await switchMode('rich', sessionId);
+  await clickSelector('.ProseMirror p', sessionId);
+  await clickSelector('[data-action="format"][data-format="checklist"]', sessionId);
+  await poll(
+    `(() => ({ markdown: document.getElementById('sourceEditor')?.value || '', checkbox: Boolean(document.querySelector('.ProseMirror .pme-task-checkbox')) }))()`,
+    (value) => value?.checkbox && value.markdown.includes('- [ ] ボタン項目'),
+    sessionId,
+    'rich checklist toolbar insertion',
+  );
+
+  await setAppMarkdown('ショートカット項目\n', sessionId);
+  await switchMode('rich', sessionId);
+  await clickSelector('.ProseMirror p', sessionId);
+  await pressShortcut({ key: 'c', code: 'KeyC', modifiers: 3 }, sessionId);
+  await poll(
+    `(() => ({ markdown: document.getElementById('sourceEditor')?.value || '', checkbox: Boolean(document.querySelector('.ProseMirror .pme-task-checkbox')) }))()`,
+    (value) => value?.checkbox && value.markdown.includes('- [ ] ショートカット項目'),
+    sessionId,
+    'rich checklist keyboard insertion',
+  );
+}
+
+async function checkSplitScrollSync(sessionId) {
+  const paragraphTail = ' 折り返し位置を検証するための長い本文です。'.repeat(24);
+  const markdown = Array.from({ length: 36 }, (_, index) => `section-${String(index + 1).padStart(2, '0')}${paragraphTail}`).join('\n\n');
+  await setAppMarkdown(markdown, sessionId);
+  await switchMode('rich', sessionId);
+  await switchMode('split', sessionId);
+  await poll(
+    `(() => { const source = document.querySelector('.source-codemirror .cm-scroller'); const preview = document.getElementById('preview'); return { sourceReady: Boolean(source), previewReady: Boolean(preview), sourceHeight: source?.scrollHeight || 0, sourceClient: source?.clientHeight || 0, previewHeight: preview?.scrollHeight || 0, previewClient: preview?.clientHeight || 0, blocks: preview?.querySelectorAll('[data-source-start][data-source-end]').length || 0, markdownLength: document.getElementById('sourceEditor')?.value.length || 0 }; })()`,
+    (value) => value?.sourceReady && value.previewReady && value.sourceHeight > value.sourceClient && value.previewHeight > value.previewClient && value.blocks >= 36,
+    sessionId,
+    'split scroll fixtures',
+  );
+
+  await evaluate(
+    `(() => { const source = document.querySelector('.source-codemirror .cm-scroller'); source.scrollTop = (source.scrollHeight - source.clientHeight) * 0.48; source.dispatchEvent(new Event('scroll')); return source.scrollTop; })()`,
+    sessionId,
+  );
+  const sourceToPreview = await poll(
+    splitScrollMarkerExpression(),
+    (value) => value?.sourceMarker > 0 && value.previewMarker > 0 && Math.abs(value.sourceMarker - value.previewMarker) <= 1,
+    sessionId,
+    'source-to-preview semantic scroll sync',
+  );
+  assert.ok(Math.abs(sourceToPreview.sourceMarker - sourceToPreview.previewMarker) <= 1, `source-to-preview markers should align: ${JSON.stringify(sourceToPreview)}`);
+
+  await delay(100);
+  await evaluate(
+    `(() => { const preview = document.getElementById('preview'); preview.scrollTop = (preview.scrollHeight - preview.clientHeight) * 0.72; preview.dispatchEvent(new Event('scroll')); return preview.scrollTop; })()`,
+    sessionId,
+  );
+  const previewToSource = await poll(
+    splitScrollMarkerExpression(),
+    (value) => value?.sourceMarker > 0 && value.previewMarker > 0 && Math.abs(value.sourceMarker - value.previewMarker) <= 1,
+    sessionId,
+    'preview-to-source semantic scroll sync',
+  );
+  assert.ok(Math.abs(previewToSource.sourceMarker - previewToSource.previewMarker) <= 1, `preview-to-source markers should align: ${JSON.stringify(previewToSource)}`);
+}
+
+function splitScrollMarkerExpression() {
+  return `(() => {
+    const marker = (value) => Number(/section-(\\d+)/.exec(value || '')?.[1] || 0);
+    const source = document.querySelector('.source-codemirror .cm-scroller');
+    const preview = document.getElementById('preview');
+    if (!source || !preview) return null;
+    const sourceY = source.getBoundingClientRect().top + Math.min(72, Math.max(16, source.clientHeight * 0.12));
+    const sourceLines = Array.from(source.querySelectorAll('.cm-line')).filter((line) => marker(line.textContent));
+    const sourceLine = sourceLines.reduce((best, line) => {
+      const rect = line.getBoundingClientRect();
+      const distance = sourceY < rect.top ? rect.top - sourceY : sourceY > rect.bottom ? sourceY - rect.bottom : 0;
+      return !best || distance < best.distance ? { line, distance } : best;
+    }, null)?.line;
+    const previewY = preview.getBoundingClientRect().top + Math.min(72, Math.max(16, preview.clientHeight * 0.12));
+    const blocks = Array.from(preview.querySelectorAll('[data-source-start][data-source-end]'));
+    let previewBlock = blocks[0] || null;
+    for (const block of blocks) {
+      previewBlock = block;
+      if (block.getBoundingClientRect().bottom >= previewY) break;
+    }
+    return {
+      sourceMarker: marker(sourceLine?.textContent),
+      previewMarker: marker(previewBlock?.textContent),
+      sourceTop: source.scrollTop,
+      previewTop: preview.scrollTop,
+    };
+  })()`;
+}
+
+async function setAppMarkdown(markdown, sessionId) {
+  await evaluate(
+    `(() => { const source = document.getElementById('sourceEditor'); source.value = ${JSON.stringify(markdown)}; source.dispatchEvent(new Event('input', { bubbles: true })); return source.value; })()`,
+    sessionId,
+  );
+}
+
+async function switchMode(mode, sessionId) {
+  await clickSelector(`[data-action="mode"][data-mode="${mode}"]`, sessionId);
+  await poll(`document.body.dataset.mode || ''`, (value) => value === mode, sessionId, `${mode} mode startup`);
+}
+
+async function pressShortcut({ key, code, modifiers }, sessionId) {
+  await pressKey({
+    key,
+    code,
+    modifiers,
+    windowsVirtualKeyCode: key.toUpperCase().charCodeAt(0),
+  }, sessionId);
+}
+
+async function pressKey({ key, code, modifiers = 0, windowsVirtualKeyCode = 0 }, sessionId) {
+  await connection.send('Input.dispatchKeyEvent', {
+    type: 'rawKeyDown',
+    key,
+    code,
+    modifiers,
+    windowsVirtualKeyCode,
+  }, sessionId);
+  await connection.send('Input.dispatchKeyEvent', {
+    type: 'keyUp',
+    key,
+    code,
+    modifiers,
+    windowsVirtualKeyCode,
+  }, sessionId);
 }
 
 async function clickSelector(selector, sessionId) {

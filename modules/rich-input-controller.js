@@ -48,6 +48,7 @@
       insertLink,
       insertMathBlock,
       insertMermaid,
+      inlineMathTokenAt,
       isEmptyRichParagraph,
       isProseMirrorRichActive,
       isProseMirrorRichEventContext,
@@ -1810,9 +1811,17 @@
 
       const cells = [];
       let cellStart = start;
+      let inlineMathEnd = -1;
       for (let index = start; index <= end; index += 1) {
+        if (index >= inlineMathEnd) {
+          const math = inlineMathTokenAt(value, index);
+          inlineMathEnd = math ? math.end : -1;
+        }
         const atEnd = index === end;
-        const isPipe = !atEnd && value[index] === '|' && !isEscapedMarkdownPipe(value, index);
+        const isPipe = !atEnd
+          && value[index] === '|'
+          && index >= inlineMathEnd
+          && !isEscapedMarkdownPipe(value, index);
         if (!atEnd && !isPipe) continue;
         cells.push(tableCellSourceRangeFromSegment(value, cellStart, index));
         cellStart = index + 1;
@@ -3216,6 +3225,7 @@
         case 'h6':
         case 'ordered-list':
         case 'list':
+        case 'checklist':
         case 'quote':
           applyFormat(action);
           break;

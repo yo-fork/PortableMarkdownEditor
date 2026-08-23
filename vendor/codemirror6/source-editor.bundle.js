@@ -33277,6 +33277,31 @@ function createPortableMarkdownSourceEditor(options) {
     hasFocus() {
       return view.hasFocus;
     },
+    captureScrollAnchor(viewportY = 0) {
+      const scroller = view.scrollDOM;
+      const y = Math.max(0, Math.min(scroller.clientHeight, Number(viewportY) || 0));
+      const documentY = scroller.scrollTop + y;
+      const block = view.lineBlockAtHeight(documentY);
+      const sourceLineY = Math.max(0, documentY - block.top);
+      const progress = block.height > 0 ? Math.max(0, Math.min(1, sourceLineY / block.height)) : 0;
+      return {
+        offset: Math.round(block.from + Math.max(0, block.to - block.from) * progress),
+        sourceLineY,
+        viewportY: y,
+      };
+    },
+    restoreScrollAnchor(anchor = {}) {
+      const scroller = view.scrollDOM;
+      const offset = clampOffset(anchor.offset, view.state.doc.length);
+      const block = view.lineBlockAt(offset);
+      const viewportY = Math.max(0, Math.min(scroller.clientHeight, Number(anchor.viewportY) || 0));
+      const sourceProgress = block.to > block.from ? (offset - block.from) / (block.to - block.from) : 0;
+      const sourceLineY = Number.isFinite(Number(anchor.sourceLineY))
+        ? Math.max(0, Number(anchor.sourceLineY))
+        : Math.max(0, block.height * sourceProgress);
+      scroller.scrollTop = Math.max(0, block.top + sourceLineY - viewportY);
+      return true;
+    },
     scrollElement() {
       return view.scrollDOM;
     },

@@ -1060,13 +1060,13 @@
     },
     {
       "path": "vendor/codemirror6/source-editor.js",
-      "bytes": 5979,
-      "sha256": "89f03e67bb4512ec464fd1d8c5b234be28ef23d13735581f31ae1ebd37e04f3f"
+      "bytes": 7252,
+      "sha256": "7181d09d037f02a9a6135eb8319b06a2be0a7e1853b03597d5ff41b98e93e718"
     },
     {
       "path": "vendor/codemirror6/source-editor.bundle.js",
-      "bytes": 1424823,
-      "sha256": "42a6e0e51e76288b1f94acd56b7920c951c123d31d8477b819bc5a0308452cef"
+      "bytes": 1426096,
+      "sha256": "42b337ccef98cff28202b0e57171ac5af96135d943e1b18eb32d552e741f6917"
     },
     {
       "path": "vendor/highlight/LICENSE",
@@ -1613,10 +1613,10 @@
       "bytes": 508,
       "sha256": "f3b67e069f18dd1fbd44480940d9ec8bc70fe4bb611d827fe6d6c70cac858990"
     },
-    {
-      "path": "vendor/prosemirror/prosemirror-editor.js",
-      "bytes": 814792,
-      "sha256": "888dd432bfb4f4bcdfc4839f7771d41c048d5286faacf691135ee28a7e5510df"
-    }
+      {
+        "path": "vendor/prosemirror/prosemirror-editor.js",
+        "bytes": 823875,
+        "sha256": "e573fc684bad634a47035e17f1f762297c295aa503c538d52999f7968b798adf"
+      }
   ]
 }
