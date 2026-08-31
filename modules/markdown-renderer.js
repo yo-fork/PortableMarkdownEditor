@@ -56,7 +56,8 @@
     function renderMarkdownHtml(markdown) {
       const blocks = buildBlockModel(stripRichCaretTokens(markdown));
       const headings = buildHeadingIndex(blocks);
-      return blocks.map((block) => annotateRenderedBlockHtml(renderBlockHtml(block, headings), block)).join('\n');
+      const references = collectReferenceDefinitions(markdown);
+      return blocks.map((block) => annotateRenderedBlockHtml(renderBlockHtml(block, headings, references), block)).join('\n');
     }
 
     function buildBlockModel(markdown) {
@@ -315,6 +316,30 @@
       return normalizeNewlines(markdown).replace(/^\s*\[toc\]\s*$/gim, VENDOR_TOC_MARKER);
     }
 
+    function collectReferenceDefinitions(markdown) {
+      const md = getVendorMarkdownRenderer();
+      if (!md) return null;
+      const env = {};
+      try {
+        md.parse(preprocessVendorMarkdown(markdown), env);
+      } catch (_) {
+        return null;
+      }
+      return env.references && Object.keys(env.references).length ? env.references : null;
+    }
+
+    function containsReferenceDefinition(markdown) {
+      const md = getVendorMarkdownRenderer();
+      if (!md) return false;
+      const env = {};
+      try {
+        md.parse(preprocessVendorMarkdown(markdown), env);
+      } catch (_) {
+        return false;
+      }
+      return Boolean(env.references && Object.keys(env.references).length);
+    }
+
     function highlightCodeWithVendor(code, lang) {
       if (!window.hljs) return escapeHtml(code);
       try {
@@ -455,12 +480,15 @@
       return 'paragraph';
     }
 
-    function renderBlockHtml(block, headingIndex) {
+    function renderBlockHtml(block, headingIndex, references = null) {
+      if (references && containsReferenceDefinition(block.raw)) {
+        return renderBlockWithVendor(block.raw, block, references);
+      }
       switch (block.type) {
         case 'heading':
-          return renderHeading(block, headingIndex);
+          return renderHeading(block, headingIndex, references);
         case 'paragraph':
-          if (block.trailingNewline && /[ \t]{2}$/.test(block.raw || '')) return renderParagraph(block.raw, block);
+          if (block.trailingNewline && /[ \t]{2}$/.test(block.raw || '')) return renderParagraph(block.raw, block, references);
           break;
         case 'toc':
           return renderToc(headingIndex.items);
@@ -469,13 +497,13 @@
         case 'math':
           return renderMathBlock(block.raw);
         case 'list':
-          return renderList(block.raw, block);
+          return renderList(block.raw, block, references);
         case 'table':
-          return renderTable(block.raw);
+          return renderTable(block.raw, references);
         case 'quote':
-          return renderQuote(block.raw, block);
+          return renderQuote(block.raw, block, references);
         default: {
-          const vendorHtml = renderBlockWithVendor(block.raw, block);
+          const vendorHtml = renderBlockWithVendor(block.raw, block, references);
           if (vendorHtml) return vendorHtml;
         }
       }
@@ -484,34 +512,36 @@
         case 'rule':
           return '<hr>';
         case 'quote':
-          return renderQuote(block.raw, block);
+          return renderQuote(block.raw, block, references);
         default:
-          return renderParagraph(block.raw, block);
+          return renderParagraph(block.raw, block, references);
       }
     }
 
-    function renderHeading(block, headingIndex) {
+    function renderHeading(block, headingIndex, references = null) {
       const raw = block.raw;
       const match = raw.match(/^\s*(#{1,6})\s+(.+?)\s*#*\s*$/);
-      if (!match) return renderParagraph(raw, block);
+      if (!match) return renderParagraph(raw, block, references);
       const level = match[1].length;
       const text = stripInlineMarkdown(match[2]);
       const id = headingIndex.byOffset.get(block.start) || slugify(text);
-      return `<h${level} id="${escapeAttribute(id)}">${renderInlineMarkdown(match[2])}</h${level}>`;
+      return `<h${level} id="${escapeAttribute(id)}">${renderInlineMarkdown(match[2], references)}</h${level}>`;
     }
 
-    function renderBlockWithVendor(raw, block = null) {
+    function renderBlockWithVendor(raw, block = null, references = null) {
       if (hasAmbiguousStrongDelimiterNeighborhood(raw) || hasBlockedMarkdownLink(raw)) return '';
       const md = getVendorMarkdownRenderer();
       if (!md) return '';
-      return md.render(preprocessVendorMarkdown(raw), buildMarkdownItEnv(raw, block)).trimEnd();
+      return md.render(preprocessVendorMarkdown(raw), buildMarkdownItEnv(raw, block, references)).trimEnd();
     }
 
-    function buildMarkdownItEnv(raw, block) {
-      return {
+    function buildMarkdownItEnv(raw, block, references = null) {
+      const env = {
         baseOffset: Number.isFinite(block?.start) ? block.start : 0,
         lineOffsets: getLineStartOffsets(raw),
       };
+      if (references) env.references = { ...references };
+      return env;
     }
 
     function getLineStartOffsets(raw) {
@@ -523,12 +553,12 @@
       return offsets;
     }
 
-    function renderInlineMarkdown(raw) {
+    function renderInlineMarkdown(raw, references = null) {
       const safeRaw = stripRichCaretTokens(raw);
-      if (hasAmbiguousStrongDelimiterNeighborhood(safeRaw) || hasBlockedMarkdownLink(safeRaw)) return renderInline(safeRaw);
+      if (hasAmbiguousStrongDelimiterNeighborhood(safeRaw) || hasBlockedMarkdownLink(safeRaw)) return renderInline(safeRaw, references);
       const md = getVendorMarkdownRenderer();
-      if (!md) return renderInline(safeRaw);
-      return md.renderInline(String(safeRaw || ''));
+      if (!md) return renderInline(safeRaw, references);
+      return md.renderInline(String(safeRaw || ''), references ? { references: { ...references } } : {});
     }
 
     function hasAmbiguousStrongDelimiterNeighborhood(raw) {
@@ -602,7 +632,7 @@
       ].join('');
     }
 
-    function renderParagraph(raw, block = null) {
+    function renderParagraph(raw, block = null, references = null) {
       const lines = raw.split('\n');
       const rendered = lines.map((line, index) => {
         const trailingHardBreak = index === lines.length - 1
@@ -610,12 +640,12 @@
           && /[ \t]{2}$/.test(line);
         const anchorOffset = Number.isFinite(block?.end) ? block.end + 1 : '';
         const anchor = `<br><span class="rich-line-break-caret-anchor" data-source-offset="${escapeAttribute(anchorOffset)}">\u200b</span>`;
-        return `${renderInline(line)}${trailingHardBreak ? anchor : ''}`;
+        return `${renderInline(line, references)}${trailingHardBreak ? anchor : ''}`;
       });
       return `<p>${rendered.join('<br>')}</p>`;
     }
 
-    function renderQuote(raw, block = null) {
+    function renderQuote(raw, block = null, references = null) {
       const lines = raw.split('\n');
       const trailingEmptyQuoteLine = lines.length > 1 && /^\s*>\s?$/.test(lines[lines.length - 1] || '');
       const previousQuoteContent = trailingEmptyQuoteLine
@@ -626,7 +656,7 @@
       const anchor = `<span class="rich-line-break-caret-anchor" data-source-offset="${escapeAttribute(anchorOffset)}">\u200b</span>`;
       const body = lines
         .map((line) => line.replace(/^\s*>\s?/, ''))
-        .map((line) => renderInline(line))
+        .map((line) => renderInline(line, references))
         .join('<br>');
       if (trailingHardBreak) {
         return `<blockquote data-rich-quote-hard-break-source="${escapeAttribute(raw)}">${body}${anchor}</blockquote>`;
@@ -634,7 +664,7 @@
       return `<blockquote>${body}</blockquote>`;
     }
 
-    function renderList(raw, block = null) {
+    function renderList(raw, block = null, references = null) {
       const lines = getLines(raw).filter((line) => line.text.trim() !== '');
       const ordered = /^\s*\d+\.(?:\s+|$)/.test(lines[0]?.text || '');
       const tag = ordered ? 'ol' : 'ul';
@@ -668,33 +698,33 @@
       }
 
       const items = itemsData.map((item) => {
-        const body = renderListItemBody(item.lines);
+        const body = renderListItemBody(item.lines, references);
         return `<li${item.className}>${item.checkbox}${body}</li>`;
       }).join('');
       const classAttr = hasTasks ? ' class="task-list"' : '';
       return `<${tag}${classAttr}>${items}</${tag}>`;
     }
 
-    function renderListItemBody(lines) {
-      const body = lines.map((line) => renderInlineMarkdown(line)).join('<br>');
+    function renderListItemBody(lines, references = null) {
+      const body = lines.map((line) => renderInlineMarkdown(line, references)).join('<br>');
       return body || '<span class="rich-list-caret-anchor">\u200b</span><br>';
     }
 
-    function renderTable(raw) {
+    function renderTable(raw, references = null) {
       const lines = raw.split('\n').filter((line) => line.trim() !== '');
-      if (lines.length < 2) return renderParagraph(raw);
+      if (lines.length < 2) return renderParagraph(raw, null, references);
       const headers = splitTableRow(lines[0]);
       const aligns = splitTableRow(lines[1]).map(parseAlign);
       const rows = lines.slice(2).map(splitTableRow);
-      const head = headers.map((cell, i) => `<th${alignAttr(aligns[i])}>${renderTableCell(cell)}</th>`).join('');
-      const body = rows.map((row) => `<tr>${headers.map((_, i) => `<td${alignAttr(aligns[i])}>${renderTableCell(row[i] || '')}</td>`).join('')}</tr>`).join('');
+      const head = headers.map((cell, i) => `<th${alignAttr(aligns[i])}>${renderTableCell(cell, references)}</th>`).join('');
+      const body = rows.map((row) => `<tr>${headers.map((_, i) => `<td${alignAttr(aligns[i])}>${renderTableCell(row[i] || '', references)}</td>`).join('')}</tr>`).join('');
       return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
     }
 
-    function renderTableCell(raw) {
+    function renderTableCell(raw, references = null) {
       return String(raw || '')
         .split(/<br\s*\/?>/i)
-        .map((part) => renderInline(part))
+        .map((part) => renderInline(part, references))
         .join('<br>');
     }
 
@@ -703,7 +733,16 @@
       return `<nav class="toc" aria-label="目次"><strong>目次</strong>${renderTocTree(buildHeadingTree(headings), true)}</nav>`;
     }
 
-    function renderInline(raw) {
+    function renderInline(raw, references = null) {
+      if (references) {
+        const md = getVendorMarkdownRenderer();
+        if (md) {
+          try {
+            return md.renderInline(String(raw || ''), { references: { ...references } });
+          } catch (_) {
+          }
+        }
+      }
       const placeholders = [];
       const hold = (html) => {
         const token = `§§PME${placeholders.length}§§`;

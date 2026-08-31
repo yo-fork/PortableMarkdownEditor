@@ -17,6 +17,7 @@
     definition('h6', '見出し6', '書式', 'Ctrl+6'),
     definition('bold', '太字', '書式', 'Ctrl+B', '[data-action="format"][data-format="bold"]'),
     definition('italic', '斜体', '書式', 'Ctrl+I', '[data-action="format"][data-format="italic"]'),
+    definition('strikethrough', '打ち消し線', '書式', 'Ctrl+Shift+X', '[data-action="format"][data-format="strikethrough"]'),
     definition('inline-code', 'インラインコード', '書式', 'Ctrl+K', '[data-action="format"][data-format="code"]'),
     definition('inline-math', 'インライン数式', '書式', 'Ctrl+M', '[data-action="format"][data-format="math"]'),
     definition('ordered-list', '番号リスト', '書式', 'Ctrl+Shift+7', '[data-action="format"][data-format="ordered-list"]'),

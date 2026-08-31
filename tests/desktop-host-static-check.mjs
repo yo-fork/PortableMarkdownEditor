@@ -118,6 +118,7 @@ assert.match(fileService, /DetectImageExtension/);
 assert.match(fileService, /FileMode\.CreateNew/);
 assert.match(fileService, /FileAttributes\.ReparsePoint/);
 assert.match(fileService, /UTF8Encoding\(false, true\)/);
+assert.match(fileService, /Utf8WithoutBom\.GetByteCount\(content\) > MaxDocumentBytes/, 'native saves should enforce the same UTF-8 byte limit as reads');
 assert.match(fileService, /MoveFileEx/);
 assert.match(fileService, /WriteSettingsExport/);
 assert.match(fileService, /ResolveDocumentImageReferences/);
@@ -154,7 +155,8 @@ assert.match(releaseCheck, /publishedNoticesPath[\s\S]+Published legal file diff
 assert.match(releaseCheck, /PortableMarkdownEditor\/app\/modules\/shortcut-manager\.js/);
 assert.match(releaseCheck, /sourceDirectoryName in @\('modules', 'vendor'\)/, 'release checks should compare every module and vendored file with the source tree');
 assert.match(releaseCheck, /WebView2 user data must not be included/, 'release checks should reject generated WebView2 profile data');
-assert.match(releaseCheck, /BUILD-INFO\.txt does not identify application version[\s\S]+BUILD-INFO\.txt does not identify source revision/, 'release checks should validate version and source provenance');
+assert.match(releaseCheck, /BUILD-INFO\.txt does not identify application version[\s\S]+BUILD-INFO\.txt does not identify a valid source revision/, 'release checks should validate version and source provenance');
+assert.match(releaseCheck, /function Assert-PackageSourceRevision[\s\S]+merge-base --is-ancestor[\s\S]+releaseOnlyPaths[\s\S]+non-release changes/, 'published packages should allow only a release-only commit after their embedded source revision');
 assert.match(browserCheck, /browser-selftest\.html[\s\S]+image-assets-browser-check\.html[\s\S]+mermaid-advanced-visual-check\.html[\s\S]+index\.html/, 'browser checks should cover vendor loading, image assets, Mermaid, and app startup');
 assert.match(browserCheck, /--headless=new/);
 assert.match(browserCheck, /listen\(0, '127\.0\.0\.1'/, 'browser checks should expose test files on loopback only');
@@ -164,6 +166,8 @@ assert.match(browserCheckLauncher, /browser-check\.mjs[\s\S]+--browser/, 'the br
 assert.match(releaseRunner, /BuildPortableWindows\.cmd[\s\S]+Check-ReleasePackage\.ps1[^\r\n]+dist\\PortableMarkdownEditor-win-x64\.zip[\s\S]+RunChecks\.cmd -SkipReleasePackage[\s\S]+Publish-PortableWindows\.ps1[\s\S]+Check-ReleasePackage\.ps1/, 'the release gate should build, validate, run all checks, then publish and revalidate');
 assert.match(checksRunner, /-SkipReleasePackage[\s\S]+Check-ReleasePackage\.ps1/, 'the release gate should be able to avoid validating an older published package');
 assert.doesNotMatch(checksRunner, /call :run/, 'the check runner should not use the batch subroutine pattern that can duplicate execution');
+assert.match(checksRunner, /Run-BrowserChecks\.ps1 \|\| goto :failed/, 'the check runner should branch on a nonzero browser-check exit code');
+assert.doesNotMatch(checksRunner, /if errorlevel 1 goto :failed/, 'check failures should use direct command failure chaining instead of the unreliable legacy guards');
 assert.match(gitignore, /^release\/PortableMarkdownEditor\/$/m, 'the local release extraction directory must stay untracked');
 assert.equal(existsSync(new URL('../OpenMarkdownEditer.cmd', import.meta.url)), false, 'the misspelled launcher alias should not be retained');
 
@@ -172,6 +176,7 @@ assert.match(notice, /Redistribution and use in source and binary forms/);
 assert.match(notice, /THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS/);
 
 assert.match(nativeChecks, /CheckDocumentRoundTrip/);
+assert.match(nativeChecks, /oversizedUtf8[\s\S]+Encoding\.UTF8\.GetByteCount/, 'native checks should cover multibyte documents that exceed the UTF-8 byte limit');
 assert.match(nativeChecks, /CheckAssetValidationAndAllocation/);
 assert.match(nativeChecks, /CheckDocumentImageReferenceResolution/);
 assert.match(nativeChecks, /document PNG content type is incorrect/);

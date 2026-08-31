@@ -13,14 +13,14 @@
   <script src="./vendor/highlight/highlight.min.js" defer></script>
   <script src="./vendor/mermaid/mermaid.min.js" defer></script>
   <script src="./vendor/katex/katex.min.js" defer></script>
-  <script src="./vendor/prosemirror/prosemirror-editor.js?v=rich-edit-controls-11" defer></script>
+  <script src="./vendor/prosemirror/prosemirror-editor.js?v=rich-edit-controls-12" defer></script>
   <script src="./vendor/codemirror6/source-editor.bundle.js?v=scroll-sync-1" defer></script>
   <script src="./modules/markdown-renderer.js?v=app-modules-2" defer></script>
   <script src="./modules/rich-editor.js?v=app-modules-3" defer></script>
-  <script src="./modules/rich-input-controller.js?v=app-modules-5" defer></script>
-  <script src="./modules/file-manager.js?v=app-modules-2" defer></script>
-  <script src="./modules/shortcut-manager.js?v=app-modules-2" defer></script>
-  <script src="./app.js?v=app-modules-7" defer></script>
+  <script src="./modules/rich-input-controller.js?v=app-modules-6" defer></script>
+  <script src="./modules/file-manager.js?v=app-modules-3" defer></script>
+  <script src="./modules/shortcut-manager.js?v=app-modules-3" defer></script>
+  <script src="./app.js?v=app-modules-8" defer></script>
 </head>
 <body data-mode="rich">
   <a class="skip-link" href="#mainWorkspace">本文へ移動</a>
@@ -52,6 +52,7 @@
         <button type="button" data-action="format" data-format="h2" title="見出し2 (Ctrl+2)" aria-label="見出し2" aria-keyshortcuts="Control+2">H2</button>
         <button type="button" data-action="format" data-format="bold" title="太字 (Ctrl+B)" aria-label="太字" aria-keyshortcuts="Control+B">B</button>
         <button type="button" data-action="format" data-format="italic" title="斜体 (Ctrl+I)" aria-label="斜体" aria-keyshortcuts="Control+I">I</button>
+        <button type="button" data-action="format" data-format="strikethrough" title="打ち消し線 (Ctrl+Shift+X)" aria-label="打ち消し線" aria-keyshortcuts="Control+Shift+X">~~</button>
         <button type="button" data-action="format" data-format="code" title="インラインコード (Ctrl+K)" aria-label="インラインコード" aria-keyshortcuts="Control+K">{ }</button>
         <button type="button" data-action="insert-code-block" title="コードブロック (Ctrl+Shift+K)" aria-label="コードブロック" aria-keyshortcuts="Control+Shift+K">```</button>
         <button type="button" data-action="format" data-format="quote" title="引用 (Ctrl+Shift+9)" aria-label="引用" aria-keyshortcuts="Control+Shift+9">&gt;</button>

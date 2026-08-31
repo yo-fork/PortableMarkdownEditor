@@ -3216,6 +3216,9 @@
         case 'italic':
           applyFormat('italic');
           break;
+        case 'strikethrough':
+          applyFormat('strikethrough');
+          break;
         case 'paragraph':
         case 'h1':
         case 'h2':

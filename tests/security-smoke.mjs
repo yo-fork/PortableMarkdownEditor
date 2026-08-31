@@ -76,6 +76,7 @@ assert.match(index, /data-format="bold"[^>]+aria-label="太字"[^>]+aria-keyshor
 assert.match(index, /data-format="h1"[^>]+aria-keyshortcuts="Control\+1"/, 'heading buttons should expose their keyboard shortcuts');
 assert.match(index, /data-format="ordered-list"[^>]+aria-keyshortcuts="Control\+Shift\+7"/, 'the numbered-list shortcut should be discoverable from the toolbar');
 assert.match(index, /data-format="checklist"[^>]+aria-label="チェックリスト"[^>]+aria-keyshortcuts="Control\+Alt\+C"/, 'the checklist button and shortcut should be discoverable from the toolbar');
+assert.match(index, /data-format="strikethrough"[^>]+aria-label="打ち消し線"[^>]+aria-keyshortcuts="Control\+Shift\+X"/, 'the strikethrough button and shortcut should be discoverable from the toolbar');
 assert.match(index, /data-format="code"[^>]+aria-label="インラインコード"[^>]+aria-keyshortcuts="Control\+K"/, 'the inline-code shortcut should be discoverable from the toolbar');
 assert.match(index, /data-action="insert-code-block"[^>]+aria-keyshortcuts="Control\+Shift\+K"/, 'the code-block shortcut should be discoverable from the toolbar');
 assert.match(index, /data-format="math"[^>]+aria-keyshortcuts="Control\+M"/, 'the inline-math shortcut should be discoverable from the toolbar');
@@ -119,10 +120,14 @@ assert.match(app, /function\s+replaceSourceRange/, 'source writes should go thro
 assert.match(app, /function\s+sourceScrollElement/, 'source scroll sync should use the active editor scroll element');
 assert.match(app, /function\s+captureSourceScrollAnchor[\s\S]+captureScrollAnchor\(viewportY\)/, 'source scroll sync should use CodeMirror visual line measurements when available');
 assert.match(app, /function\s+captureRenderedScrollAnchor[\s\S]+renderedProgress[\s\S]+function\s+restoreRenderedScrollAnchor[\s\S]+rect\.height \* progress/, 'preview scroll sync should preserve progress inside long rendered blocks');
+assert.match(app, /function\s+syncPreviewScroll[\s\S]+cancelPendingScrollRestore\(\)[\s\S]+function\s+syncSourceScroll[\s\S]+cancelPendingScrollRestore\(\)/, 'user scroll synchronization should cancel stale delayed mode restores');
+assert.match(app, /function\s+restoreCurrentModeScrollSoon[\s\S]+scrollRestoreGeneration[\s\S]+function\s+cancelPendingScrollRestore/, 'delayed scroll restoration should ignore callbacks from an older mode transition');
 assert.match(app, /function\s+renderProseMirrorRich/, 'rich editing should prefer the ProseMirror transaction model when Markdown is supported');
 assert.match(app, /SHORTCUT_DEFINITIONS[\s\S]+paragraph[\s\S]+h6[\s\S]+ordered-list[\s\S]+checklist[\s\S]+quote/, 'configurable shortcuts should cover headings, lists, checklists, and quotes');
 assert.match(app, /case 'checklist':[\s\S]+prefixLines\(selected \|\| '項目', '- \[ \] '\)/, 'source-mode checklist insertion should emit unchecked Markdown task items');
 assert.match(app, /case 'checklist':[\s\S]+applyFormat\(action\)/, 'the configurable checklist shortcut should dispatch through the shared format action');
+assert.match(app, /case 'strikethrough':[\s\S]+applyFormat\('strikethrough'\)/, 'the configurable strikethrough shortcut should dispatch through the shared format action');
+assert.match(app, /case 'strikethrough':[\s\S]+replacement = `~~\$\{selected \|\| '打ち消し線'\}~~`/, 'source-mode strikethrough should emit paired Markdown delimiters');
 assert.match(app, /addEventListener\('keydown', onKeyboardShortcutKeyDown, true\)/, 'app shortcuts should run in capture phase before editor-specific keymaps');
 assert.match(app, /function\s+onKeyboardShortcutKeyDown[\s\S]+event\.preventDefault\(\)[\s\S]+event\.stopPropagation\(\)[\s\S]+runKeyboardActionShortcut/, 'captured app shortcuts should prevent conflicting editor commands');
 assert.match(app, /definition\('inline-code',[^\n]+Ctrl\+K[\s\S]+definition\('inline-math',[^\n]+Ctrl\+M[\s\S]+definition\('code-block',[^\n]+Ctrl\+Shift\+K[\s\S]+definition\('math-block',[^\n]+Ctrl\+Shift\+M[\s\S]+definition\('link',[^\n]+Ctrl\+Shift\+L/, 'code, math, and link defaults should preserve the requested keys');
@@ -132,6 +137,8 @@ assert.match(app, /version:\s*3[\s\S]+allowedLinkDomains[\s\S]+documentFont:[\s\
 assert.match(app, /function\s+runKeyboardActionShortcut[\s\S]+case 'math-block':[\s\S]+insertMathBlock\(\)/, 'keyboard commands should dispatch display-math insertion');
 assert.match(app, /function\s+insertMathBlock[\s\S]+\$\$\\n\$\{selected \|\| 'x = y'\}\\n\$\$/, 'display-math insertion should create a standalone Markdown block');
 assert.match(app, /function\s+handleProseMirrorRichChange/, 'ProseMirror rich edits should update Markdown source through one change path');
+assert.match(app, /function\s+renderProseMirrorRich[\s\S]+requiresCanonicalMarkdownNormalization[\s\S]+proseMirrorRichSourceChanged/, 'rich startup should mark only mandatory canonical source rewrites as changed');
+assert.match(app, /function\s+captureProseMirrorMarkdownWithoutUnneededNormalization[\s\S]+!state\.proseMirrorRichSourceChanged[\s\S]+return current/, 'leaving an unedited rich view should preserve the original Markdown spelling');
 assert.match(app, /function\s+isProseMirrorRichTarget/, 'legacy rich DOM handlers should ignore ProseMirror-managed DOM');
 assert.match(app, /function\s+onDocumentChange[\s\S]+isProseMirrorRichTarget\(target\)[\s\S]+updateTaskCheckbox/, 'legacy checklist change handling should not duplicate ProseMirror transactions');
 assert.match(app, /proseMirrorUnsupportedReason/, 'unsupported Markdown should fall back instead of being lossy-parsed through ProseMirror');
@@ -345,7 +352,7 @@ assert.match(app, /function\s+handleRichPlainTextPaste[\s\S]+applySourceTransact
 assert.match(app, /function\s+guardUnsupportedRichPlainTextPasteFallback[\s\S]+richSelectionTouchesSourceBlock\(selection\)[\s\S]+この位置では貼り付けできません/, 'unsupported rich paste fallback should block selections intersecting source-backed blocks');
 assert.match(app, /function\s+blankParagraphSourceInsertion[\s\S]+beforeHasBreak[\s\S]+afterHasBreak/, 'typing into transaction-created blank paragraphs should reuse existing Markdown block separators');
 assert.match(app, /function\s+handleRichEnter\(event\)[\s\S]+event\.shiftKey[\s\S]+handleRichQuoteLineBreakTransaction\(quote,\s*range\)[\s\S]+function\s+handleRichQuoteLineBreakTransaction[\s\S]+const insert = '  \\n> '/, 'Shift+Enter in a quote should create a quoted hard line break source transaction');
-assert.match(app, /function\s+renderQuote\(raw,\s*block = null\)[\s\S]+trailingHardBreak[\s\S]+rich-line-break-caret-anchor[\s\S]+data-rich-quote-hard-break-source/, 'rendered quote hard breaks should expose source metadata and a caret anchor for follow-up typing');
+assert.match(app, /function\s+renderQuote\(raw,\s*block = null,\s*references = null\)[\s\S]+trailingHardBreak[\s\S]+rich-line-break-caret-anchor[\s\S]+data-rich-quote-hard-break-source/, 'rendered quote hard breaks should expose source metadata and a caret anchor for follow-up typing');
 assert.match(app, /function\s+richPlainTextTransactionRangeFromSelection/, 'plain rich replacements should share one source range mapping path');
 assert.match(app, /function\s+richPlainTextTransactionRangeFromSelection[\s\S]+richSelectionRange\(selection\)[\s\S]+isSourceTransactionTextRange\(range\)/, 'plain rich replacement source ranges should start from validated rich selections');
 assert.match(app, /function\s+richTableTextReplacementRangeFromSelection[\s\S]+richSelectionRange\(selection\)[\s\S]+richTableSourcePointFromRange\(anchorCell,\s*range\)/, 'rich table replacement ranges should validate rich selections before mapping source offsets');

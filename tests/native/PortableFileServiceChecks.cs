@@ -59,6 +59,19 @@ namespace PortableMarkdownEditor.Desktop
             Expect<InvalidDataException>(
                 () => PortableFileService.WriteDocument(Path.Combine(testRoot, "invalid.exe"), markdown),
                 "unsupported document extension was accepted");
+
+            string oversizedUtf8Path = Path.Combine(testRoot, "oversized-utf8.md");
+            string oversizedUtf8 = new string('あ', PortableFileService.MaxDocumentBytes / 3 + 1);
+            Require(
+                oversizedUtf8.Length < PortableFileService.MaxDocumentCharacters,
+                "UTF-8 byte-limit fixture unexpectedly exceeds the character limit");
+            Require(
+                Encoding.UTF8.GetByteCount(oversizedUtf8) > PortableFileService.MaxDocumentBytes,
+                "UTF-8 byte-limit fixture does not exceed the byte limit");
+            Expect<InvalidDataException>(
+                () => PortableFileService.WriteDocument(oversizedUtf8Path, oversizedUtf8),
+                "a document larger than 10MB in UTF-8 was saved");
+            Require(!File.Exists(oversizedUtf8Path), "an oversized UTF-8 document was partially created");
         }
 
         private static void CheckAssetValidationAndAllocation(string testRoot)

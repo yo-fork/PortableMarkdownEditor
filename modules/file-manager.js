@@ -1276,12 +1276,18 @@
 
     function captureCurrentMarkdownFromEditor() {
       if (state.mode === 'rich' && isProseMirrorRichActive()) {
-        state.markdown = normalizeNewlines(state.proseMirrorRich.markdown());
+        state.markdown = captureProseMirrorMarkdownWithoutUnneededNormalization();
       } else {
         state.markdown = sourceMarkdownValue() || normalizeNewlines(state.markdown);
       }
       els.source.value = state.markdown;
       syncCodeMirrorSourceFromTextarea('capture-current');
+    }
+
+    function captureProseMirrorMarkdownWithoutUnneededNormalization() {
+      const current = normalizeNewlines(state.markdown);
+      if (!state.proseMirrorRichSourceChanged) return current;
+      return normalizeNewlines(state.proseMirrorRich.markdown());
     }
 
     function sourceSelectionBookmark() {

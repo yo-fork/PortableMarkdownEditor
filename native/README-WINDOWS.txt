@@ -14,7 +14,7 @@ BuildPortableWindows.cmdは開発者向けです。利用する端末では実�
 
 WebView2 Runtimeが導入されていないPCでは起動できません。
 
-MarkdownはUTF-8の .md、.markdown、.txt に対応し、1ファイル10MBを上限とします。
+MarkdownはUTF-8の .md、.markdown、.txt に対応し、UTF-8換算で1ファイル10MBを上限とします。
 
 ファイルメニューの「新規ウィンドウ」、またはCtrl+Nで、現在の文書を残したまま空の文書を別ウィンドウで開けます。
 

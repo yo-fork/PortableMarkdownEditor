@@ -136,6 +136,8 @@ flowchart TD
     desktopLastReportedFileName: '',
     desktopLastReportedRevision: -1,
     scrollSyncLock: false,
+    scrollRestoreGeneration: 0,
+    scrollRestoreTimer: 0,
     mermaidPan: null,
     allowedLinkDomains: [],
     documentFont: 'sans',
@@ -157,6 +159,7 @@ flowchart TD
     codeMirrorSourceReady: false,
     proseMirrorRich: null,
     proseMirrorRichActive: false,
+    proseMirrorRichSourceChanged: false,
     proseMirrorRichFallbackReason: '',
     proseMirrorFocusTimer: 0,
   };
@@ -1119,9 +1122,20 @@ flowchart TD
     return state.mode === 'rich' && !isProseMirrorRichActive();
   }
 
+  function readOnlyRichFallbackMessage(reason = state.proseMirrorRichFallbackReason) {
+    if (reason === 'link-reference-definitions') {
+      return '参照リンク定義を保持するため、リッチ表示は読み取り専用です。ソース編集を使用してください';
+    }
+    if (reason === 'empty-links') {
+      return '表示テキストが空のリンクを保持するため、リッチ表示は読み取り専用です。ソース編集を使用してください';
+    }
+    const detail = reason ? `: ${reason}` : '';
+    return `ProseMirrorを初期化できないため、リッチ表示は読み取り専用です。ソース編集を使用してください${detail}`;
+  }
+
   function guardReadOnlyRichFallbackAction(actionLabel = 'この操作') {
     if (!isReadOnlyRichFallbackActive()) return false;
-    setStatus(`${actionLabel}: ProseMirrorを初期化できないため、リッチ表示は読み取り専用です。ソース編集を使用してください`);
+    setStatus(`${actionLabel}: ${readOnlyRichFallbackMessage()}`);
     return true;
   }
 
@@ -1169,6 +1183,9 @@ flowchart TD
       if (typeof state.proseMirrorRich.refreshImages === 'function') {
         state.proseMirrorRich.refreshImages();
       }
+      const requiresCanonicalNormalization = window.PMEProseMirror?.requiresCanonicalMarkdownNormalization;
+      state.proseMirrorRichSourceChanged = typeof requiresCanonicalNormalization === 'function'
+        && requiresCanonicalNormalization(state.markdown);
     } catch (error) {
       teardownProseMirrorRichEditor();
       state.proseMirrorRichFallbackReason = String(error?.message || 'prosemirror-error').slice(0, 120);
@@ -1192,6 +1209,7 @@ flowchart TD
       state.proseMirrorRich = null;
     }
     state.proseMirrorRichActive = false;
+    state.proseMirrorRichSourceChanged = false;
     els.rich?.classList?.remove('is-prosemirror-rich');
   }
 
@@ -1200,7 +1218,7 @@ flowchart TD
     const html = renderMarkdownHtml(state.markdown);
     safeSetHtml(els.rich, html || '<p><br></p>');
     configureReadOnlyRichFallbackSurface(reason);
-    setStatus(`ProseMirrorを初期化できないため、リッチ表示は読み取り専用です: ${reason}`);
+    setStatus(readOnlyRichFallbackMessage(reason));
   }
 
   function configureReadOnlyRichFallbackSurface(reason) {
@@ -1218,6 +1236,7 @@ flowchart TD
   }
 
   function handleProseMirrorRichChange(markdown) {
+    state.proseMirrorRichSourceChanged = true;
     state.markdown = stripRichCaretTokens(normalizeNewlines(markdown));
     els.source.value = state.markdown;
     syncCodeMirrorSourceFromTextarea('prosemirror-rich-input');
@@ -2057,6 +2076,11 @@ flowchart TD
         selectionStart = start + 1;
         selectionEnd = selectionStart + (selected || '斜体').length;
         break;
+      case 'strikethrough':
+        replacement = `~~${selected || '打ち消し線'}~~`;
+        selectionStart = start + 2;
+        selectionEnd = selectionStart + (selected || '打ち消し線').length;
+        break;
       case 'code':
         replacement = selected.includes('\n')
           ? `\`\`\`\n${selected || 'code'}\n\`\`\``
@@ -2109,6 +2133,10 @@ flowchart TD
       case 'italic':
         if (applyRichInlineFormatTransaction('italic')) return true;
         insertRichInlineElement('em', '斜体');
+        return true;
+      case 'strikethrough':
+        if (applyRichInlineFormatTransaction('strikethrough')) return true;
+        insertRichInlineElement('del', '打ち消し線');
         return true;
       case 'code': {
         const selected = richSelectedText();
@@ -2377,6 +2405,9 @@ flowchart TD
     }
     if (format === 'italic') {
       return { open: '*', close: '*', placeholder: '斜体', label: '斜体' };
+    }
+    if (format === 'strikethrough') {
+      return { open: '~~', close: '~~', placeholder: '打ち消し線', label: '打ち消し線' };
     }
     if (format === 'code') {
       if (String(selected || '').includes('`')) return null;
@@ -3124,7 +3155,8 @@ flowchart TD
     if (mode === 'rich') renderRich();
     if (mode === 'split' || mode === 'source' || mode === 'focus') refreshCodeMirrorSourceEditorSoon();
     if (scrollAnchor) restoreCurrentModeScrollSoon(scrollAnchor);
-    setStatus(`表示モード: ${mode}`);
+    if (mode === 'rich' && isReadOnlyRichFallbackActive()) setStatus(readOnlyRichFallbackMessage());
+    else setStatus(`表示モード: ${mode}`);
   }
 
   function toggleTheme() {
@@ -3569,6 +3601,7 @@ flowchart TD
 
   function syncPreviewScroll() {
     if (state.mode !== 'split' || state.scrollSyncLock) return;
+    cancelPendingScrollRestore();
     const anchor = captureSourceScrollAnchor();
     if (!anchor) return;
     withScrollSyncLock(() => {
@@ -3578,6 +3611,7 @@ flowchart TD
 
   function syncSourceScroll() {
     if (state.mode !== 'split' || state.scrollSyncLock) return;
+    cancelPendingScrollRestore();
     const anchor = captureRenderedScrollAnchor(els.preview);
     if (!anchor) return;
     withScrollSyncLock(() => {
@@ -3609,11 +3643,23 @@ flowchart TD
   }
 
   function restoreCurrentModeScrollSoon(anchor) {
+    cancelPendingScrollRestore();
+    const generation = state.scrollRestoreGeneration;
     const restore = () => restoreCurrentModeScroll(anchor);
     window.requestAnimationFrame(() => {
+      if (generation !== state.scrollRestoreGeneration) return;
       restore();
-      window.setTimeout(restore, 180);
+      state.scrollRestoreTimer = window.setTimeout(() => {
+        state.scrollRestoreTimer = 0;
+        if (generation === state.scrollRestoreGeneration) restore();
+      }, 180);
     });
+  }
+
+  function cancelPendingScrollRestore() {
+    state.scrollRestoreGeneration += 1;
+    window.clearTimeout(state.scrollRestoreTimer);
+    state.scrollRestoreTimer = 0;
   }
 
   function restoreCurrentModeScroll(anchor) {

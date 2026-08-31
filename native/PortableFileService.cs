@@ -94,6 +94,10 @@ namespace PortableMarkdownEditor.Desktop
             {
                 throw new InvalidDataException("Markdown文書が大きすぎるため保存できません。");
             }
+            if (Utf8WithoutBom.GetByteCount(content) > MaxDocumentBytes)
+            {
+                throw new InvalidDataException("Markdown文書はUTF-8で10MB以下にしてください。");
+            }
 
             WriteTextAtomically(fullPath, content);
         }

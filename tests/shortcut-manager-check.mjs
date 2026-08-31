@@ -12,6 +12,7 @@ const defaults = api.defaultShortcutAssignments();
 assert.equal(defaults['new-window'], 'Ctrl+N');
 assert.equal(defaults['inline-code'], 'Ctrl+K');
 assert.equal(defaults['inline-math'], 'Ctrl+M');
+assert.equal(defaults.strikethrough, 'Ctrl+Shift+X');
 assert.equal(defaults['code-block'], 'Ctrl+Shift+K');
 assert.equal(defaults['math-block'], 'Ctrl+Shift+M');
 assert.equal(defaults.link, 'Ctrl+Shift+L');
@@ -54,6 +55,10 @@ assert.equal(api.shortcutActionForAssignments(
   { ctrlKey: true, shiftKey: false, altKey: true, code: 'KeyC', key: 'c' },
   defaults,
 ), 'checklist');
+assert.equal(api.shortcutActionForAssignments(
+  { ctrlKey: true, shiftKey: true, altKey: false, code: 'KeyX', key: 'x' },
+  defaults,
+), 'strikethrough');
 
 const duplicated = api.normalizeShortcutAssignments({
   'new-window': 'Ctrl+Q',

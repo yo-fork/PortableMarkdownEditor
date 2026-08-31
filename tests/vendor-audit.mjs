@@ -19,8 +19,10 @@ const requiredFiles = [
   'vendor/codemirror6/source-editor.js',
   'vendor/codemirror6/source-editor.bundle.js',
   'vendor/prosemirror/prosemirror-editor.js',
+  'vendor/prosemirror/editor-integration.js',
   'vendor/prosemirror/package-lock.json',
   'vendor/prosemirror/licenses',
+  'tools/bundle-prosemirror-cjs.mjs',
   'docs/third-party-licenses.md',
 ];
 
@@ -66,5 +68,6 @@ assert.match(licenses, /@codemirror\/lang-markdown/i);
 assert.match(licenses, /ProseMirror local bundle/i);
 assert.match(licenses, /prosemirror-view/i);
 assert.match(licenses, /prosemirror-markdown/i);
+assert.match(licenses, /bundle-prosemirror-cjs\.mjs/);
 
 console.log('vendor audit checks passed');

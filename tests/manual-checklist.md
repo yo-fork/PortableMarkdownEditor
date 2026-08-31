@@ -60,6 +60,7 @@ Run these checks without npm, package managers, CDN, or network access.
 30. In rich mode, click an inline formula and confirm its rendered position remains highlighted while an opaque source editor opens above or below it without covering the formula. Confirm the editor contains both the LaTeX source and a live rendered preview.
 31. Place the rich caret in a heading, press `Ctrl+M`, and confirm the inserted inline formula remains inside the heading in both rich and preview modes and round-trips as heading Markdown.
 32. In rich mode, load a table containing `$E=mc^2$` and `$P(A|B)$`, then press `Ctrl+M` in another cell. Confirm all formulas render in rich and preview modes, formula pipes do not create extra columns, and editing the formula preserves the table structure.
+33. In rich mode, load `~~削除対象~~`, then create another strike with both the toolbar button and `Ctrl+Shift+X`. Confirm all three render as strike-through text and remain `~~...~~` after switching to source mode.
 
 ## Windows portable app
 

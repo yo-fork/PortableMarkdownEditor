@@ -61,6 +61,15 @@ function numericAttr(markup, selectorClass, attrName, text) {
   return Number(value);
 }
 
+const referenceLink = renderer.renderMarkdownHtml([
+  'See [the guide][guide].',
+  '',
+  '[guide]: #guide "Guide"',
+  '[unused]: #unused',
+].join('\n'));
+assert.match(referenceLink, /<a href="#guide"[^>]*>the guide<\/a>/, 'reference links should resolve across separately rendered source blocks');
+assert.doesNotMatch(referenceLink, /\[guide\]:|\[unused\]:/, 'reference definition lines should not render as paragraph text');
+
 const loop = renderMermaid(`
 flowchart TD
   A[Markdownを書く] --> B{プレビュー}

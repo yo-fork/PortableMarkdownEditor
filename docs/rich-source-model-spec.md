@@ -188,7 +188,9 @@ atomic inline run、Mermaid/code/math block などは、必要に応じて sourc
 
 ## Fallback 方針
 
-通常の rich mode は ProseMirror を使う。旧 contenteditable rich DOM は、ProseMirror bundle が読み込めない場合や初期化不能な場合の緊急 fallback とする。
+通常の rich mode は ProseMirror を使う。ProseMirror bundle が読み込めない場合や初期化不能な場合に加え、参照リンク定義や表示テキストが空のリンクのようにserializerが元のsource表現を保持できない構文を含む場合は、sourceを上書きしない読み取り専用fallbackを使う。旧contenteditable rich DOMは編集経路として使わない。
+
+リッチ表示へ切り替えただけで本文を編集していない場合は、ProseMirrorのserializerが同じ文書を別表記へ正規化できても、元のsource文字列を保持する。リッチ編集で文書内容が変わった場合はserializer結果を採用する。
 
 完全な beforeinput transaction が作れない場合でも、source-backed block では次の順序を守る。
 

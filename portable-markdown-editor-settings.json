@@ -21,6 +21,7 @@
     "h6": "Ctrl+6",
     "bold": "Ctrl+B",
     "italic": "Ctrl+I",
+    "strikethrough": "Ctrl+Shift+X",
     "inline-code": "Ctrl+K",
     "inline-math": "Ctrl+M",
     "ordered-list": "Ctrl+Shift+7",

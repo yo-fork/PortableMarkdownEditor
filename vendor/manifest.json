@@ -179,6 +179,7 @@
       "license": "MIT",
       "sourcePackage": "npm packages recorded in vendor/prosemirror/package-lock.json",
       "localFiles": [
+        "vendor/prosemirror/editor-integration.js",
         "vendor/prosemirror/prosemirror-editor.js",
         "vendor/prosemirror/licenses/",
         "vendor/prosemirror/package.json",
@@ -1434,6 +1435,11 @@
       "sha256": "dcffcc873c19eda694122fb083b39ce95cea2e70d72090ceb3a93c26b0bcf7fc"
     },
     {
+      "path": "vendor/prosemirror/editor-integration.js",
+      "bytes": 167695,
+      "sha256": "83692de0f0adb87077c6475ace8030c48935cd6cca3d8680cefc618b61c60f1d"
+    },
+    {
       "path": "vendor/prosemirror/licenses/orderedmap/LICENSE",
       "bytes": 1100,
       "sha256": "869c30f368eb08735e779027b9f4bc9fea2f39624351856aebe42741f0bc0884"
@@ -1613,10 +1619,10 @@
       "bytes": 508,
       "sha256": "f3b67e069f18dd1fbd44480940d9ec8bc70fe4bb611d827fe6d6c70cac858990"
     },
-      {
-        "path": "vendor/prosemirror/prosemirror-editor.js",
-        "bytes": 823875,
-        "sha256": "e573fc684bad634a47035e17f1f762297c295aa503c538d52999f7968b798adf"
-      }
+    {
+      "path": "vendor/prosemirror/prosemirror-editor.js",
+      "bytes": 828318,
+      "sha256": "5ff0a063aa13ff7064829864fa03ef998de9b8fca6b5dca428c22dd78d6d5cb5"
+    }
   ]
 }

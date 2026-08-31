@@ -27,6 +27,11 @@ $resolvedChecksumPath = if ([string]::IsNullOrWhiteSpace($ChecksumPath)) {
 $publishedLicensePath = Join-Path $repoRoot 'release\LICENSE'
 $publishedNoticesPath = Join-Path $repoRoot 'release\THIRD-PARTY-NOTICES.txt'
 $assemblyInfoPath = Join-Path $repoRoot 'native\Properties\AssemblyInfo.cs'
+$defaultPublishedZipPath = [IO.Path]::GetFullPath((Join-Path $repoRoot 'release\PortableMarkdownEditor-win-x64.zip'))
+$isDefaultPublishedZip = [string]::Equals(
+    $resolvedZipPath,
+    $defaultPublishedZipPath,
+    [StringComparison]::OrdinalIgnoreCase)
 
 function Get-StreamSha256Hex {
     param([Parameter(Mandatory = $true)][IO.Stream]$Stream)
@@ -49,6 +54,57 @@ function Get-FileSha256Hex {
     }
     finally {
         $stream.Dispose()
+    }
+}
+
+function Get-CurrentSourceRevision {
+    $sourceRevisionOutput = @(& git.exe -C $repoRoot rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $sourceRevisionOutput.Count -ne 1) {
+        throw 'The source Git revision could not be determined.'
+    }
+
+    $sourceRevision = $sourceRevisionOutput[0].Trim().ToLowerInvariant()
+    if ($sourceRevision -notmatch '^[0-9a-f]{40}$') {
+        throw "The source Git revision is invalid: $sourceRevision"
+    }
+    return $sourceRevision
+}
+
+function Assert-PackageSourceRevision {
+    param(
+        [Parameter(Mandatory = $true)][string]$PackageRevision,
+        [Parameter(Mandatory = $true)][string]$CurrentRevision
+    )
+
+    if ($PackageRevision -eq $CurrentRevision) {
+        return
+    }
+    if (!$isDefaultPublishedZip) {
+        throw "BUILD-INFO.txt identifies source revision $PackageRevision instead of current revision $CurrentRevision."
+    }
+
+    & git.exe -C $repoRoot merge-base --is-ancestor $PackageRevision $CurrentRevision 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Published source revision $PackageRevision is not an ancestor of current revision $CurrentRevision."
+    }
+
+    $changedPathOutput = @(& git.exe -C $repoRoot diff --name-only --no-renames "$PackageRevision..$CurrentRevision" -- 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Changes after published source revision $PackageRevision could not be inspected."
+    }
+    $releaseOnlyPaths = @(
+        'release/PortableMarkdownEditor-win-x64.zip',
+        'release/SHA256SUMS.txt',
+        'release/LICENSE',
+        'release/THIRD-PARTY-NOTICES.txt'
+    )
+    $unexpectedPaths = @($changedPathOutput | ForEach-Object {
+        $_.Trim().Replace('\', '/')
+    } | Where-Object {
+        $_ -and $releaseOnlyPaths -notcontains $_
+    })
+    if ($unexpectedPaths.Count -ne 0) {
+        throw "Published source revision $PackageRevision is followed by non-release changes: $($unexpectedPaths -join ', ')"
     }
 }
 
@@ -85,14 +141,7 @@ if (!$versionMatch.Success) {
     throw 'AssemblyInformationalVersion was not found in native\Properties\AssemblyInfo.cs.'
 }
 $expectedApplicationVersion = $versionMatch.Groups[1].Value
-$sourceRevisionOutput = @(& git.exe -C $repoRoot rev-parse HEAD 2>$null)
-if ($LASTEXITCODE -ne 0 -or $sourceRevisionOutput.Count -ne 1) {
-    throw 'The source Git revision could not be determined.'
-}
-$expectedSourceRevision = $sourceRevisionOutput[0].Trim().ToLowerInvariant()
-if ($expectedSourceRevision -notmatch '^[0-9a-f]{40}$') {
-    throw "The source Git revision is invalid: $expectedSourceRevision"
-}
+$currentSourceRevision = Get-CurrentSourceRevision
 
 $actualZipHash = Get-FileSha256Hex $resolvedZipPath
 if (!$SkipChecksum) {
@@ -165,13 +214,15 @@ try {
         $buildInfoStream.Dispose()
     }
     $escapedVersion = [regex]::Escape($expectedApplicationVersion)
-    $escapedRevision = [regex]::Escape($expectedSourceRevision)
     if ($buildInfo -notmatch "(?m)^Application version: $escapedVersion\r?$") {
         throw "BUILD-INFO.txt does not identify application version $expectedApplicationVersion."
     }
-    if ($buildInfo -notmatch "(?m)^Source revision: $escapedRevision\r?$") {
-        throw "BUILD-INFO.txt does not identify source revision $expectedSourceRevision."
+    $packageRevisionMatch = [regex]::Match($buildInfo, '(?m)^Source revision: ([0-9a-fA-F]{40})\r?$')
+    if (!$packageRevisionMatch.Success) {
+        throw 'BUILD-INFO.txt does not identify a valid source revision.'
     }
+    $packageSourceRevision = $packageRevisionMatch.Groups[1].Value.ToLowerInvariant()
+    Assert-PackageSourceRevision $packageSourceRevision $currentSourceRevision
     if ($buildInfo -notmatch '(?m)^Source tree: (clean|modified)\r?$') {
         throw 'BUILD-INFO.txt does not identify whether the source tree was clean or modified.'
     }

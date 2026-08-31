@@ -285,11 +285,111 @@ async function checkAppStartup(baseUrl, sessionId) {
   assert.match(languageResult.codeClassName, /(?:^|\s)hljs(?:\s|$)/, 'the rich code block should use the Highlight.js theme');
   assert.notEqual(languageResult.keywordColor, languageResult.codeColor, 'the selected language should visibly highlight Python keywords');
 
+  await checkReferenceDefinitionProtection(sessionId);
+  await checkEmptyLinkProtection(sessionId);
+  await checkUneditedRichSourcePreservation(sessionId);
   await checkRichInlineMathEditingAndHeading(sessionId);
   await checkRichInlineMathRoundTrips(sessionId);
   await checkRichTableMathEditing(sessionId);
   await checkRichChecklistEditing(sessionId);
+  await checkRichStrikethroughEditing(sessionId);
   await checkSplitScrollSync(sessionId);
+}
+
+async function checkReferenceDefinitionProtection(sessionId) {
+  const markdown = [
+    'See [the guide][guide].',
+    '',
+    '[guide]: #guide "Guide"',
+    '[unused]: #unused',
+    '',
+  ].join('\n');
+  await switchMode('source', sessionId);
+  await setAppMarkdown(markdown, sessionId);
+  await switchMode('rich', sessionId);
+  const fallback = await poll(
+    `(() => ({
+      reason: document.getElementById('richEditor')?.dataset.richFallback || '',
+      readOnly: document.getElementById('richEditor')?.getAttribute('aria-readonly') || '',
+      hasEditor: Boolean(document.querySelector('#richEditor .ProseMirror')),
+      link: document.querySelector('#richEditor a')?.getAttribute('href') || '',
+      status: document.getElementById('statusMessage')?.textContent || '',
+      markdown: document.getElementById('sourceEditor')?.value || '',
+    }))()`,
+    (value) => value?.reason === 'link-reference-definitions' && value.readOnly === 'true',
+    sessionId,
+    'reference-definition rich fallback',
+  );
+  assert.equal(fallback.hasEditor, false, 'reference definitions must not enter the lossy ProseMirror editor');
+  assert.equal(fallback.markdown, markdown, 'entering rich mode must not rewrite reference definitions');
+  assert.equal(fallback.link, '#guide', 'read-only rich mode should still render reference links');
+  assert.match(fallback.status, /参照リンク定義を保持するため/, 'the fallback status should explain why source editing is required');
+
+  await switchMode('source', sessionId);
+  assert.equal(
+    await evaluate(`document.getElementById('sourceEditor')?.value || ''`, sessionId),
+    markdown,
+    'leaving read-only rich mode must preserve every reference definition',
+  );
+}
+
+async function checkEmptyLinkProtection(sessionId) {
+  const markdown = 'Before [](page.md) after';
+  await switchMode('source', sessionId);
+  await setAppMarkdown(markdown, sessionId);
+  await switchMode('rich', sessionId);
+  const fallback = await poll(
+    `(() => ({
+      reason: document.getElementById('richEditor')?.dataset.richFallback || '',
+      hasEditor: Boolean(document.querySelector('#richEditor .ProseMirror')),
+      markdown: document.getElementById('sourceEditor')?.value || '',
+      status: document.getElementById('statusMessage')?.textContent || '',
+    }))()`,
+    (value) => value?.reason === 'empty-links',
+    sessionId,
+    'empty-link rich fallback',
+  );
+  assert.equal(fallback.hasEditor, false, 'empty links must not enter the lossy mark-only rich editor');
+  assert.equal(fallback.markdown, markdown, 'empty-link fallback must preserve the exact Markdown source');
+  assert.match(fallback.status, /表示テキストが空のリンクを保持するため/, 'empty-link fallback should explain why source editing is required');
+  await switchMode('source', sessionId);
+  assert.equal(await evaluate(`document.getElementById('sourceEditor')?.value || ''`, sessionId), markdown, 'leaving empty-link fallback must preserve the link');
+}
+
+async function checkUneditedRichSourcePreservation(sessionId) {
+  const markdown = [
+    'Setext heading',
+    '--------------',
+    '',
+    'Tom &amp; Jerry',
+    '',
+    '+ one',
+    '+ two',
+    '',
+    '~~~js',
+    'const value = 1;',
+    '~~~',
+    '',
+  ].join('\n');
+  await switchMode('source', sessionId);
+  await setAppMarkdown(markdown, sessionId);
+  await switchMode('rich', sessionId);
+  await poll(
+    `(() => ({
+      heading: document.querySelector('.ProseMirror h2')?.textContent || '',
+      code: document.querySelector('.ProseMirror pre code')?.textContent || '',
+      listItems: document.querySelectorAll('.ProseMirror ul > li').length,
+    }))()`,
+    (value) => value?.heading === 'Setext heading' && value.code.includes('const value = 1;') && value.listItems === 2,
+    sessionId,
+    'noncanonical Markdown rich rendering',
+  );
+  await switchMode('source', sessionId);
+  assert.equal(
+    await evaluate(`document.getElementById('sourceEditor')?.value || ''`, sessionId),
+    markdown,
+    'an unedited rich-mode visit must preserve source spelling and blank lines exactly',
+  );
 }
 
 async function checkRichInlineMathEditingAndHeading(sessionId) {
@@ -640,6 +740,56 @@ async function checkRichChecklistEditing(sessionId) {
     (value) => value?.checkbox && value.markdown.includes('- [ ] ショートカット項目'),
     sessionId,
     'rich checklist keyboard insertion',
+  );
+}
+
+async function checkRichStrikethroughEditing(sessionId) {
+  const existingMarkdown = '既存の ~~削除対象~~ です。';
+  await switchMode('source', sessionId);
+  await setAppMarkdown(existingMarkdown, sessionId);
+  await switchMode('rich', sessionId);
+  const existing = await poll(
+    `(() => ({
+      rich: document.querySelector('.ProseMirror del')?.textContent || '',
+      preview: document.querySelector('#preview del')?.textContent || '',
+      markdown: document.getElementById('sourceEditor')?.value || '',
+    }))()`,
+    (value) => value?.rich === '削除対象' && value.preview === '削除対象',
+    sessionId,
+    'existing rich strikethrough',
+  );
+  assert.equal(existing.markdown, existingMarkdown, 'loading strikethrough in rich mode must not escape away its Markdown meaning');
+
+  await switchMode('source', sessionId);
+  assert.equal(
+    await evaluate(`document.getElementById('sourceEditor')?.value || ''`, sessionId),
+    existingMarkdown,
+    'switching away from rich mode should preserve strikethrough delimiters',
+  );
+
+  await setAppMarkdown('ボタン対象', sessionId);
+  await switchMode('rich', sessionId);
+  await clickSelector('.ProseMirror p', sessionId);
+  await pressShortcut({ key: 'a', code: 'KeyA', modifiers: 2 }, sessionId);
+  await clickSelector('[data-action="format"][data-format="strikethrough"]', sessionId);
+  await poll(
+    `(() => ({ markdown: document.getElementById('sourceEditor')?.value || '', text: document.querySelector('.ProseMirror del')?.textContent || '' }))()`,
+    (value) => value?.markdown === '~~ボタン対象~~' && value.text === 'ボタン対象',
+    sessionId,
+    'rich strikethrough toolbar action',
+  );
+
+  await switchMode('source', sessionId);
+  await setAppMarkdown('ショートカット対象', sessionId);
+  await switchMode('rich', sessionId);
+  await clickSelector('.ProseMirror p', sessionId);
+  await pressShortcut({ key: 'a', code: 'KeyA', modifiers: 2 }, sessionId);
+  await pressShortcut({ key: 'x', code: 'KeyX', modifiers: 10 }, sessionId);
+  await poll(
+    `(() => ({ markdown: document.getElementById('sourceEditor')?.value || '', text: document.querySelector('.ProseMirror del')?.textContent || '' }))()`,
+    (value) => value?.markdown === '~~ショートカット対象~~' && value.text === 'ショートカット対象',
+    sessionId,
+    'rich strikethrough keyboard action',
   );
 }
 
