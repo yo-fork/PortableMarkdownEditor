@@ -62,6 +62,10 @@ echo ^> node tests\file-manager-race-check.mjs
 node tests\file-manager-race-check.mjs || goto :failed
 
 echo.
+echo ^> node tests\rich-drop-check.mjs
+node tests\rich-drop-check.mjs || goto :failed
+
+echo.
 echo ^> node tests\icon-assets-check.mjs
 node tests\icon-assets-check.mjs || goto :failed
 

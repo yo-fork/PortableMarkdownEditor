@@ -189,6 +189,7 @@ assert.match(app, /function\s+decodeLocalImagePath/, 'percent-encoded local imag
 assert.match(app, /function\s+snapshotRichDeleteFromKeydown/, 'rich delete operations should be undoable even when beforeinput is skipped');
 assert.match(app, /フォルダが許可されていない/, 'missing folder permission should be explained to the user');
 assert.match(app, /addEventListener\('drop', onEditorDrop\)/, 'editors should accept dropped image files');
+assert.match(appEntry, /els\.rich\.addEventListener\('drop', onRichDrop, true\)/, 'rich drops must be captured before the editor parses HTML');
 assert.match(app, /addEventListener\('paste', onMarkdownPaste\)/, 'source editor should handle pasted image files');
 assert.match(app, /dataset\.folderAccess = state\.desktopDocumentReady[\s\S]+state\.directoryHandle[\s\S]+\? 'fsa'/, 'UI should expose desktop and File System Access API folder sources separately');
 assert.match(app, /function\s+restorePersistedDirectoryHandle/, 'File System Access directory handles should be restorable after reopening');

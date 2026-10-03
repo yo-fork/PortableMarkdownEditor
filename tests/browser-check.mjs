@@ -40,6 +40,7 @@ async function main() {
     await checkImageAssets(baseUrl, sessionId);
     await checkMermaidVisuals(baseUrl, sessionId);
     await checkAppStartup(baseUrl, sessionId);
+    await checkRichDropPolicy(sessionId);
     await checkInlineTableRendering(sessionId);
     await checkTableBudgets(sessionId);
     await checkLinkPolicy(sessionId);
@@ -55,6 +56,7 @@ async function main() {
     connection.onEvent((message) => collectBrowserError(message, fileSessionId));
     await navigate(pathToFileURL(path.join(repoRoot, 'index.html')).href, fileSessionId);
     await poll(`Boolean(document.querySelector('.source-pane .cm-editor'))`, Boolean, fileSessionId, 'file app startup');
+    await checkRichDropPolicy(fileSessionId);
     await checkInlineTableRendering(fileSessionId);
     await checkTableBudgets(fileSessionId);
     await checkLinkPolicy(fileSessionId);
@@ -315,6 +317,258 @@ async function checkAppStartup(baseUrl, sessionId) {
   await checkRichChecklistEditing(sessionId);
   await checkRichStrikethroughEditing(sessionId);
   await checkSplitScrollSync(sessionId);
+}
+
+async function checkRichDropPolicy(sessionId) {
+  const original = 'Drop here.\n\nKeep selection.';
+  const paragraph = '#richEditor .ProseMirror p';
+  const reset = async (markdown = original) => {
+    await switchMode('source', sessionId);
+    await setAppMarkdown(markdown, sessionId);
+    await switchMode('rich', sessionId);
+    await poll(`Boolean(document.querySelector('#richEditor .ProseMirror'))`, Boolean, sessionId, 'rich drop editor');
+  };
+  const assertCaptured = (result, label) => {
+    assert.equal(result.capturePrevented, true, `${label}: root capture must cancel the drop before descendants receive it`);
+    assert.equal(result.targetDrops, 0, `${label}: the ProseMirror or control drop handler must not receive the event`);
+    assert.equal(result.bubbledDrops, 0, `${label}: the drop must not propagate beyond the rich root`);
+  };
+
+  for (const native of [false, true]) {
+    for (const test of [
+      { name: 'HTML plus plain', types: { 'text/html': '<p><strong>HTML PAYLOAD</strong></p>', 'text/plain': 'PLAIN PAYLOAD' }, text: 'PLAIN PAYLOAD' },
+      { name: 'HTML only', types: { 'text/html': '<p><strong>HTML PAYLOAD</strong></p>' } },
+      { name: 'URI only', types: { 'text/uri-list': 'https://example.com/drag-only' } },
+      { name: 'literal HTML', types: { 'text/plain': '<b title="literal">literal</b>' }, text: '<b title="literal">literal</b>' },
+      { name: 'multiline', types: { 'text/plain': 'first\r\nsecond\nthird' }, text: 'first\nsecond\nthird' },
+    ]) {
+      await reset();
+      // A stale selection elsewhere must not determine where dropped text goes.
+      await evaluate(`(() => {
+        const last = document.querySelector('#richEditor .ProseMirror p:nth-child(2)');
+        const range = document.createRange(); range.selectNodeContents(last); range.collapse(false);
+        const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+      })()`, sessionId);
+      const label = `${native ? 'native CDP' : 'synthetic'} ${test.name}`;
+      const result = await dispatchRichDrop({ selector: paragraph, types: test.types, native }, sessionId);
+      assertCaptured(result, label);
+      assert.equal(result.trusted, native, `${label}: the native path must exercise a browser-generated drop`);
+      assert.equal(result.richMarkup, 0, `${label}: dropped HTML must not create formatting or links`);
+      if (test.text) {
+        assert.equal(result.paragraphTexts[0], `${test.text}Drop here.`, `${label}: literal text must be inserted at the pointer`);
+        assert.equal(result.paragraphTexts[1], 'Keep selection.', `${label}: the previous selection must remain intact`);
+        assert.equal(result.breaks, test.name === 'multiline' ? 2 : 0, `${label}: line breaks must use ordinary hard breaks`);
+        const afterDrop = result.markdown;
+        await switchMode('source', sessionId);
+        assert.equal(await evaluate(`document.getElementById('sourceEditor').value`, sessionId), afterDrop,
+          `${label}: leaving rich mode must preserve the drop result`);
+      } else {
+        assert.equal(result.markdown, original, `${label}: unapproved representations must not change Markdown`);
+        await switchMode('source', sessionId);
+        assert.equal(await evaluate(`document.getElementById('sourceEditor').value`, sessionId), original,
+          `${label}: leaving rich mode must preserve the exact original source`);
+      }
+    }
+  }
+
+  await reset();
+  const markdownDrop = await dispatchRichDrop({ selector: paragraph, native: true,
+    types: { 'text/plain': '**PLAIN MARKDOWN**', 'text/html': '<em>HTML ONLY MARKER</em>' } }, sessionId);
+  assertCaptured(markdownDrop, 'plain Markdown normalization');
+  assert.equal(markdownDrop.paragraphTexts[0], 'PLAIN MARKDOWNDrop here.',
+    'plain text remains subject to the editor existing Markdown autoformatting');
+  assert.match(markdownDrop.markdown, /^\*\*PLAIN MARKDOWN\*\*Drop here\./,
+    'plain Markdown autoformatting must preserve its source syntax');
+  assert.doesNotMatch(markdownDrop.markdown, /HTML ONLY MARKER/, 'HTML flavor must never contribute to plain Markdown normalization');
+
+  for (const plain of ['', 'FILE FALLBACK']) {
+    await reset();
+    const result = await dispatchRichDrop({
+      selector: paragraph,
+      types: { 'text/html': '<strong>FILE HTML</strong>', ...(plain ? { 'text/plain': plain } : {}) },
+      file: { name: 'unapproved.svg', type: 'image/svg+xml', contents: '<svg xmlns="http://www.w3.org/2000/svg" />' },
+    }, sessionId);
+    assertCaptured(result, 'disallowed file');
+    assert.equal(result.paragraphTexts[0], `${plain}Drop here.`, 'a disallowed file may only fall back to plain text');
+    assert.equal(result.richMarkup, 0, 'a disallowed file must not enter the DOM as an image or HTML');
+    if (!plain) assert.equal(result.markdown, original, 'a disallowed file without plain text must preserve source');
+  }
+
+  await reset('```text\nexisting\n```');
+  const code = await dispatchRichDrop({ selector: '#richEditor .ProseMirror pre code', types: { 'text/plain': '<b>code</b>\n**literal**\n' } }, sessionId);
+  assertCaptured(code, 'code block');
+  assert.equal(code.codeText, '<b>code</b>\n**literal**\nexisting', 'a code drop must retain literal characters and code newlines');
+  assert.equal(code.breaks, 0, 'code-block newlines must not become hard-break nodes');
+
+  await reset();
+  const undoDrop = await dispatchRichDrop({ selector: paragraph, types: { 'text/plain': 'UNDO DROP' }, native: true }, sessionId);
+  assertCaptured(undoDrop, 'undoable native drop');
+  await checkRichDropBeforeInput(paragraph, sessionId);
+  await pressShortcut({ key: 'z', code: 'KeyZ', modifiers: 2 }, sessionId);
+  await poll(`document.getElementById('sourceEditor').value`, value => value === original, sessionId, 'one-step rich drop undo');
+
+  await reset('COPY ME\n\nDrop here.');
+  await evaluate(`(() => {
+    const source = document.querySelector('#richEditor .ProseMirror p');
+    const range = document.createRange(); range.selectNodeContents(source);
+    const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    source.closest('.ProseMirror').focus();
+  })()`, sessionId);
+  // ProseMirror receives selectionchange asynchronously before dragstart.
+  await delay(100);
+  const internal = await evaluate(`(() => {
+    const source = document.querySelector('#richEditor .ProseMirror p');
+    const dataTransfer = new DataTransfer();
+    source.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer }));
+    window.__pmeInternalDrag = dataTransfer;
+    return { plain: dataTransfer.getData('text/plain'), effectAllowed: dataTransfer.effectAllowed };
+  })()`, sessionId);
+  assert.equal(internal.plain, 'COPY ME', 'the internal-copy case must start with an actual ProseMirror drag payload');
+  const copied = await dispatchRichDrop({ selector: '#richEditor .ProseMirror p:nth-child(2)', internal: true }, sessionId);
+  assertCaptured(copied, 'internal drag');
+  assert.deepEqual(copied.paragraphTexts.slice(0, 2), ['COPY ME', 'COPY MEDrop here.'],
+    'dropping text within the same editor must copy it without removing the original selection');
+  await evaluate(`(() => {
+    document.querySelector('#richEditor .ProseMirror').dispatchEvent(new DragEvent('dragend', { bubbles: true }));
+    delete window.__pmeInternalDrag;
+  })()`, sessionId);
+
+  for (const coordinates of [{ x: -100, y: -100 }, { x: 0, y: 0 }]) {
+    await reset();
+    const result = await dispatchRichDrop({ selector: paragraph, types: { 'text/plain': 'OUTSIDE' }, coordinates }, sessionId);
+    assertCaptured(result, 'outside coordinates');
+    assert.equal(result.markdown, original, 'coordinates outside the editor must not insert at the previous selection');
+  }
+  await checkRichDropApiCoordinates(sessionId);
+  await checkRichDropControls(sessionId, reset, assertCaptured);
+  await reset();
+  await checkRichDropBeforeInput('#richEditor .ProseMirror p', sessionId);
+
+  const fallbackMarkdown = '[guide][ref]\n\n[ref]: #target\n';
+  await switchMode('source', sessionId);
+  await setAppMarkdown(fallbackMarkdown, sessionId);
+  await switchMode('rich', sessionId);
+  await poll(`document.getElementById('richEditor').getAttribute('aria-readonly')`, value => value === 'true', sessionId, 'drop read-only fallback');
+  const fallback = await dispatchRichDrop({ selector: '#richEditor p', types: { 'text/plain': 'READONLY', 'text/html': '<strong>READONLY</strong>' } }, sessionId);
+  assertCaptured(fallback, 'read-only fallback');
+  assert.equal(fallback.markdown, fallbackMarkdown, 'read-only rich fallback must reject plain text drops too');
+  await checkRichDropBeforeInput('#richEditor p', sessionId);
+  await switchMode('source', sessionId);
+  assert.equal(await evaluate(`document.getElementById('sourceEditor').value`, sessionId), fallbackMarkdown,
+    'leaving fallback after blocked drops must preserve reference definitions byte-for-byte');
+  console.log(`rich drop browser checks passed (${await evaluate('location.protocol', sessionId)}; synthetic and native CDP)`);
+}
+
+async function dispatchRichDrop(options, sessionId) {
+  const point = await evaluate(`(() => {
+    const target = document.querySelector(${JSON.stringify(options.selector)});
+    if (!target) throw new Error('drop target missing');
+    target.scrollIntoView({ block: 'center', inline: 'nearest' });
+    const rect = target.getBoundingClientRect();
+    const root = document.getElementById('richEditor');
+    const probe = { capturePrevented: false, targetDrops: 0, bubbledDrops: 0, trusted: false };
+    const capture = event => { probe.capturePrevented = event.defaultPrevented; probe.trusted = event.isTrusted; };
+    const onTarget = () => { probe.targetDrops += 1; };
+    const bubble = () => { probe.bubbledDrops += 1; };
+    root.addEventListener('drop', capture, true);
+    target.addEventListener('drop', onTarget);
+    document.addEventListener('drop', bubble);
+    window.__pmeDropProbe = { probe, cleanup() {
+      root.removeEventListener('drop', capture, true); target.removeEventListener('drop', onTarget); document.removeEventListener('drop', bubble);
+    } };
+    return { x: rect.left + 1, y: rect.top + Math.min(rect.height / 2, 10) };
+  })()`, sessionId);
+  const coordinates = options.coordinates || point;
+  if (options.native) {
+    const data = { items: Object.entries(options.types || {}).map(([mimeType, data]) => ({ mimeType, data })), dragOperationsMask: 1 };
+    for (const type of ['dragEnter', 'dragOver', 'drop']) {
+      await connection.send('Input.dispatchDragEvent', { type, ...coordinates, data }, sessionId);
+    }
+  } else {
+    await evaluate(`(() => {
+      const target = document.querySelector(${JSON.stringify(options.selector)});
+      const dataTransfer = ${options.internal ? 'window.__pmeInternalDrag' : 'new DataTransfer()'};
+      for (const [type, value] of Object.entries(${JSON.stringify(options.types || {})})) dataTransfer.setData(type, value);
+      const file = ${JSON.stringify(options.file || null)};
+      if (file) dataTransfer.items.add(new File([file.contents], file.name, { type: file.type }));
+      target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer, clientX: ${coordinates.x}, clientY: ${coordinates.y} }));
+    })()`, sessionId);
+  }
+  return evaluate(`(() => {
+    const saved = window.__pmeDropProbe; saved.cleanup(); delete window.__pmeDropProbe;
+    const root = document.getElementById('richEditor');
+    const text = node => Array.from(node.childNodes, child => child.nodeName === 'BR' ? '\\n' : child.textContent).join('');
+    return {
+      ...saved.probe, markdown: document.getElementById('sourceEditor').value,
+      paragraphTexts: Array.from(root.querySelectorAll('.ProseMirror > p'), text),
+      richMarkup: root.querySelectorAll('strong, em, a, img, b, i').length,
+      breaks: root.querySelectorAll('br:not(.ProseMirror-trailingBreak)').length,
+      codeText: root.querySelector('pre code')?.textContent || '',
+    };
+  })()`, sessionId);
+}
+
+async function checkRichDropBeforeInput(selector, sessionId) {
+  const result = await evaluate(`(() => {
+    const target = document.querySelector(${JSON.stringify(selector)});
+    const before = document.getElementById('sourceEditor').value;
+    const valueBefore = target.value;
+    const rootBefore = document.getElementById('richEditor').innerHTML;
+    const prevented = [];
+    for (const composing of [false, true]) {
+      const dataTransfer = new DataTransfer(); dataTransfer.setData('text/plain', 'DUPLICATE'); dataTransfer.setData('text/html', '<strong>DUPLICATE</strong>');
+      const event = new InputEvent('beforeinput', {
+        inputType: 'insertFromDrop', data: 'DUPLICATE', dataTransfer,
+        isComposing: composing, bubbles: true, cancelable: true,
+      });
+      target.dispatchEvent(event); prevented.push(event.defaultPrevented);
+    }
+    return { prevented, sourceUnchanged: before === document.getElementById('sourceEditor').value,
+      valueUnchanged: target.value === valueBefore, domUnchanged: rootBefore === document.getElementById('richEditor').innerHTML };
+  })()`, sessionId);
+  assert.deepEqual(result, { prevented: [true, true], sourceUnchanged: true, valueUnchanged: true, domUnchanged: true },
+    `insertFromDrop beforeinput must always cancel without applying or duplicating its payload: ${selector}`);
+}
+
+async function checkRichDropControls(sessionId, reset, assertCaptured) {
+  await reset('```text\ncontent\n```');
+  const inputSelector = '#richEditor .pme-code-language-input';
+  await evaluate(`(() => { const input = document.querySelector(${JSON.stringify(inputSelector)}); input.focus(); input.setSelectionRange(0, input.value.length); })()`, sessionId);
+  const language = await dispatchRichDrop({ selector: inputSelector, types: { 'text/plain': 'javascript', 'text/html': '<strong>HTML LANGUAGE</strong>' } }, sessionId);
+  assertCaptured(language, 'code language input');
+  assert.match(language.markdown, /^```javascript\n/, 'plain drops into the language input must emit input and update the model');
+  await checkRichDropBeforeInput(inputSelector, sessionId);
+
+  // Math and other source popovers are portaled to body. This fixture checks the
+  // root's textarea-descendant contract without moving those production controls.
+  const textareaSelector = '#richEditor textarea[data-drop-check]';
+  await evaluate(`(() => {
+    const input = document.createElement('textarea'); input.dataset.dropCheck = 'true'; input.value = 'x+1';
+    document.getElementById('richEditor').appendChild(input); input.focus(); input.setSelectionRange(2, 3);
+    window.__pmeDropInputEvents = 0; input.addEventListener('input', () => { window.__pmeDropInputEvents += 1; });
+  })()`, sessionId);
+  const textarea = await dispatchRichDrop({ selector: textareaSelector, types: { 'text/plain': '2', 'text/html': '<strong>99</strong>' } }, sessionId);
+  assertCaptured(textarea, 'rich textarea descendant');
+  const updated = await evaluate(`({ value: document.querySelector(${JSON.stringify(textareaSelector)})?.value, inputs: window.__pmeDropInputEvents })`, sessionId);
+  assert.equal(updated.value, 'x+2', 'the textarea drop must replace the selected range');
+  assert.equal(updated.inputs, 1, 'the manual control insertion must emit exactly one input event');
+  await checkRichDropBeforeInput(textareaSelector, sessionId);
+  await evaluate(`(() => { document.querySelector(${JSON.stringify(textareaSelector)}).remove(); delete window.__pmeDropInputEvents; })()`, sessionId);
+}
+
+async function checkRichDropApiCoordinates(sessionId) {
+  const result = await evaluate(`(() => {
+    const mount = document.createElement('div'); document.body.appendChild(mount);
+    const editor = window.PMEProseMirror.createRichMarkdownEditor({ mount, markdown: 'unchanged' });
+    try {
+      const doc = editor.view.state.doc;
+      const results = [undefined, {}, { left: NaN, top: 1 }, { left: 1, top: Infinity }, { left: -100, top: -100 }]
+        .map(point => editor.insertDroppedText('rejected', point));
+      return { results, sameDocument: editor.view.state.doc === doc, markdown: editor.markdown() };
+    } finally { editor.destroy(); mount.remove(); }
+  })()`, sessionId);
+  assert.deepEqual(result, { results: [false, false, false, false, false], sameDocument: true, markdown: 'unchanged' },
+    'invalid and outside drop coordinates must fail closed without a document transaction');
 }
 
 async function checkInlineTableRendering(sessionId) {

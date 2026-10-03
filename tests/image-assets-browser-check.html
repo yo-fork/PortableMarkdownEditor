@@ -211,6 +211,9 @@
     <span id="inlineInsertTargetLabel"></span>
   </dialog>
 
+  <script src="../vendor/markdown-it/markdown-it.min.js"></script>
+  <script src="../modules/table-policy.js"></script>
+  <script src="../vendor/prosemirror/prosemirror-editor.js"></script>
   <script src="../modules/markdown-renderer.js"></script>
   <script src="../modules/rich-editor.js"></script>
   <script src="../modules/rich-input-controller.js"></script>
@@ -263,7 +266,8 @@
       }
 
       function focusRichEnd() {
-        const rich = document.getElementById('richEditor');
+        const rich = document.querySelector('#richEditor .ProseMirror');
+        assert(rich, 'image drops require the production editable rich surface');
         rich.focus();
         const range = document.createRange();
         range.selectNodeContents(rich);
@@ -405,6 +409,7 @@
       async function runStartPhase() {
         await window.__PME_IMAGE_TEST_READY;
         await waitFor(() => document.body.dataset.mode === 'rich', 'app did not initialize');
+        await waitFor(() => document.querySelector('#richEditor .ProseMirror'), 'ProseMirror did not initialize');
         assert(localStorage.getItem('portable-markdown-editor:draft:v2'), 'legacy draft was not migrated');
         assert(localStorage.getItem('portable-markdown-editor:settings:v2'), 'legacy settings were not migrated');
         assert(localStorage.getItem('portable-markdown-editer:draft:v1') === null, 'legacy draft key was not removed');

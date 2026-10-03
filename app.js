@@ -567,6 +567,7 @@ flowchart TD
       getLines,
       getRichCaretBookmark,
       guardFailedRichSourceControlTransaction,
+      guardReadOnlyRichFallbackAction,
       hasImageFiles,
       imageFilesFromClipboard,
       imageFilesFromDataTransfer,
@@ -662,6 +663,8 @@ flowchart TD
     onMarkdownPaste,
     onRichCompositionEnd,
     onRichCut,
+    onRichDragOver,
+    onRichDrop,
     onRichInput,
     onRichPaste,
     parseMarkdownQuoteSource,
@@ -891,9 +894,9 @@ flowchart TD
     els.rich.addEventListener('input', onRichInput);
     els.rich.addEventListener('paste', onRichPaste);
     els.rich.addEventListener('cut', onRichCut);
-    els.rich.addEventListener('dragover', onEditorDragOver);
+    els.rich.addEventListener('dragover', onRichDragOver);
     els.rich.addEventListener('dragleave', onEditorDragLeave);
-    els.rich.addEventListener('drop', onEditorDrop);
+    els.rich.addEventListener('drop', onRichDrop, true);
     els.rich.addEventListener('compositionstart', () => { state.richComposing = true; });
     els.rich.addEventListener('compositionend', onRichCompositionEnd);
     els.rich.addEventListener('pointerdown', onRichPointerDownCapture, true);

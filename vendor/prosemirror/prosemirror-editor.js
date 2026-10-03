@@ -21642,6 +21642,32 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
         editorView.focus();
         return true;
       },
+      insertDroppedText: function(text, coordinates) {
+        if (destroyed || typeof text !== 'string' || !text || !coordinates
+          || !Number.isFinite(coordinates.left) || !Number.isFinite(coordinates.top)) return false;
+        var bounds = editorView.dom.getBoundingClientRect();
+        if (coordinates.left < bounds.left || coordinates.left > bounds.right
+          || coordinates.top < bounds.top || coordinates.top > bounds.bottom) return false;
+        var point = editorView.posAtCoords(coordinates);
+        var selection = point && selectionFromClickPosition(editorView, point.pos);
+        if (!(selection instanceof state.TextSelection)) return false;
+        var transaction = editorView.state.tr.setSelection(selection);
+        var normalized = normalizeNewlines(text);
+        if (selection.$from.parent.type.spec.code) {
+          transaction.insertText(normalized);
+        } else {
+          // Start with text nodes, never HTML; the editor's normal Markdown rules still apply.
+          var nodes = [];
+          normalized.split('\n').forEach(function(line, index) {
+            if (index) nodes.push(schema.nodes.hard_break.create());
+            if (line) nodes.push(schema.text(line));
+          });
+          transaction.replaceSelection(new model.Slice(model.Fragment.fromArray(nodes), 0, 0));
+        }
+        editorView.dispatch(transaction.scrollIntoView().setMeta('uiEvent', 'drop'));
+        editorView.focus();
+        return true;
+      },
       destroy: function() {
         destroyed = true;
         editorView.destroy();

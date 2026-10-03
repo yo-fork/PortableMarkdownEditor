@@ -40,6 +40,7 @@
       getLines,
       getRichCaretBookmark,
       guardFailedRichSourceControlTransaction,
+      guardReadOnlyRichFallbackAction,
       hasImageFiles,
       imageFilesFromClipboard,
       imageFilesFromDataTransfer,
@@ -2094,6 +2095,12 @@
     }
 
     function onDocumentBeforeInput(event) {
+      // This must precede the ProseMirror, composition, and source-control exemptions.
+      if (event.inputType === 'insertFromDrop' && els.rich?.contains(eventTargetElement(event))) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (isProseMirrorRichTarget(eventTargetElement(event))) return;
       onRichBeforeInput(event);
     }
@@ -3059,6 +3066,37 @@
       event.preventDefault();
       event.currentTarget?.classList?.remove('is-drag-over');
       await insertImageFilesAsAssets(imageFiles, createImageInsertionContext(event), 'ドロップ');
+    }
+
+    function onRichDragOver(event) {
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = isProseMirrorRichActive() ? 'copy' : 'none';
+      event.currentTarget?.classList?.add('is-drag-over');
+    }
+
+    async function onRichDrop(event) {
+      // Capture before editor/node-view handlers can parse HTML or the browser inserts it.
+      event.preventDefault();
+      event.stopPropagation();
+      els.rich.classList.remove('is-drag-over');
+      if (guardReadOnlyRichFallbackAction('ドロップ')) return;
+      const imageFiles = imageFilesFromDataTransfer(event.dataTransfer);
+      if (imageFiles.length) {
+        await insertImageFilesAsAssets(imageFiles, createImageInsertionContext(event), 'ドロップ');
+        return;
+      }
+      const text = stripRichCaretTokens(normalizeNewlines(event.dataTransfer?.getData('text/plain') || ''));
+      if (!text) return;
+      const control = eventTargetElement(event)?.closest?.('input, textarea');
+      if (control && els.rich.contains(control)) {
+        if (control.disabled || control.readOnly || typeof control.selectionStart !== 'number') return;
+        control.focus({ preventScroll: true });
+        control.setRangeText(text, control.selectionStart, control.selectionEnd, 'end');
+        control.dispatchEvent(new Event('input', { bubbles: true }));
+        return;
+      }
+      if (!isProseMirrorRichActive()) return;
+      state.proseMirrorRich.insertDroppedText(text, { left: event.clientX, top: event.clientY });
     }
 
     function insertPlainTextAtSelection(text) {
@@ -5457,6 +5495,8 @@
       onMarkdownPaste,
       onRichCompositionEnd,
       onRichCut,
+      onRichDragOver,
+      onRichDrop,
       onRichInput,
       onRichPaste,
       parseMarkdownQuoteSource,
