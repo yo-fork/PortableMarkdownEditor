@@ -1,6 +1,10 @@
 (() => {
   'use strict';
 
+  // Mermaid's parser, configuration and renderer share vendor-global state.
+  let mermaidRenderQueue = Promise.resolve();
+  let mermaidRenderSerial = 0;
+
   function createMarkdownRenderer(options = {}) {
     const state = options.state;
     const els = options.els;
@@ -53,8 +57,6 @@
       imageAssetReason,
     } = dependencies;
 
-    let mermaidRenderSerial = 0;
-    let mermaidRenderQueue = Promise.resolve();
     const mermaidLinkPolicies = new WeakMap();
     let vendorMarkdownRenderer = null;
     const MAX_INLINE_SOURCE_CHARS = 200000;
@@ -1717,7 +1719,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; img-src 'self' data: blob:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none';">
   <title>${title}</title>
   <style>
   body{margin:0;padding:clamp(1rem,4vw,4rem);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.75;color:#111827;background:#fff}main{max-width:920px;margin:auto}h1,h2{border-bottom:1px solid #e5e7eb;padding-bottom:.25rem}pre{overflow:auto;background:#0f172a;color:#e5e7eb;border-radius:.75rem;padding:1rem}code{font-family:Consolas,monospace;background:#f3f4f6;border-radius:.25rem;padding:.1rem .25rem}pre code{background:transparent;padding:0}.code-lang{float:right;color:#94a3b8;font:700 .72rem system-ui}.tok-comment{color:#94a3b8}.tok-string{color:#a7f3d0}.tok-number{color:#fde68a}.tok-keyword{color:#93c5fd}.tok-function{color:#f9a8d4}.tok-property{color:#c4b5fd}.tok-tag{color:#fca5a5}.tok-operator{color:#cbd5e1}blockquote{border-left:.25rem solid #2563eb;margin:1rem 0;padding:.25rem 1rem;background:#eff6ff}table{border-collapse:collapse;width:100%}th,td{border:1px solid #d1d5db;padding:.5rem}.align-left{text-align:left}.align-center{text-align:center}.align-right{text-align:right}img{max-width:100%}.math-inline{display:inline-block}.math-display{display:block;margin:1rem 0;text-align:center}.katex>.katex-mathml{display:inline}.katex>.katex-html{display:none}.meta{color:#6b7280;font-size:.9rem}.blocked-image,.blocked-link{color:#b42318;border:1px solid #f3b8b1;border-radius:.3rem;padding:.1rem .3rem}.toc{border:1px solid #e5e7eb;border-radius:.75rem;padding:1rem}.toc a{display:block;color:#2563eb;text-decoration:none}.mermaid-diagram{margin:1.25rem 0}.mermaid-diagram figcaption{font-weight:700;color:#475569;margin-bottom:.4rem}.mermaid-svg{width:100%;height:auto;min-height:10rem;max-height:none;border:1px solid #d1d5db;border-radius:.75rem;background:#f8fafc}.mermaid-sequence .mermaid-svg,.mermaid-svg.mindmapDiagram{max-width:min(100%,820px);margin-inline:auto}.mermaid-svg.flowchart{display:block;width:min(100%,560px);margin-inline:auto}.mermaid-svg.flowchart text{font-size:12px!important}.mermaid-fallback pre{margin:0}.mermaid-svg .edgeLabel text,.mermaid-svg .edgeLabel tspan{paint-order:stroke;stroke:#f8fafc;stroke-width:7px;stroke-linejoin:round}.mermaid-node rect,.mermaid-node ellipse,.mermaid-node polygon,.mermaid-seq-participant rect{fill:#fff;stroke:#2563eb;stroke-width:1.5}.mermaid-svg.mindmapDiagram .section-root circle,.mermaid-svg.mindmapDiagram .node-bkg{fill:#fff!important;stroke:#2563eb!important}.mermaid-svg.mindmapDiagram .label .background{fill:#fff!important;opacity:.92!important}.mermaid-svg.mindmapDiagram .edge{stroke:#2563eb!important;stroke-width:2px!important;stroke-opacity:.22}.mermaid-edge path,.mermaid-message path{stroke:#334155;stroke-width:1.6;fill:none}.mermaid-edge-label,.mermaid-message text{font:650 18px system-ui;fill:#475569;text-anchor:middle;paint-order:stroke;stroke:#f8fafc;stroke-width:7px;stroke-linejoin:round}.mermaid-node-label{font:650 16px system-ui;fill:#0f172a}.mermaid-flow-node-label{font:650 24px system-ui;fill:#0f172a}.mermaid-lifeline{stroke:#94a3b8;stroke-dasharray:5 5}.mermaid-note rect{fill:#fef3c7;stroke:#f59e0b}
@@ -1747,7 +1749,6 @@
 
     function renderMermaidIn(root) {
       if (!window.mermaid?.render) return;
-      cleanupMermaidRenderScratchNodes();
       const targets = Array.from(root.querySelectorAll('.mermaid-render-target[data-mermaid-source]'));
       const linkPolicy = JSON.stringify(state.allowedLinkDomains);
       for (const target of targets) {
@@ -1764,6 +1765,7 @@
     window.PMERenderMermaidIn = renderMermaidIn;
 
     async function renderMermaidTargets(targets) {
+      cleanupMermaidRenderScratchNodes();
       for (const target of targets) {
         if (!target.isConnected) continue;
         const source = target.getAttribute('data-mermaid-source') || '';
@@ -1771,8 +1773,11 @@
         const id = target.getAttribute('data-mermaid-render-id') || nextMermaidId('diagram', source);
         cleanupMermaidRenderScratch(id);
         try {
+          if (!window.PMEMermaidPolicy) throw new Error('Mermaidの描画前検査を使用できません。');
+          await window.PMEMermaidPolicy.assertSafeSource(source, window.mermaid);
+          if (!target.isConnected || target.getAttribute('data-mermaid-source') !== source) continue;
           const result = await window.mermaid.render(id, source);
-          if (!target.isConnected) continue;
+          if (!target.isConnected || target.getAttribute('data-mermaid-source') !== source) continue;
           const svg = typeof result === 'string' ? result : result?.svg;
           const safeSvg = sanitizeSvgMarkup(svg);
           if (safeSvg) {
@@ -1787,7 +1792,7 @@
             target.innerHTML = renderMermaidFallbackPre(source);
           }
         } catch (error) {
-          if (!target.isConnected) continue;
+          if (!target.isConnected || target.getAttribute('data-mermaid-source') !== source) continue;
           target.classList.add('mermaid-fallback');
           target.setAttribute('data-mermaid-error', String(error?.message || 'Mermaid描画に失敗しました').slice(0, 300));
           target.innerHTML = renderMermaidFallbackPre(source);
@@ -1844,24 +1849,31 @@
       if (!window.DOMParser) return '';
       const doc = new DOMParser().parseFromString(normalizeSvgMarkupForParsing(svg), 'image/svg+xml');
       if (doc.querySelector('parsererror')) return '';
-      doc.querySelectorAll('script, iframe, object, embed, foreignObject, form, input, button, select, textarea, link, meta').forEach((node) => node.remove());
+      doc.querySelectorAll('script, iframe, object, embed, foreignObject, form, input, button, select, textarea, link, meta, img, feImage, video, audio, source, animate, animateMotion, animateTransform, set').forEach((node) => node.remove());
       doc.querySelectorAll('style').forEach((node) => {
         if (!isSafeSvgStyle(node.textContent || '')) node.remove();
       });
+      const styleAttributes = new Set(['style', 'fill', 'stroke', 'filter', 'clip-path', 'mask',
+        'cursor', 'marker', 'marker-start', 'marker-mid', 'marker-end', 'color-profile']);
       doc.querySelectorAll('*').forEach((node) => {
         for (const attr of Array.from(node.attributes)) {
-          const name = attr.name.toLowerCase();
+          const name = attr.localName.toLowerCase();
           const value = attr.value.trim().toLowerCase();
           if (name.startsWith('on') || value.startsWith('javascript:') || name === 'srcdoc') {
             node.removeAttribute(attr.name);
             continue;
           }
-          if (name === 'style' && !isSafeSvgStyle(attr.value)) {
+          if (styleAttributes.has(name) && !isSafeSvgStyle(attr.value)) {
             node.removeAttribute(attr.name);
             continue;
           }
-          if (['href', 'xlink:href', 'src'].includes(name) && !isSafeSvgLink(attr.value)) {
-            node.removeAttribute(attr.name);
+          if (['href', 'src', 'srcset'].includes(name)) {
+            // Navigation links are not image or external SVG capabilities.
+            const tag = node.localName.toLowerCase();
+            const safe = tag === 'a' && name !== 'src' && name !== 'srcset'
+              ? isSafeSvgLink(attr.value)
+              : tag !== 'image' && name !== 'src' && name !== 'srcset' && attr.value.trim().startsWith('#');
+            if (!safe) node.removeAttribute(attr.name);
           }
         }
       });
@@ -1870,6 +1882,8 @@
         svgElement.classList.add('mermaid-svg');
         svgElement.removeAttribute('style');
         polishMermaidSvg(svgElement);
+        // C4 replaces its bundled person image with local vector shapes above.
+        svgElement.querySelectorAll('image').forEach((node) => node.remove());
       }
       return svgElement?.outerHTML || '';
     }
@@ -2089,14 +2103,7 @@
     }
 
     function isSafeSvgStyle(value) {
-      const style = String(value || '').toLowerCase();
-      if (!style) return true;
-      if (style.includes('@import') || style.includes('expression(') || style.includes('javascript:') || style.includes('data:')) return false;
-      const urls = style.match(/url\(([^)]+)\)/g) || [];
-      return urls.every((token) => {
-        const inner = token.slice(4, -1).trim().replace(/^['"]|['"]$/g, '');
-        return inner.startsWith('#');
-      });
+      return window.PMEMermaidPolicy?.isSafeStyle(value) ?? false;
     }
 
     function isSafeSvgLink(value) {

@@ -38,6 +38,10 @@ echo ^> node tests\image-policy-check.mjs
 node tests\image-policy-check.mjs || goto :failed
 
 echo.
+echo ^> node tests\mermaid-policy-check.mjs
+node tests\mermaid-policy-check.mjs || goto :failed
+
+echo.
 echo ^> node --check modules\shortcut-manager.js
 node --check modules\shortcut-manager.js || goto :failed
 

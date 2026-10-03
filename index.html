@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; media-src data: blob:; font-src 'self' data:; connect-src https://document.portable-markdown-editor.local; worker-src 'none'; manifest-src 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src blob:; media-src data: blob:; font-src 'self' data:; connect-src https://document.portable-markdown-editor.local; worker-src 'none'; manifest-src 'none';">
   <title>Portable Markdown Editor</title>
   <link rel="stylesheet" href="./vendor/highlight/styles/github-dark.min.css">
   <link rel="stylesheet" href="./vendor/katex/katex.min.css">
@@ -15,6 +15,7 @@
   <script src="./vendor/katex/katex.min.js" defer></script>
   <script src="./modules/table-policy.js?v=table-budget-1" defer></script>
   <script src="./modules/image-policy.js?v=image-budget-1" defer></script>
+  <script src="./modules/mermaid-policy.js?v=mermaid-images-1" defer></script>
   <script src="./vendor/prosemirror/prosemirror-editor.js?v=rich-edit-controls-12" defer></script>
   <script src="./vendor/codemirror6/source-editor.bundle.js?v=scroll-sync-1" defer></script>
   <script src="./modules/markdown-renderer.js?v=app-modules-2" defer></script>

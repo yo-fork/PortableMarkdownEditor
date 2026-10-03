@@ -117,7 +117,7 @@ const imageContext = vm.createContext({
   },
 });
 vm.runInContext(`${integrationSource}\nglobal.imageChecks = {
-  parseMarkdown, createImageRenderPlan, createImageClipboardSerializer
+  parseMarkdown, createImageRenderPlan, createImageClipboardSerializer, MermaidNodeView
 };`, imageContext);
 const imageChecks = imageContext.global.imageChecks;
 const approvedInfo = { width: 10, height: 10, pixels: 100, frames: 1, size: 100, mimeType: 'image/png' };
@@ -190,5 +190,64 @@ assert.ok([...imageChecks.createImageRenderPlan(crowdedImages, exportImageOption
   'portable clipboard output must not change live image rendering URLs');
 assert.equal(clipboardElements(embeddedClipboard.serializeFragment(unsafeImages.content, { document: clipboardDocument }), 'IMG').length, 0,
   'an export URL callback cannot bypass admission of the original image');
+
+// A missing shared renderer must never fall through to the vendor renderer or
+// an HTML insertion sink. Track those effects without invoking an image decoder.
+const mermaidCreatedElements = [];
+const mermaidHtmlWrites = [];
+function mermaidElement(name) {
+  mermaidCreatedElements.push(name);
+  const classes = new Set();
+  return {
+    attrs: {}, children: [], isConnected: true, text: '',
+    classList: { add(value) { classes.add(value); }, remove(value) { classes.delete(value); }, contains(value) { return classes.has(value); } },
+    setAttribute(key, value) { this.attrs[key] = value; },
+    appendChild(child) { this.children.push(child); return child; },
+    removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
+    get firstChild() { return this.children[0] || null; },
+    get textContent() { return this.text + this.children.map((child) => child.textContent).join(''); },
+    set textContent(value) { this.text = value; this.children = []; },
+    set innerHTML(value) { mermaidHtmlWrites.push(value); },
+    querySelector() { return null; },
+  };
+}
+imageContext.document = { createElement: mermaidElement };
+let directMermaidRenders = 0;
+imageContext.global.mermaid = {
+  render() {
+    directMermaidRenders += 1;
+    return Promise.resolve({ svg: '<svg><image href="https://example.com/unsafe.png" /></svg>' });
+  },
+};
+for (const source of [
+  'flowchart LR\nA["<img src=\'https://example.com/label.png\'>"]',
+  'flowchart LR\nA@{ img: "data:image/png;base64,AAAA" }',
+]) {
+  const view = { node: { attrs: { source } }, dom: mermaidElement('figure'), target: mermaidElement('div'), sourceEditor: { value: '' }, renderToken: 0 };
+  imageChecks.MermaidNodeView.prototype.render.call(view);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(directMermaidRenders, 0, 'without the shared helper, even an available vendor renderer must not run');
+  assert.equal(mermaidHtmlWrites.length, 0, 'fallback source must not be inserted as HTML or SVG');
+  assert.equal(view.target.children.length, 1);
+  assert.equal(view.target.firstChild.textContent, 'Mermaid renderer is not available.\n\n' + source);
+  assert.ok(view.target.classList.contains('mermaid-fallback'));
+  assert.equal(view.sourceEditor.value, source, 'fallback keeps editable Mermaid source unchanged');
+  const markdown = '```mermaid\n' + source + '\n```';
+  assert.equal(proseMirror.normalizeMarkdown(markdown), markdown, 'fallback must preserve Mermaid Markdown content');
+}
+assert.ok(mermaidCreatedElements.every((name) => ['figure', 'div', 'pre'].includes(name)),
+  'missing-helper fallback creates no image or SVG nodes');
+const delegatedSource = 'flowchart LR\nA --> B';
+const delegatedView = { node: { attrs: { source: delegatedSource } }, dom: mermaidElement('figure'), target: mermaidElement('div'), sourceEditor: { value: '' } };
+let delegatedMermaidRenders = 0;
+imageContext.global.PMERenderMermaidIn = (root) => {
+  delegatedMermaidRenders += 1;
+  assert.equal(root, delegatedView.dom);
+  assert.equal(delegatedView.target.attrs['data-mermaid-source'], delegatedSource);
+};
+imageChecks.MermaidNodeView.prototype.render.call(delegatedView);
+assert.equal(delegatedMermaidRenders, 1, 'ordinary Mermaid continues to use the shared security boundary');
+assert.equal(delegatedView.sourceEditor.value, delegatedSource);
+assert.equal(directMermaidRenders, 0);
 
 console.log('ProseMirror round-trip checks passed');

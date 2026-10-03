@@ -20388,20 +20388,10 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     target.appendChild(pre);
   }
 
-  var mermaidRenderCounter = 0;
-  var prosemirrorMermaidRenderQueue = Promise.resolve();
-
-  function cleanupProseMirrorMermaidScratch(id) {
-    if (!id || !document.getElementById) return;
-    var scratch = document.getElementById('d' + id);
-    if (scratch && scratch.parentNode) scratch.parentNode.removeChild(scratch);
-  }
-
   function MermaidNodeView(node, editorView, getPos) {
     this.node = node;
     this.editorView = editorView;
     this.getPos = getPos;
-    this.renderToken = 0;
     this.dom = document.createElement('figure');
     this.dom.className = 'mermaid-diagram pme-mermaid-node';
     atomDomAttrs(this.dom, node.type.name);
@@ -20440,7 +20430,6 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
   MermaidNodeView.prototype.render = function() {
     var sourceText = normalizeNewlines(this.node.attrs.source || '');
     var source = sourceText.replace(/\n+$/g, '');
-    var renderToken = this.renderToken += 1;
     this.dom.setAttribute('data-source', source);
     setSourceEditorValue(this.sourceEditor, sourceText);
     autoSizeNodeSourceEditor(this.sourceEditor);
@@ -20451,39 +20440,11 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       renderMermaidFallback(this.target, source, 'Mermaid source is empty.');
       return;
     }
-    var id = 'pme-pm-mermaid-' + (++mermaidRenderCounter);
-    this.target.setAttribute('data-mermaid-render-id', id);
     if (typeof global.PMERenderMermaidIn === 'function') {
       global.PMERenderMermaidIn(this.dom);
       return;
     }
-    if (!global.mermaid || typeof global.mermaid.render !== 'function') {
-      renderMermaidFallback(this.target, source, 'Mermaid renderer is not available.');
-      return;
-    }
-    var self = this;
-    cleanupProseMirrorMermaidScratch(id);
-    var renderRun = prosemirrorMermaidRenderQueue.catch(function() {}).then(function() {
-      if (renderToken !== self.renderToken || !self.dom.isConnected) return null;
-      cleanupProseMirrorMermaidScratch(id);
-      return global.mermaid.render(id, source);
-    });
-    prosemirrorMermaidRenderQueue = renderRun.catch(function() {});
-    renderRun.then(function(result) {
-      cleanupProseMirrorMermaidScratch(id);
-      if (renderToken !== self.renderToken) return;
-      if (!result) return;
-      clearDom(self.target);
-      self.target.classList.remove('mermaid-fallback');
-      self.target.innerHTML = result && result.svg || '';
-      var svg = self.target.querySelector('svg');
-      if (svg) svg.classList.add('mermaid-svg');
-      if (!svg) renderMermaidFallback(self.target, source, 'Mermaid did not return SVG.');
-    }).catch(function(error) {
-      cleanupProseMirrorMermaidScratch(id);
-      if (renderToken !== self.renderToken) return;
-      renderMermaidFallback(self.target, source, error && error.message || 'Mermaid render failed.');
-    });
+    renderMermaidFallback(this.target, source, 'Mermaid renderer is not available.');
   };
 
   MermaidNodeView.prototype.update = function(node) {

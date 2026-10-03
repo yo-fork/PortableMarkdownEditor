@@ -3265,6 +3265,7 @@ flowchart TD
   function initializeVendorLibraries() {
     if (window.mermaid?.initialize) {
       window.mermaid.initialize({
+        ...window.PMEMermaidPolicy?.securityConfig(),
         startOnLoad: false,
         securityLevel: 'strict',
         theme: 'base',

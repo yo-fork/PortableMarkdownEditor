@@ -20,7 +20,7 @@ Portable Markdown Editor は、Markdownファイルを完全ローカルで編�
 
 - `default-src 'none'`
 - `connect-src https://document.portable-markdown-editor.local`
-- `img-src 'self' blob:`
+- `img-src blob:`
 - `script-src 'self'`
 - `style-src 'self' 'unsafe-inline'`
 - `object-src 'none'`
@@ -145,7 +145,18 @@ CDN、npm実行、実行時のパッケージ取得、外部API通信は使い�
 CSPはスクリプトを同一Originに、Fetchを前述のネイティブ文書画像ホストだけに制限します。
 ライセンスと同梱ファイルは `docs/third-party-licenses.md` と `vendor/manifest.json` に記録します。
 
-Mermaidは `securityLevel: 'strict'`、`htmlLabels: false` で初期化します。Mermaid/KaTeXの生成スタイル表示のため `style-src 'self' 'unsafe-inline'` を許可しますが、`script-src` と `connect-src` は緩めず、raw HTMLは無効のままです。MermaidのSVG描画結果は挿入前にスクリプト、イベントハンドラ、危険URL、危険なCSS URLを除去します。描画やSVG安全化に失敗した場合は、元のMermaidコードをエスケープ済みのフォールバックとして表示します。
+Mermaidは `securityLevel: 'strict'`、`htmlLabels: false` で初期化し、文書内の設定からHTMLラベルや画像除去の設定を変更できないようにします。
+描画前に同梱Mermaidのパーサーで画像メタデータ、シーケンス図の画像アイコン、設定と図のスタイルを検査します。
+引用符やエスケープで表した画像キーも解析後の値で検査し、CSSのエスケープを復元して外部資源を読む指定を拒否します。
+画像は通常のMarkdown画像参照を通じて、前述のフォルダと画像の許可条件を満たす場合にだけ表示できます。
+Mermaidの解析、検査、描画は、プレビューとリッチ表示で共有する待ち行列で処理します。
+共有描画処理が使えない場合も、リッチ表示から直接Mermaidの描画処理を呼び出しません。
+
+Mermaid/KaTeXの生成スタイル表示のため `style-src 'self' 'unsafe-inline'` を許可します。
+生成SVGからはスクリプト、イベントハンドラ、画像、外部SVG参照、危険なCSSを除去し、リンク先の許可と画像の許可を分けて判定します。
+C4図の同梱人物画像は従来どおりベクター図形へ置き換えます。
+画像のCSPはアプリで `blob:`、HTML出力で `data: blob:` に限定します。
+描画前検査やSVG安全化に失敗した場合は、理由と元のMermaidコードをエスケープ済みのテキストとして表示します。
 
 KaTeXのCSSとフォントは `vendor/katex/` からのみ読み込みます。`font-src 'self' data:` は維持し、数式描画に失敗した場合は数式ソースをエスケープして表示します。
 

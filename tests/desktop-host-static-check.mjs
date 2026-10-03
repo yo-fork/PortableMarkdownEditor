@@ -25,7 +25,7 @@ const portableReadme = read('../native/README-WINDOWS.txt');
 const projectReadme = read('../README.md');
 const releaseReadme = read('../release/README.md');
 
-assert.match(index, /img-src 'self' blob:;/, 'document images must pass byte admission before a blob URL reaches the decoder');
+assert.match(index, /img-src blob:;/, 'document images must pass byte admission before a blob URL reaches the decoder');
 assert.match(index, /connect-src https:\/\/document\.portable-markdown-editor\.local;/, 'only the native document image transport may be fetched');
 assert.match(styles, /body\[data-desktop-host="true"\][\s\S]+data-action="open-folder"/);
 

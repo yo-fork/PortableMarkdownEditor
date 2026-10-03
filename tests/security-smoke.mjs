@@ -24,7 +24,7 @@ assert.doesNotMatch(index, /type="importmap"/, 'CodeMirror should load through t
 assert.match(index, /vendor\/codemirror6\/source-editor\.bundle\.js/, 'CodeMirror should load from a vendored local bundle');
 assert.match(index, /style-src 'self' 'unsafe-inline'/);
 assert.doesNotMatch(index, /frame-ancestors/, 'frame-ancestors is ignored in meta CSP and should not be present');
-assert.match(index, /img-src 'self' blob:;/);
+assert.match(index, /img-src blob:;/);
 assert.doesNotMatch(index, /img-src[^"]*file:/, 'file: images should not be allowed by CSP');
 assert.match(index, /vendor\/prosemirror\/prosemirror-editor\.js/, 'ProseMirror should load from a local classic script bundle');
 assert.match(index, /modules\/markdown-renderer\.js[\s\S]+app\.js/, 'the Markdown renderer module should load before the app entry point');
@@ -466,6 +466,7 @@ const context = vm.createContext({
 });
 vm.runInContext(readFileSync(new URL('../modules/table-policy.js', import.meta.url), 'utf8'), context);
 vm.runInContext(readFileSync(new URL('../modules/image-policy.js', import.meta.url), 'utf8'), context);
+vm.runInContext(readFileSync(new URL('../modules/mermaid-policy.js', import.meta.url), 'utf8'), context);
 vm.runInContext(markdownRendererModule, context);
 vm.runInContext(richEditorModule, context);
 vm.runInContext(richInputControllerModule, context);

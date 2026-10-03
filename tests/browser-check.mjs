@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -44,6 +45,7 @@ async function main() {
     await checkInlineTableRendering(sessionId);
     await checkTableBudgets(sessionId);
     await checkLinkPolicy(sessionId);
+    await checkMermaidImagePolicy(sessionId);
     await checkCodeHighlightBudgets(sessionId);
     await checkMathRenderBudgets(sessionId);
     await checkImageBudgets(sessionId);
@@ -61,6 +63,7 @@ async function main() {
     await checkInlineTableRendering(fileSessionId);
     await checkTableBudgets(fileSessionId);
     await checkLinkPolicy(fileSessionId);
+    await checkMermaidImagePolicy(fileSessionId);
     await checkCodeHighlightBudgets(fileSessionId);
     await checkMathRenderBudgets(fileSessionId);
     await checkImageBudgets(fileSessionId);
@@ -674,7 +677,9 @@ async function checkLinkPolicy(sessionId) {
   const component = await evaluate(`(() => {
     const errors = [];
     const policy = { allowedLinkDomains: ['example.com'] };
+    const renderMermaidIn = window.PMERenderMermaidIn;
     const renderer = window.PMEMarkdownRenderer.createMarkdownRenderer({ state: policy, els: {} });
+    window.PMERenderMermaidIn = renderMermaidIn;
     const mount = document.createElement('div');
     document.body.appendChild(mount);
     const editor = window.PMEProseMirror.createRichMarkdownEditor({
@@ -917,6 +922,269 @@ async function checkMermaidLinkPolicy(sessionId) {
     }))()`, value => value?.ready && value.href === (allowed ? 'https://example.com/' : ''), sessionId, 'Mermaid link policy refresh');
     assert.equal(await evaluate(`document.getElementById('sourceEditor').value`, sessionId), markdown, 'policy changes must preserve Mermaid source');
   }
+}
+
+async function checkMermaidImagePolicy(sessionId) {
+  await switchMode('source', sessionId);
+  await setAppMarkdown('Mermaid image admission checks.', sessionId);
+  await poll(`document.querySelectorAll('#preview .mermaid-render-target, #richEditor .mermaid-render-target').length`,
+    value => value === 0, sessionId, 'clear preceding Mermaid renders');
+  await evaluate(`(() => {
+    const render = window.mermaid.render;
+    const src = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+    const setAttribute = Element.prototype.setAttribute;
+    const setAttributeNS = Element.prototype.setAttributeNS;
+    const innerHTML = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+    const probe = { calls: [], resources: [], blockedSources: [], stub: '' };
+    window.mermaid.render = function(id, source, ...args) {
+      probe.calls.push(source);
+      // Stop before vendor rendering if admission regresses. No fixture URL is fetched.
+      if (probe.blockedSources.includes(source.trim())) throw new Error('image source reached Mermaid renderer');
+      if (probe.stub) return Promise.resolve({ svg: probe.stub });
+      return render.call(this, id, source, ...args);
+    };
+    Object.defineProperty(HTMLImageElement.prototype, 'src', { ...src, set(value) {
+      probe.resources.push({ kind: 'Image.src', value: String(value) });
+      throw new Error('Mermaid attempted image preload');
+    } });
+    const resourceAttribute = (element, name, value) => {
+      if (!['img', 'image', 'feImage'].includes(element.localName)) return;
+      if (!['src', 'srcset', 'href', 'xlink:href'].includes(name.toLowerCase())) return;
+      probe.resources.push({ kind: element.localName + '.' + name, value: String(value) });
+      throw new Error('Mermaid attempted image resource attribute');
+    };
+    Element.prototype.setAttribute = function(name, value) {
+      resourceAttribute(this, name, value); return setAttribute.call(this, name, value);
+    };
+    Element.prototype.setAttributeNS = function(namespace, name, value) {
+      resourceAttribute(this, name, value); return setAttributeNS.call(this, namespace, name, value);
+    };
+    Object.defineProperty(Element.prototype, 'innerHTML', { ...innerHTML, set(value) {
+      if (/<(?:img|image|feImage)\\b/i.test(String(value))) {
+        probe.resources.push({ kind: 'innerHTML image', value: String(value).slice(0, 240) });
+        throw new Error('Mermaid attempted image markup insertion');
+      }
+      return innerHTML.set.call(this, value);
+    } });
+    probe.inspect = () => ({
+      roots: ['preview', 'richEditor'].map(id => {
+        const root = document.getElementById(id);
+        const targets = Array.from(root.querySelectorAll('.mermaid-render-target[data-mermaid-source]'));
+        return {
+          id, sources: targets.map(target => target.getAttribute('data-mermaid-source').trim()),
+          svgs: targets.filter(target => target.querySelector('svg.mermaid-svg')).length,
+          fallbacks: targets.filter(target => target.classList.contains('mermaid-fallback')).length,
+          fallbackSources: targets.filter(target => target.classList.contains('mermaid-fallback')).map(target => target.querySelector('pre code')?.textContent.trim()),
+          fallbackErrors: targets.filter(target => target.classList.contains('mermaid-fallback')).map(target => target.getAttribute('data-mermaid-error')),
+          resources: root.querySelectorAll('svg image, svg feImage, svg foreignObject, svg img').length,
+        };
+      }),
+      calls: probe.calls.slice(), resources: probe.resources.slice(),
+      markdown: document.getElementById('sourceEditor').value, protocol: location.protocol,
+    });
+    probe.restore = () => {
+      window.mermaid.render = render;
+      Object.defineProperty(HTMLImageElement.prototype, 'src', src);
+      Element.prototype.setAttribute = setAttribute;
+      Element.prototype.setAttributeNS = setAttributeNS;
+      Object.defineProperty(Element.prototype, 'innerHTML', innerHTML);
+    };
+    window.__pmeMermaidImageProbe = probe;
+  })()`, sessionId);
+  const fence = source => ['```mermaid', source, '```'].join('\n');
+  const blocked = [
+    'flowchart LR\nA@{img: "pme-mermaid-probe.png"}',
+    'flowchart LR\nA@{"img": "pme-mermaid-probe.png"}',
+    "flowchart LR\nA@{'img': 'pme-mermaid-probe.png'}",
+    'flowchart LR\nA@{"\\u0069mg": "pme-mermaid-probe.png"}',
+    'flowchart LR\nA@{"\\x69mg": "pme-mermaid-probe.png"}',
+    'sequenceDiagram\nparticipant A\nproperties A: {"icon":"pme-mermaid-probe.png"}\nA->>A: Icon',
+    'flowchart LR\nA[Style]\nstyle A fill:u\\72l\\28pme-mermaid-probe.png\\29',
+    'flowchart LR\nA[Style]\nclassDef resource fill:u\\72l\\28pme-mermaid-probe.png\\29\nclass A resource',
+    'block-beta\nA B\nstyle A fill:url(pme-mermaid-probe.png)',
+    '---\nconfig:\n  themeCSS: ".node { fill: url(pme-mermaid-probe.png) }"\n---\nflowchart LR\nA[Config]',
+  ];
+  try {
+    await evaluate(`window.__pmeMermaidImageProbe.blockedSources = ${JSON.stringify(blocked)}`, sessionId);
+    const markdown = blocked.map(fence).join('\n\n');
+    await setAppMarkdown(markdown, sessionId);
+    const rejected = await poll('window.__pmeMermaidImageProbe.inspect()',
+      value => value?.roots.every(root => root.sources.length === blocked.length && root.fallbacks === blocked.length),
+      sessionId, 'Mermaid image sources rejected before rendering');
+    assert.deepEqual(rejected.calls, [], 'Mermaid image and resource CSS sources must stop before vendor rendering');
+    assert.deepEqual(rejected.resources, [], 'rejected Mermaid sources must never reach an image resource setter');
+    assert.equal(rejected.markdown, markdown, 'image admission must preserve every Mermaid source byte');
+    for (const root of rejected.roots) {
+      assert.deepEqual(root.sources, blocked, `${root.id}: image rejection must retain all original diagram sources`);
+      assert.deepEqual(root.fallbackSources, blocked, `${root.id}: image rejection must display escaped source`);
+      assert.ok(root.fallbackErrors.every(Boolean), `${root.id}: each rejected diagram must explain the fallback`);
+      assert.ok(root.fallbackErrors.every(reason => !reason.includes('Parse error')),
+        `${root.id}: security fixtures must be valid Mermaid syntax, not parser-error cases`);
+      assert.equal(root.resources, 0, `${root.id}: rejected diagrams must not leave image DOM`);
+    }
+
+    const safe = [
+      'flowchart LR\nA[Ordinary flow] --> B[Preserved]',
+      'sequenceDiagram\nparticipant A\nparticipant B\nA->>B: Ordinary sequence',
+    ];
+    await evaluate(`window.__pmeMermaidImageProbe.calls.length = 0`, sessionId);
+    const safeMarkdown = safe.map(fence).join('\n\n');
+    await setAppMarkdown(safeMarkdown, sessionId);
+    const accepted = await poll('window.__pmeMermaidImageProbe.inspect()',
+      value => value?.roots.every(root => root.sources.length === safe.length && root.svgs === safe.length),
+      sessionId, 'ordinary flowchart and sequence after rejected images');
+    assert.ok(accepted.calls.length >= safe.length, 'ordinary diagrams must reach the bundled Mermaid renderer');
+    assert.deepEqual(accepted.resources, [], 'ordinary diagrams must not load images');
+    assert.equal(accepted.markdown, safeMarkdown, 'ordinary Mermaid rendering must preserve the source');
+    await checkMermaidConcurrentRenderers(sessionId);
+
+    for (const config of [
+      '',
+      '---\nconfig:\n  htmlLabels: true\n  flowchart:\n    htmlLabels: true\n  securityLevel: loose\n---\n',
+      '%%{init: {"htmlLabels":true,"flowchart":{"htmlLabels":true},"securityLevel":"loose"}}%%\n',
+    ]) {
+      const raw = config + 'flowchart LR\nA["<img src=\'pme-mermaid-probe.png\' />"]';
+      const rawMarkdown = fence(raw);
+      await setAppMarkdown(rawMarkdown, sessionId);
+      const protectedLabel = await poll('window.__pmeMermaidImageProbe.inspect()',
+        value => value?.roots.every(root => root.sources.length === 1 && root.sources[0] === raw && root.svgs + root.fallbacks === 1),
+        sessionId, 'raw HTML image label and document configuration');
+      assert.deepEqual(protectedLabel.resources, [], 'raw HTML labels must not allocate an image even through configuration overrides');
+      assert.ok(protectedLabel.roots.every(root => root.resources === 0), 'raw HTML labels must not leave image DOM');
+      assert.equal(protectedLabel.markdown, rawMarkdown, 'raw HTML image protection must preserve the diagram source');
+    }
+    await checkMermaidSvgResourceFiltering(sessionId);
+    await checkMermaidC4PersonIcon(sessionId);
+    console.log(`Mermaid image policy browser checks passed (${accepted.protocol})`);
+  } finally {
+    await evaluate(`(() => { window.__pmeMermaidImageProbe.restore(); delete window.__pmeMermaidImageProbe; })()`, sessionId);
+  }
+}
+
+async function checkMermaidConcurrentRenderers(sessionId) {
+  const result = await evaluate(`(async () => {
+    const policy = window.PMEMermaidPolicy;
+    const renderMermaidIn = window.PMERenderMermaidIn;
+    let active = 0;
+    let maximum = 0;
+    const roots = [];
+    window.PMEMermaidPolicy = { ...policy, async assertSafeSource(source, mermaid) {
+      active += 1; maximum = Math.max(maximum, active);
+      try {
+        await new Promise(resolve => setTimeout(resolve, 0));
+        return await policy.assertSafeSource(source, mermaid);
+      } finally { active -= 1; }
+    } };
+    try {
+      for (let index = 0; index < 2; index += 1) {
+        const renderer = window.PMEMarkdownRenderer.createMarkdownRenderer({
+          state: { allowedLinkDomains: [] }, els: {},
+          dependencies: { escapeHtml: value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;') },
+        });
+        window.PMERenderMermaidIn = renderMermaidIn;
+        const root = document.createElement('div'); document.body.appendChild(root); roots.push(root);
+        const sources = [window.__pmeMermaidImageProbe.blockedSources.at(-1), 'flowchart LR\\nA[Concurrent] --> B[Renderer ' + index + ']'];
+        for (const source of sources) {
+          const target = document.createElement('div'); target.className = 'mermaid-render-target';
+          target.setAttribute('data-mermaid-source', source); root.appendChild(target);
+        }
+        renderer.renderMermaidIn(root);
+      }
+      const deadline = Date.now() + 8000;
+      while (Date.now() < deadline && !roots.every(root => root.querySelectorAll('svg.mermaid-svg').length === 1
+        && root.querySelectorAll('.mermaid-fallback').length === 1)) await new Promise(resolve => setTimeout(resolve, 20));
+      return { maximum, roots: roots.map(root => ({ svgs: root.querySelectorAll('svg.mermaid-svg').length,
+        fallbacks: root.querySelectorAll('.mermaid-fallback').length, resources: root.querySelectorAll('image, img').length })) };
+    } finally {
+      roots.forEach(root => root.remove()); window.PMEMermaidPolicy = policy; window.PMERenderMermaidIn = renderMermaidIn;
+    }
+  })()`, sessionId);
+  assert.equal(result.maximum, 1, 'multiple renderer instances must share the complete Mermaid admission/render queue');
+  assert.deepEqual(result.roots, [{ svgs: 1, fallbacks: 1, resources: 0 }, { svgs: 1, fallbacks: 1, resources: 0 }],
+    'concurrent renderer instances must reject resource configuration and render ordinary diagrams');
+}
+
+async function checkMermaidC4PersonIcon(sessionId) {
+  const source = 'C4Context\nPerson(user, "User", "Ordinary person")\nSystem(app, "App", "Editor")\nRel(user, app, "Uses")';
+  const iconHash = 'ac3e9e718b559bd6bc71cdb7a8eed8580613dd61850d1e4035e33f127b44014b';
+  const vendor = await readFile(path.join(repoRoot, 'vendor/mermaid/mermaid.min.js'), 'utf8');
+  const icon = (vendor.match(/data:image\/png;base64,[A-Za-z0-9+/=]+/g) || [])
+    .find(value => createHash('sha256').update(value).digest('hex') === iconHash);
+  assert.ok(icon, 'the C4 control must use the known fixed PNG from the bundled vendor');
+  const errorsBefore = browserErrors.length;
+  // C4's bundled person artwork is generated by the vendor, then replaced with
+  // local vector shapes by the application. Check that transformation separately.
+  await evaluate(`window.__pmeMermaidImageProbe.restore()`, sessionId);
+  await setAppMarkdown(['```mermaid', source, '```'].join('\n'), sessionId);
+  const result = await poll(`(() => ['preview', 'richEditor'].map(id => {
+    const svg = document.querySelector('#' + id + ' svg.mermaid-svg');
+    return {
+      ready: Boolean(svg && svg.getAttribute('aria-roledescription') === 'c4'),
+      images: svg?.querySelectorAll('image, feImage, img, foreignObject').length,
+      person: svg?.querySelectorAll('.c4-safe-person-icon').length,
+    };
+  }))()`, value => value?.every(root => root.ready), sessionId, 'ordinary C4 person vector');
+  for (const root of result) {
+    assert.equal(root.images, 0, 'C4 output must contain no resource-loading image elements');
+    assert.equal(root.person, 1, 'C4 must preserve the person as a local vector icon');
+  }
+  const deadline = Date.now() + 2000;
+  while (browserErrors.length < errorsBefore + 2 && Date.now() < deadline) await delay(20);
+  const blocked = browserErrors.slice(errorsBefore);
+  assert.equal(blocked.length, 2, 'CSP must block the known C4 PNG once in each application rendering root');
+  for (const error of blocked) {
+    const url = /Loading the image '([^']+)'/.exec(error)?.[1];
+    assert.equal(url, icon, 'only the exact bundled C4 PNG is an expected resource block');
+    assert.match(error, /"img-src blob:"/, 'the C4 PNG must remain blocked by the image policy');
+  }
+  browserErrors.splice(errorsBefore, blocked.length);
+  console.log(`C4 fixed vendor PNG blocked by CSP and replaced by vector (${iconHash}; ${blocked.length} roots)`);
+}
+
+async function checkMermaidSvgResourceFiltering(sessionId) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:resource="http://www.w3.org/1999/xlink" viewBox="0 0 100 100">
+    <defs><g id="local-shape"><rect width="10" height="10"/></g></defs>
+    <image href="pme-mermaid-probe.png"/>
+    <filter><feImage xlink:href="pme-mermaid-probe.png"/></filter>
+    <use data-probe="external-use" href="pme-mermaid-probe.svg#shape"/>
+    <use data-probe="namespace-use" resource:href="pme-mermaid-probe.svg#shape"/>
+    <use data-probe="local-use" href="#local-shape"/>
+    <a data-probe="relative-link" href="guide.md"><text y="20">Guide</text></a>
+    <a data-probe="approved-link" href="https://example.com/url(test)"><text y="40">Approved</text></a>
+    <style>.resource {fill:u\\72l(pme-mermaid-probe.png)}</style>
+    <rect data-probe="style" style="fill:u\\72l(pme-mermaid-probe.png)"/>
+    <rect data-probe="fill" fill="url(pme-mermaid-probe.png)"/>
+  </svg>`;
+  await evaluate(`window.__pmeMermaidImageProbe.stub = ${JSON.stringify(svg)}`, sessionId);
+  await setAppMarkdown('```mermaid\nflowchart LR\nA[Postfilter] --> B[Control]\n```', sessionId);
+  const result = await poll(`(() => ({
+    ...window.__pmeMermaidImageProbe.inspect(),
+    output: ['preview', 'richEditor'].map(id => {
+      const svg = document.querySelector('#' + id + ' svg.mermaid-svg');
+      return {
+        ready: Boolean(svg?.querySelector('[data-probe="local-use"]')),
+        externalUse: svg?.querySelector('[data-probe="external-use"]')?.getAttribute('href') || '',
+        namespaceUse: svg?.querySelector('[data-probe="namespace-use"]')?.getAttributeNS('http://www.w3.org/1999/xlink', 'href') || '',
+        localUse: svg?.querySelector('[data-probe="local-use"]')?.getAttribute('href') || '',
+        relativeLink: svg?.querySelector('[data-probe="relative-link"]')?.getAttribute('href') || '',
+        approvedLink: svg?.querySelector('[data-probe="approved-link"]')?.getAttribute('href') || '',
+        styles: svg?.querySelectorAll('style, [style]').length,
+        fill: svg?.querySelector('[data-probe="fill"]')?.getAttribute('fill') || '',
+      };
+    }),
+  }))()`, value => value?.output.every(root => root.ready), sessionId, 'Mermaid SVG resource filtering');
+  assert.deepEqual(result.resources, [], 'SVG filtering must finish before image markup insertion');
+  assert.ok(result.roots.every(root => root.resources === 0), 'SVG image and feImage elements must be removed');
+  for (const root of result.output) {
+    assert.equal(root.externalUse, '', 'non-anchor SVG elements must not retain external hrefs');
+    assert.equal(root.namespaceUse, '', 'alternative xlink namespace prefixes must not retain external hrefs');
+    assert.equal(root.localUse, '#local-shape', 'local SVG fragment references must remain available');
+    assert.equal(root.relativeLink, 'guide.md', 'SVG anchor elements must retain ordinary relative links');
+    assert.equal(root.approvedLink, 'https://example.com/url(test)', 'approved navigation URLs must not be interpreted as CSS');
+    assert.equal(root.styles, 0, 'escaped CSS resource URLs must not survive in style elements or attributes');
+    assert.equal(root.fill, '', 'resource URLs must not survive in SVG presentation attributes');
+  }
+  await evaluate(`window.__pmeMermaidImageProbe.stub = ''`, sessionId);
 }
 
 async function checkReferenceDefinitionProtection(sessionId) {
@@ -1199,10 +1467,12 @@ async function checkMathRenderBudgets(sessionId) {
 
     const enhanced = await evaluate(`(() => {
       const probe = window.__pmeMathBudgetProbe;
+      const renderMermaidIn = window.PMERenderMermaidIn;
       const renderer = window.PMEMarkdownRenderer.createMarkdownRenderer({
         state: { allowedLinkDomains: [] }, els: {},
         dependencies: { wrapRenderedInlineAtoms() {}, annotateRenderedInlineAtomRanges() {} },
       });
+      window.PMERenderMermaidIn = renderMermaidIn;
       const root = document.createElement('div');
       root.textContent = '$x$'.repeat(600);
       renderer.enhanceRenderedHtml(root);
@@ -1228,7 +1498,9 @@ async function checkMathRenderBudgets(sessionId) {
 
     const reused = await evaluate(`(() => {
       const probe = window.__pmeMathBudgetProbe;
+      const renderMermaidIn = window.PMERenderMermaidIn;
       const renderer = window.PMEMarkdownRenderer.createMarkdownRenderer({ state: { allowedLinkDomains: [] }, els: {} });
+      window.PMERenderMermaidIn = renderMermaidIn;
       const mount = document.createElement('div');
       document.body.appendChild(mount);
       const editor = window.PMEProseMirror.createRichMarkdownEditor({
