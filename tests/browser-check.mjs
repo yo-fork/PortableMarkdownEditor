@@ -40,6 +40,7 @@ async function main() {
     await checkImageAssets(baseUrl, sessionId);
     await checkMermaidVisuals(baseUrl, sessionId);
     await checkAppStartup(baseUrl, sessionId);
+    await checkInlineTableRendering(sessionId);
     await checkLinkPolicy(sessionId);
     // Use a fresh tab so the dirty-document beforeunload guard remains enabled.
     await connection.send('Target.closeTarget', { targetId });
@@ -51,6 +52,7 @@ async function main() {
     connection.onEvent((message) => collectBrowserError(message, fileSessionId));
     await navigate(pathToFileURL(path.join(repoRoot, 'index.html')).href, fileSessionId);
     await poll(`Boolean(document.querySelector('.source-pane .cm-editor'))`, Boolean, fileSessionId, 'file app startup');
+    await checkInlineTableRendering(fileSessionId);
     await checkLinkPolicy(fileSessionId);
 
     assert.deepEqual(browserErrors, [], `browser console errors:\n${browserErrors.join('\n')}`);
@@ -307,6 +309,57 @@ async function checkAppStartup(baseUrl, sessionId) {
   await checkRichChecklistEditing(sessionId);
   await checkRichStrikethroughEditing(sessionId);
   await checkSplitScrollSync(sessionId);
+}
+
+async function checkInlineTableRendering(sessionId) {
+  assert.equal(
+    await evaluate(`typeof (window.markdownit || window.markdownIt)`, sessionId),
+    'function',
+    'table preview checks must run with the bundled Markdown renderer loaded',
+  );
+  await switchMode('source', sessionId);
+  for (const count of [1000, 4097]) {
+    const limited = count > 4096;
+    const markdown = [
+      '| 検証対象 | 後続セル |',
+      '| --- | --- |',
+      `| ${Array.from({ length: count }, (_, index) => `\`code-${index}\``).join(' ')} | **描画を継続** |`,
+    ].join('\n');
+    await setAppMarkdown(markdown, sessionId);
+    await switchMode('split', sessionId);
+    const result = await poll(
+      `(() => {
+        const cell = document.querySelector('#preview tbody tr:first-child td:first-child');
+        const codes = cell?.querySelectorAll('code') || [];
+        return {
+          count: codes.length,
+          first: codes[0]?.textContent || '',
+          last: codes[codes.length - 1]?.textContent || '',
+          notices: cell?.querySelectorAll('.inline-render-limit').length || 0,
+          notice: cell?.querySelector('.inline-render-limit')?.textContent || '',
+          following: document.querySelector('#preview tbody tr:first-child td:nth-child(2) strong')?.textContent || '',
+          markdown: document.getElementById('sourceEditor')?.value || '',
+        };
+      })()`,
+      (value) => value?.count === (limited ? 0 : count) && value.notices === (limited ? 1 : 0) && value.following === '描画を継続',
+      sessionId,
+      limited ? 'over-budget table-cell preview' : 'dense table-cell preview',
+    );
+    assert.equal(result.markdown, markdown, 'table preview rendering must preserve the complete Markdown source');
+    if (limited) {
+      assert.match(result.notice, /表示上限を超えたため/, 'an over-budget cell must explain why its preview was omitted');
+      assert.match(result.notice, /原文はソース編集で確認できます/, 'the omission notice must identify where the original source is available');
+    } else {
+      assert.equal(result.first, 'code-0', 'dense table rendering must retain the first code span');
+      assert.equal(result.last, 'code-999', 'dense table rendering must retain the last code span');
+    }
+    await switchMode('source', sessionId);
+    assert.equal(
+      await evaluate(`document.getElementById('sourceEditor')?.value || ''`, sessionId),
+      markdown,
+      'returning to source mode must retain every table-cell code span',
+    );
+  }
 }
 
 async function checkLinkPolicy(sessionId) {

@@ -53,6 +53,14 @@
     let mermaidRenderQueue = Promise.resolve();
     const mermaidLinkPolicies = new WeakMap();
     let vendorMarkdownRenderer = null;
+    const MAX_INLINE_SOURCE_CHARS = 200000;
+    const MAX_INLINE_TOKENS = 4096;
+    const MAX_INLINE_OUTPUT_CHARS = 1000000;
+    const INLINE_RENDER_LIMIT = Symbol('inline-render-limit');
+
+    function inlineRenderLimitNotice() {
+      return '<span class="inline-render-limit" role="note">表示上限を超えたため、この部分のプレビューを省略しました。原文はソース編集で確認できます。</span>';
+    }
 
     function renderMarkdownHtml(markdown) {
       const blocks = buildBlockModel(stripRichCaretTokens(markdown));
@@ -735,19 +743,64 @@
     }
 
     function renderInline(raw, references = null) {
+      const source = String(raw || '');
+      if (source.length > MAX_INLINE_SOURCE_CHARS) return inlineRenderLimitNotice();
+      try {
+        return renderBoundedInline(source, references);
+      } catch (error) {
+        if (error === INLINE_RENDER_LIMIT) return inlineRenderLimitNotice();
+        throw error;
+      }
+    }
+
+    function renderBoundedInline(raw, references) {
       if (references) {
         const md = getVendorMarkdownRenderer();
         if (md) {
           try {
-            return md.renderInline(String(raw || ''), { references: { ...references } });
-          } catch (_) {
+            return renderBoundedVendorInline(md, raw, references);
+          } catch (error) {
+            if (error === INLINE_RENDER_LIMIT) throw error;
           }
         }
       }
+      return renderInlineWithPlaceholders(raw);
+    }
+
+    function renderBoundedVendorInline(md, raw, references) {
+      const env = { references: { ...references } };
+      const tokens = md.parseInline(raw, env)[0]?.children || [];
+      const parts = [];
+      let tokenCount = 0;
+      let outputLength = 0;
+      for (let index = 0; index < tokens.length; index += 1) {
+        if (['code_inline', 'image', 'link_open', 'pme_math_inline'].includes(tokens[index].type)) {
+          if (++tokenCount > MAX_INLINE_TOKENS) throw INLINE_RENDER_LIMIT;
+        }
+        const rule = md.renderer.rules[tokens[index].type];
+        const html = rule ? rule(tokens, index, md.options, env, md.renderer) : md.renderer.renderToken(tokens, index, md.options);
+        outputLength += html.length;
+        if (outputLength > MAX_INLINE_OUTPUT_CHARS) throw INLINE_RENDER_LIMIT;
+        parts.push(html);
+      }
+      return parts.join('');
+    }
+
+    function renderInlineWithPlaceholders(raw) {
+      // Use a prefix absent from the source, including incomplete token spellings.
+      const reservedPrefixes = new Set(raw.match(/§§PME[0-9]+:/g) || []);
+      let namespace = 0;
+      while (reservedPrefixes.has(`§§PME${namespace}:`)) namespace += 1;
+      const tokenPrefix = `§§PME${namespace}:`;
       const placeholders = [];
+      let tokenCount = 0;
+      let fragmentLength = 0;
       const hold = (html) => {
-        const token = `§§PME${placeholders.length}§§`;
-        placeholders.push({ token, html });
+        if (++tokenCount > MAX_INLINE_TOKENS) throw INLINE_RENDER_LIMIT;
+        fragmentLength += html.length;
+        if (fragmentLength > MAX_INLINE_OUTPUT_CHARS) throw INLINE_RENDER_LIMIT;
+        const token = `${tokenPrefix}${placeholders.length}§§`;
+        placeholders.push(html);
         return token;
       };
 
@@ -785,10 +838,15 @@
       text = text.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
       text = text.replace(/(^|[^_])_([^_\n]+)_/g, '$1<em>$2</em>');
 
-      for (const { token, html } of placeholders) {
-        text = text.replaceAll(escapeHtml(token), html).replaceAll(token, html);
-      }
-      return text;
+      let outputLength = text.length;
+      if (outputLength > MAX_INLINE_OUTPUT_CHARS) throw INLINE_RENDER_LIMIT;
+      return text.replace(new RegExp(`${tokenPrefix}([0-9]+)§§`, 'g'), (token, index) => {
+        const html = placeholders[index];
+        if (typeof html !== 'string') return token;
+        outputLength += html.length - token.length;
+        if (outputLength > MAX_INLINE_OUTPUT_CHARS) throw INLINE_RENDER_LIMIT;
+        return html;
+      });
     }
 
     function hasBlockedMarkdownLink(raw) {

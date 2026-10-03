@@ -19,24 +19,92 @@ const extraGallery = readFileSync(new URL('../samples/mermaid-extra-gallery.md',
 const advancedGallery = readFileSync(new URL('../samples/mermaid-advanced-gallery.md', import.meta.url), 'utf8');
 const mathGallery = readFileSync(new URL('../samples/math-syntax-gallery.md', import.meta.url), 'utf8');
 const instrumented = app.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml };\n})();');
-const context = vm.createContext({
-  document: { baseURI: 'file:///C:/PortableMarkdownEditor/index.html', addEventListener() {} },
-  window: { markdownit: MarkdownIt, katex },
-  localStorage: {},
-  URL,
-  Blob,
-  navigator: {},
-  confirm() { return true; },
-  prompt() { return ''; },
-  alert() {},
-  console,
-});
-vm.runInContext(markdownRendererModule, context);
-vm.runInContext(richEditorModule, context);
-vm.runInContext(richInputControllerModule, context);
-vm.runInContext(fileManagerModule, context);
-vm.runInContext(shortcutManagerModule, context);
-const renderer = vm.runInContext(instrumented, context);
+function createRenderer(useVendor = true) {
+  const context = vm.createContext({
+    document: { baseURI: 'file:///C:/PortableMarkdownEditor/index.html', addEventListener() {} },
+    window: useVendor ? { markdownit: MarkdownIt, katex } : {},
+    localStorage: {},
+    URL,
+    Blob,
+    navigator: {},
+    confirm() { return true; },
+    prompt() { return ''; },
+    alert() {},
+    console,
+  });
+  vm.runInContext(markdownRendererModule, context);
+  vm.runInContext(richEditorModule, context);
+  vm.runInContext(richInputControllerModule, context);
+  vm.runInContext(fileManagerModule, context);
+  vm.runInContext(shortcutManagerModule, context);
+  const renderer = vm.runInContext(instrumented, context);
+  return { renderer, context };
+}
+const { renderer } = createRenderer();
+
+function inlineTable(cell, references = false) {
+  return `| content | control |\n| --- | --- |\n| ${cell} | still visible |${references ? '\n\n[guide]: #guide' : ''}`;
+}
+
+for (const useVendor of [false, true]) {
+  const { renderer: inlineRenderer, context } = createRenderer(useVendor);
+  const renderCell = (source, references = false) => inlineRenderer.renderMarkdownHtml(inlineTable(source, references));
+  // Count scanned characters, not elapsed time, so quadratic restoration fails deterministically.
+  vm.runInContext(`
+    globalThis.scanWork = 0;
+    for (const method of ['replace', 'replaceAll']) {
+      const original = String.prototype[method];
+      String.prototype[method] = function (...args) {
+        globalThis.scanWork += this.length;
+        return original.apply(this, args);
+      };
+    }
+  `, context);
+  const scanSamples = [];
+  for (const count of [1000, 2000, 4000]) {
+    context.scanWork = 0;
+    const html = renderCell('`a` '.repeat(count));
+    assert.equal((html.match(/<code>a<\/code>/g) || []).length, count, 'dense table code spans render completely');
+    scanSamples.push(context.scanWork);
+  }
+  assert.ok(scanSamples[1] < scanSamples[0] * 2.5 && scanSamples[2] < scanSamples[1] * 2.5,
+    `table string scans must scale linearly (vendor=${useVendor}): ${scanSamples}`);
+  console.log(`inline scan work (vendor=${useVendor}, 1000/2000/4000 spans): ${scanSamples.join('/')}`);
+
+  for (const references of [false, true]) {
+    for (const construct of ['`a` ', '[a](#a) ', '![a](missing.png) ']) {
+      assert.doesNotMatch(renderCell(construct.repeat(4096), references), /inline-render-limit/, 'the token limit remains inclusive');
+      const limited = renderCell(construct.repeat(4097), references);
+      assert.match(limited, /inline-render-limit/, 'too many inline constructs produce a visible notice');
+      assert.match(limited, /still visible/, 'other table cells remain visible');
+      assert.doesNotMatch(limited, /<code>|<img |<a /, 'over-budget inline content is omitted as a whole');
+    }
+    assert.doesNotMatch(renderCell('a'.repeat(200000), references), /inline-render-limit/, 'the source limit remains inclusive');
+    assert.match(renderCell('a'.repeat(200001), references), /inline-render-limit/, 'oversized plain source is bounded');
+    assert.match(renderCell(('`' + '"'.repeat(42) + '` ').repeat(4000), references), /inline-render-limit/,
+      'escaping amplification cannot exceed the generated HTML budget');
+    assert.match(renderCell('`' + '"'.repeat(180000) + '`', references), /inline-render-limit/,
+      'a single oversized generated fragment is bounded');
+  }
+  const literals = renderCell('§§PME0§§ §§PME00§§ `§§PME1§§` `b` `$&` `$1` `$\'`');
+  assert.match(literals, /§§PME0§§ §§PME00§§ <code>§§PME1§§<\/code> <code>b<\/code>/,
+    'literal marker syntax never impersonates tokens or recursively expands generated fragments');
+  assert.match(literals, /<code>\$&amp;<\/code> <code>\$1<\/code> <code>\$&#39;<\/code>/,
+    'replacement-string dollar patterns remain literal code');
+  for (const prefix of ['§§PME1', '§§PME999', '§§PME0:', '§§PME0:0§§ §§PME1:', '§§PME00:']) {
+    assert.ok(renderCell(prefix + '`a` `b`').includes(prefix + '<code>a</code> <code>b</code>'),
+      'partial or complete source markers must not consume adjacent generated tokens');
+  }
+  const mixed = renderCell('**bold** `code` [ok](#here) [blocked](javascript:alert) ![image](missing.png) $x$<br>next');
+  assert.match(mixed, /<strong>bold<\/strong> <code>code<\/code>/);
+  assert.match(mixed, /<a href="#here"/);
+  assert.match(mixed, /class="blocked-link"/);
+  assert.match(mixed, /class="blocked-image"/);
+  assert.match(mixed, /class="math-inline"/);
+  assert.match(mixed, /<br>next/);
+  if (useVendor) assert.match(renderCell('[guide][guide]', true), /<a href="#guide"[^>]*>guide<\/a>/,
+    'reference links retain vendor resolution in custom table cells');
+}
 
 function renderMermaid(source) {
   return renderer.renderMarkdownHtml([
