@@ -20211,19 +20211,13 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     return Boolean(target && target.closest && target.closest('.pme-node-source-editor'));
   }
 
-  function renderMathInto(dom, latex, displayMode) {
+  function renderMathInto(dom, latex, displayMode, html) {
     clearDom(dom);
     dom.classList.remove('is-error');
-    if (global.katex && typeof global.katex.render === 'function') {
-      try {
-        global.katex.render(latex || '', dom, {
-          displayMode: Boolean(displayMode),
-          throwOnError: false
-        });
-        return;
-      } catch (error) {
-        dom.classList.add('is-error');
-      }
+    dom.classList.toggle('math-source', html == null);
+    if (typeof html === 'string') {
+      dom.innerHTML = html;
+      return;
     }
     dom.textContent = displayMode ? '$$ ' + (latex || '') + ' $$' : '$' + (latex || '') + '$';
   }
@@ -20268,10 +20262,12 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     return normalized;
   }
 
-  function MathNodeView(node, editorView, getPos) {
+  function MathNodeView(node, editorView, getPos, getMathHtml, unregister) {
     this.node = node;
     this.editorView = editorView;
     this.getPos = getPos;
+    this.getMathHtml = getMathHtml;
+    this.unregister = unregister;
     this.displayMode = node.type.name === 'math_display';
     this.dom = document.createElement(this.displayMode ? 'div' : 'span');
     this.dom.className = (this.displayMode ? 'math-display' : 'math-inline') + ' pme-math-node';
@@ -20337,22 +20333,39 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
   }
 
   MathNodeView.prototype.render = function() {
+    this.renderSource();
+    this.refreshPreview();
+  };
+
+  MathNodeView.prototype.renderSource = function() {
     var latex = this.node.attrs.latex || '';
     this.dom.setAttribute('data-latex', latex);
     this.dom.setAttribute('aria-label', latex ? (this.displayMode ? '表示数式: ' : 'インライン数式: ') + latex : (this.displayMode ? '空の表示数式' : '空のインライン数式'));
     setInlineMathSourceEditorTokens(this.sourceEditor, latex);
-    renderMathInto(this.preview, latex, this.displayMode);
-    if (this.editPreviewValue) renderMathInto(this.editPreviewValue, latex, false);
-    this.dom.classList.toggle('is-error', this.preview.classList.contains('is-error'));
     setSourceEditorValue(this.sourceEditor, mathSourceEditorValue(latex, this.displayMode));
     autoSizeNodeSourceEditor(this.sourceEditor);
   };
 
+  MathNodeView.prototype.refreshPreview = function() {
+    var latex = this.node.attrs.latex || '';
+    var html = this.getMathHtml(this.node, this.getPos);
+    if (this.renderedMathHtml === html && this.renderedMathSource === latex && this.renderedMathDisplay === this.displayMode) return;
+    renderMathInto(this.preview, latex, this.displayMode, html);
+    if (this.editPreviewValue) renderMathInto(this.editPreviewValue, latex, false, html);
+    this.dom.classList.toggle('math-render-limit', html == null);
+    this.dom.classList.toggle('is-error', this.preview.classList.contains('is-error'));
+    this.renderedMathHtml = html;
+    this.renderedMathSource = latex;
+    this.renderedMathDisplay = this.displayMode;
+  };
+
   MathNodeView.prototype.update = function(node) {
     if (node.type !== this.node.type) return false;
+    var sourceChanged = node.attrs.latex !== this.node.attrs.latex;
     this.node = node;
     this.displayMode = node.type.name === 'math_display';
-    this.render();
+    if (sourceChanged) this.renderSource();
+    this.refreshPreview();
     return true;
   };
 
@@ -20360,7 +20373,10 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
   MathNodeView.prototype.selectNode = selectAtomSourceNode;
   MathNodeView.prototype.deselectNode = deselectAtomSourceNode;
   MathNodeView.prototype.ignoreMutation = function(mutation) { return ignoreNodeSourceEditorMutation(mutation) || true; };
-  MathNodeView.prototype.destroy = function() { destroyNodeSourceEditor(this.sourceEditor); };
+  MathNodeView.prototype.destroy = function() {
+    this.unregister();
+    destroyNodeSourceEditor(this.sourceEditor);
+  };
 
   function renderMermaidFallback(target, source, message) {
     clearDom(target);
@@ -20975,13 +20991,18 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     this.languageInput.removeEventListener('keydown', this.onLanguageKeyDown);
   };
 
-  function extendedNodeViews(options) {
+  function extendedNodeViews(options, mathViews, getMathHtml) {
+    function createMathNodeView(node, editorView, getPos) {
+      var nodeView = new MathNodeView(node, editorView, getPos, getMathHtml, function() { mathViews.delete(nodeView); });
+      mathViews.add(nodeView);
+      return nodeView;
+    }
     return {
       code_block: function(node, editorView, getPos) { return new CodeBlockNodeView(node, editorView, getPos); },
       list_item: function(node, editorView, getPos) { return new TaskListItemNodeView(node, editorView, getPos); },
       image: function(node, editorView, getPos) { return new ImageNodeView(node, editorView, getPos, options); },
-      math_inline: function(node, editorView, getPos) { return new MathNodeView(node, editorView, getPos); },
-      math_display: function(node, editorView, getPos) { return new MathNodeView(node, editorView, getPos); },
+      math_inline: createMathNodeView,
+      math_display: createMathNodeView,
       mermaid_block: function(node, editorView, getPos) { return new MermaidNodeView(node, editorView, getPos); },
       toc_block: function(node, editorView, getPos) { return new TocNodeView(node, editorView, getPos); }
     };
@@ -21421,6 +21442,56 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     var applyingExternal = false;
     var destroyed = false;
     var linkViews = new Set();
+    var mathViews = new Set();
+    var mathPlan = new Map();
+
+    function prepareMathPlan(doc) {
+      mathPlan = new Map();
+      if (typeof options.createMathRenderSession !== 'function') return;
+      var session;
+      try { session = options.createMathRenderSession(); }
+      catch (_) { return; }
+      if (!session || typeof session.render !== 'function') return;
+      var stopped = false;
+      doc.descendants(function(node, pos) {
+        if (stopped || session.exhausted) return false;
+        var displayMode = node.type === schema.nodes.math_display;
+        if (!displayMode && node.type !== schema.nodes.math_inline) return true;
+        var html = null;
+        try { html = session.render(node.attrs.latex || '', displayMode, displayMode ? 1 : 2); }
+        catch (_) { stopped = true; }
+        if (typeof html !== 'string') {
+          stopped = true;
+          return false;
+        }
+        mathPlan.set(pos, { node: node, html: html });
+        return false;
+      });
+    }
+
+    function getMathHtml(node, getPos) {
+      var pos;
+      try { pos = getPos(); }
+      catch (_) { return null; }
+      var planned = mathPlan.get(pos);
+      if (!planned || planned.node !== node || planned.node.type !== node.type || planned.node.attrs.latex !== node.attrs.latex) return null;
+      return planned.html;
+    }
+
+    function refreshMathViews() {
+      mathViews.forEach(function(nodeView) {
+        var currentNode;
+        try {
+          var pos = nodeView.getPos();
+          currentNode = Number.isInteger(pos) ? editorView.state.doc.nodeAt(pos) : null;
+        } catch (_) { currentNode = null; }
+        // Equal nodes may retain their old object identity when ProseMirror reuses a view.
+        if (currentNode && currentNode.type === nodeView.node.type && currentNode.attrs.latex === nodeView.node.attrs.latex) {
+          nodeView.node = currentNode;
+        }
+        nodeView.refreshPreview();
+      });
+    }
 
     function linkAttributes(mark) {
       var href = String(mark.attrs.href || '');
@@ -21458,12 +21529,17 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       }));
 
     mount.textContent = '';
+    var initialState = createState(options.markdown || '');
+    prepareMathPlan(initialState.doc);
     var editorView = new view.EditorView(mount, {
-      state: createState(options.markdown || ''),
+      state: initialState,
       dispatchTransaction: function(transaction) {
         if (destroyed) return;
         var next = editorView.state.apply(transaction);
+        var docChanged = next.doc !== editorView.state.doc;
+        if (docChanged) prepareMathPlan(next.doc);
         editorView.updateState(next);
+        if (docChanged) refreshMathViews();
         if (transaction.docChanged && !applyingExternal && typeof options.onChange === 'function') {
           options.onChange(serializeMarkdown(next.doc));
         }
@@ -21475,7 +21551,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       handlePaste: handleMarkdownPlainTextPaste,
       clipboardTextParser: markdownClipboardTextParser,
       clipboardSerializer: clipboardSerializer,
-      nodeViews: extendedNodeViews(options || {}),
+      nodeViews: extendedNodeViews(options, mathViews, getMathHtml),
       markViews: { link: createLinkView },
       attributes: {
         'aria-label': 'リッチMarkdown編集',
@@ -21511,7 +21587,11 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
         var nextState = createState(nextSource);
         if (editorView.state.doc.eq(nextState.doc)) return true;
         applyingExternal = true;
-        try { editorView.updateState(nextState); }
+        try {
+          prepareMathPlan(nextState.doc);
+          editorView.updateState(nextState);
+          refreshMathViews();
+        }
         finally { applyingExternal = false; }
         return true;
       },

@@ -42,6 +42,7 @@ async function main() {
     await checkAppStartup(baseUrl, sessionId);
     await checkInlineTableRendering(sessionId);
     await checkLinkPolicy(sessionId);
+    await checkMathRenderBudgets(sessionId);
     // Use a fresh tab so the dirty-document beforeunload guard remains enabled.
     await connection.send('Target.closeTarget', { targetId });
     ({ targetId } = await connection.send('Target.createTarget', { url: 'about:blank' }));
@@ -54,6 +55,7 @@ async function main() {
     await poll(`Boolean(document.querySelector('.source-pane .cm-editor'))`, Boolean, fileSessionId, 'file app startup');
     await checkInlineTableRendering(fileSessionId);
     await checkLinkPolicy(fileSessionId);
+    await checkMathRenderBudgets(fileSessionId);
 
     assert.deepEqual(browserErrors, [], `browser console errors:\n${browserErrors.join('\n')}`);
     console.log(`browser checks passed (${path.basename(browserPath)})`);
@@ -561,6 +563,160 @@ async function checkUneditedRichSourcePreservation(sessionId) {
     markdown,
     'an unedited rich-mode visit must preserve source spelling and blank lines exactly',
   );
+}
+
+async function checkMathRenderBudgets(sessionId) {
+  await switchMode('source', sessionId);
+  await evaluate(`(() => {
+    const originalString = window.katex.renderToString;
+    const originalRender = window.katex.render;
+    const probe = { stringCalls: 0, directCalls: 0 };
+    window.katex.renderToString = function(...args) {
+      probe.stringCalls += 1;
+      return originalString.apply(this, args);
+    };
+    window.katex.render = function(...args) {
+      probe.directCalls += 1;
+      return originalRender.apply(this, args);
+    };
+    probe.restore = () => {
+      window.katex.renderToString = originalString;
+      window.katex.render = originalRender;
+    };
+    probe.inspect = root => {
+      const atoms = Array.from(root.querySelectorAll('.pme-math-node'));
+      // Source popovers retain detached KaTeX DOM before they are opened.
+      const sourceEditors = atoms.map(atom => atom.pmViewDesc?.spec?.sourceEditor).filter(Boolean);
+      const katexRoots = Array.from(root.querySelectorAll('.katex'));
+      const hiddenRoots = sourceEditors.flatMap(editor => Array.from(editor.querySelectorAll('.katex')));
+      let nodes = 0;
+      for (const rendered of [...katexRoots, ...hiddenRoots]) {
+        nodes += 1;
+        const walker = document.createTreeWalker(rendered, NodeFilter.SHOW_ALL);
+        while (walker.nextNode()) nodes += 1;
+      }
+      return {
+        rendered: katexRoots.length, nodes, hiddenRendered: hiddenRoots.length,
+        atoms: atoms.length, sourceEditors: sourceEditors.length,
+        limited: root.querySelectorAll('.math-source, .pme-math-node.math-render-limit').length,
+        sources: atoms.map(atom => atom.getAttribute('data-latex')),
+      };
+    };
+    window.__pmeMathBudgetProbe = probe;
+  })()`, sessionId);
+  try {
+    const markdown = '# 数式の表示上限\n\n' + '$x$'.repeat(600);
+    await setAppMarkdown(markdown, sessionId);
+    const large = await poll(`(() => {
+      const probe = window.__pmeMathBudgetProbe;
+      return {
+        preview: probe.inspect(document.getElementById('preview')),
+        rich: probe.inspect(document.getElementById('richEditor')),
+        markdown: document.getElementById('sourceEditor').value,
+        calls: probe.stringCalls, directCalls: probe.directCalls,
+      };
+    })()`, value => value?.rich.atoms === 600 && value.preview.rendered > 0, sessionId, 'bounded adjacent math rendering');
+    assert.equal(large.markdown, markdown, 'math limits must retain the complete Markdown source');
+    assert.deepEqual(large.rich.sources, Array(600).fill('x'), 'limited rich atoms must retain each original formula');
+    assert.ok(large.calls <= 512, `two roots must bound aggregate KaTeX calls: ${large.calls}`);
+    assert.equal(large.directCalls, 0, 'rich math must use the bounded string renderer before DOM insertion');
+    for (const [name, root] of [['preview', large.preview], ['rich', large.rich]]) {
+      assert.ok(root.rendered > 0 && root.rendered <= 256, `${name} must render a bounded number of formulas`);
+      assert.ok(root.nodes <= 20000, `${name} KaTeX DOM including edit previews must stay bounded: ${root.nodes}`);
+      assert.ok(root.limited > 0, `${name} must leave remaining math as source text`);
+    }
+    assert.equal(large.rich.sourceEditors, 600, 'node counts must inspect every detached rich source popover');
+    assert.equal(large.rich.hiddenRendered, large.rich.rendered, 'both rich display copies must be included in the budget');
+
+    const smallMarkdown = '# 通常の数式\n\n$x+1$ と $y+1$';
+    await setAppMarkdown(smallMarkdown, sessionId);
+    const small = await poll(`(() => {
+      const probe = window.__pmeMathBudgetProbe;
+      return {
+        preview: probe.inspect(document.getElementById('preview')),
+        rich: probe.inspect(document.getElementById('richEditor')),
+        markdown: document.getElementById('sourceEditor').value,
+      };
+    })()`, value => value?.preview.rendered === 2 && value.rich.atoms === 2 && value.rich.rendered === 2, sessionId, 'math rendering after a limited document');
+    assert.equal(small.markdown, smallMarkdown, 'returning to ordinary math must preserve its source');
+    assert.equal(small.preview.limited + small.rich.limited, 0, 'new documents must receive fresh math budgets');
+
+    const enhanced = await evaluate(`(() => {
+      const probe = window.__pmeMathBudgetProbe;
+      const renderer = window.PMEMarkdownRenderer.createMarkdownRenderer({
+        state: { allowedLinkDomains: [] }, els: {},
+        dependencies: { wrapRenderedInlineAtoms() {}, annotateRenderedInlineAtomRanges() {} },
+      });
+      const root = document.createElement('div');
+      root.textContent = '$x$'.repeat(600);
+      renderer.enhanceRenderedHtml(root);
+      const first = probe.inspect(root);
+      const calls = probe.stringCalls;
+      const html = root.innerHTML;
+      renderer.enhanceRenderedHtml(root);
+      const repeat = probe.inspect(root);
+      const repeatCalls = probe.stringCalls - calls;
+      const unchangedHtml = html === root.innerHTML;
+      renderer.safeSetHtml(root, '$y+1$');
+      return {
+        first, repeat, repeatCalls, unchangedHtml, reset: probe.inspect(root),
+      };
+    })()`, sessionId);
+    assert.ok(enhanced.first.rendered > 0 && enhanced.first.rendered <= 256, 'raw DOM enhancement must bound the expression count');
+    assert.ok(enhanced.first.nodes <= 20000, 'raw DOM enhancement must bound generated nodes');
+    assert.equal(enhanced.repeat.rendered, enhanced.first.rendered, 'enhancing the same root twice must not render the unprocessed remainder');
+    assert.equal(enhanced.repeat.nodes, enhanced.first.nodes, 'enhancing the same root twice must retain the DOM bound');
+    assert.equal(enhanced.repeatCalls, 0, 'repeated enhancement must not invoke KaTeX again');
+    assert.equal(enhanced.unchangedHtml, true, 'repeated enhancement must leave the escaped remainder unchanged');
+    assert.equal(enhanced.reset.rendered, 1, 'replacing a root must reset its math budget');
+
+    const reused = await evaluate(`(() => {
+      const probe = window.__pmeMathBudgetProbe;
+      const renderer = window.PMEMarkdownRenderer.createMarkdownRenderer({ state: { allowedLinkDomains: [] }, els: {} });
+      const mount = document.createElement('div');
+      document.body.appendChild(mount);
+      const editor = window.PMEProseMirror.createRichMarkdownEditor({
+        mount, markdown: '保留 $z$ 終了', createMathRenderSession: renderer.createMathRenderSession,
+      });
+      try {
+        const original = mount.querySelector('.pme-math-node');
+        const initialRendered = Boolean(original?.querySelector('.katex'));
+        const { model, state } = window.PMEProseMirror.modules;
+        const additions = Array.from({ length: 600 }, () => editor.view.state.schema.nodes.math_inline.create({ latex: 'x' }));
+        const callsBefore = probe.stringCalls;
+        editor.view.dispatch(editor.view.state.tr.insert(1, model.Fragment.fromArray(additions)));
+        const limited = probe.inspect(mount);
+        const retained = mount.contains(original);
+        const oldNodeLimited = original.classList.contains('math-render-limit') && !original.querySelector('.katex');
+        const callsAfterInsert = probe.stringCalls;
+        const selection = state.TextSelection.create(editor.view.state.doc, 2);
+        editor.view.dispatch(editor.view.state.tr.setSelection(selection));
+        const selectionCalls = probe.stringCalls - callsAfterInsert;
+        editor.view.dispatch(editor.view.state.tr.delete(1, 601));
+        return {
+          initialRendered, retained, oldNodeLimited, limited, selectionCalls,
+          insertCalls: callsAfterInsert - callsBefore,
+          restored: mount.contains(original) && Boolean(original.querySelector('.katex')),
+          final: probe.inspect(mount), markdown: editor.markdown(), directCalls: probe.directCalls,
+          protocol: location.protocol,
+        };
+      } finally { editor.destroy(); mount.remove(); }
+    })()`, sessionId);
+    assert.equal(reused.initialRendered, true, 'the retained rich formula must initially render');
+    assert.equal(reused.retained, true, 'the budget update case must reuse the existing MathNodeView');
+    assert.equal(reused.oldNodeLimited, true, 'an unchanged reused formula moved beyond the limit must drop stale KaTeX DOM');
+    assert.ok(reused.limited.nodes <= 20000, 'rich transaction updates must also bound detached edit-preview DOM');
+    assert.ok(reused.limited.rendered <= 256 && reused.insertCalls <= 256, 'rich insertion must use a document-wide math budget');
+    assert.equal(reused.selectionCalls, 0, 'selection-only transactions must not render math again');
+    assert.equal(reused.restored, true, 'removing excess math must restore the reused formula');
+    assert.equal(reused.final.rendered, 1, 'the restored document should render its one formula');
+    assert.equal(reused.final.limited, 0, 'restored rich views must clear their limit marker');
+    assert.equal(reused.markdown, '保留 $z$ 終了', 'budget transitions must not alter the rich document');
+    assert.equal(reused.directCalls, 0, 'every tested rich update must avoid unbounded direct rendering');
+    console.log(`math budget browser checks passed (${reused.protocol})`);
+  } finally {
+    await evaluate(`(() => { window.__pmeMathBudgetProbe.restore(); delete window.__pmeMathBudgetProbe; })()`, sessionId);
+  }
 }
 
 async function checkRichInlineMathEditingAndHeading(sessionId) {

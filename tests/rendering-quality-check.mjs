@@ -18,11 +18,11 @@ const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
 const extraGallery = readFileSync(new URL('../samples/mermaid-extra-gallery.md', import.meta.url), 'utf8');
 const advancedGallery = readFileSync(new URL('../samples/mermaid-advanced-gallery.md', import.meta.url), 'utf8');
 const mathGallery = readFileSync(new URL('../samples/math-syntax-gallery.md', import.meta.url), 'utf8');
-const instrumented = app.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml };\n})();');
-function createRenderer(useVendor = true) {
+const instrumented = app.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml, renderInlineMarkdown, buildExportHtml, createMathRenderSession };\n})();');
+function createRenderer(useVendor = true, mathEngine = katex) {
   const context = vm.createContext({
     document: { baseURI: 'file:///C:/PortableMarkdownEditor/index.html', addEventListener() {} },
-    window: useVendor ? { markdownit: MarkdownIt, katex } : {},
+    window: useVendor ? { markdownit: MarkdownIt, katex: mathEngine } : {},
     localStorage: {},
     URL,
     Blob,
@@ -104,6 +104,76 @@ for (const useVendor of [false, true]) {
   assert.match(mixed, /<br>next/);
   if (useVendor) assert.match(renderCell('[guide][guide]', true), /<a href="#guide"[^>]*>guide<\/a>/,
     'reference links retain vendor resolution in custom table cells');
+}
+
+// Exercise every math budget independently, without spending time on expensive output.
+function mathBudgetHarness(html = '<span>x</span>') {
+  let calls = 0;
+  const { renderer } = createRenderer(true, { renderToString(_source, options) {
+    calls += 1;
+    assert.equal(options.trust, false);
+    assert.equal(options.maxExpand, 1000);
+    return html;
+  } });
+  return { renderer, get calls() { return calls; } };
+}
+
+{
+  const harness = mathBudgetHarness();
+  const tooLong = harness.renderer.createMathRenderSession();
+  assert.equal(tooLong.render('x'.repeat(4097), false), null);
+  assert.equal(harness.calls, 0, 'oversized expressions are rejected before KaTeX');
+  assert.equal(tooLong.render('x', false), null, 'exhaustion remains sticky');
+  const aggregate = harness.renderer.createMathRenderSession();
+  for (let i = 0; i < 8; i += 1) assert.equal(typeof aggregate.render('x'.repeat(4096), false), 'string');
+  assert.equal(aggregate.render('x', false), null, 'aggregate source exceeds 32768 characters');
+  const count = harness.renderer.createMathRenderSession();
+  for (let i = 0; i < 256; i += 1) assert.equal(typeof count.render('x', false), 'string');
+  assert.equal(count.render('x', false), null, 'cached expressions still consume the expression budget');
+  assert.equal(harness.calls, 2, 'bounded cache reuses the two expression sources across sessions');
+}
+
+for (const [name, html, expected] of [
+  ['output', '<span>' + 'x'.repeat(49000) + '</span>', 20],
+  ['nodes', '<i></i>'.repeat(200), 24],
+]) {
+  const harness = mathBudgetHarness(html);
+  for (const copies of [1, 2]) {
+    const session = harness.renderer.createMathRenderSession();
+    let accepted = 0;
+    while (session.render('x', false, copies) !== null) accepted += 1;
+    assert.equal(accepted, Math.floor(expected / copies), `${name} budget includes hidden copies`);
+    assert.equal(session.exhausted, true);
+  }
+  assert.equal(harness.calls, 1, 'cached output does not bypass per-session DOM/output accounting');
+}
+
+for (const html of ['x'.repeat(100001), '<i></i>'.repeat(1000)]) {
+  const harness = mathBudgetHarness(html);
+  const session = harness.renderer.createMathRenderSession();
+  assert.equal(session.render('x', false), null, 'oversized single output is rejected before HTML parsing');
+  assert.equal(session.render('y', false), null);
+  assert.equal(harness.calls, 1);
+}
+
+{
+  let calls = 0;
+  const { renderer: bounded } = createRenderer(true, { renderToString(...args) { calls += 1; return katex.renderToString(...args); } });
+  const dense = '$x$'.repeat(1000);
+  const html = bounded.renderMarkdownHtml(dense);
+  assert.equal((html.match(/class="katex"/g) || []).length, 256);
+  assert.equal((html.match(/class="math-source"/g) || []).length, 744);
+  assert.equal(calls, 1, 'adjacent identical formulas use one KaTeX computation');
+  const exported = bounded.buildExportHtml(dense);
+  assert.equal((exported.match(/class="katex"/g) || []).length, 256, 'HTML export obeys the same budget');
+  const blocks = bounded.renderMarkdownHtml(Array.from({ length: 300 }, () => '# $x$\n\n| a | b |\n| --- | --- |\n| $x$ | ok |\n\n$$x$$').join('\n\n'));
+  assert.ok((blocks.match(/class="katex"/g) || []).length <= 256, 'headings, tables and display blocks share a document budget');
+  assert.match(bounded.renderMarkdownHtml('$y$'), /class="katex"/, 'a new document receives a fresh budget');
+  assert.match(bounded.renderInlineMarkdown('$z$'), /class="katex"/, 'standalone fragment entry receives a fresh budget');
+  const escaped = bounded.renderMarkdownHtml('$' + '<img src=x onerror=alert(1)>'.repeat(200) + '$');
+  assert.match(escaped, /class="math-source"/);
+  assert.doesNotMatch(escaped, /<img\b/);
+  console.log(`math budget checks passed (1000 adjacent expressions: 256 rendered, ${calls} total cached computations across document/fragment checks)`);
 }
 
 function renderMermaid(source) {

@@ -180,6 +180,7 @@ flowchart TD
     buildHeadingTree,
     buildOutlineTreeElement,
     cleanupUrl,
+    createMathRenderSession,
     decodeLocalImagePath,
     enhanceRenderedHtml,
     getLines,
@@ -1155,6 +1156,7 @@ flowchart TD
       onChange: handleProseMirrorRichChange,
       resolveImageSrc: sanitizeImageUrl,
       resolveLinkHref: sanitizeLinkUrl,
+      createMathRenderSession,
       imageBlockReason,
     });
     return true;
@@ -1219,8 +1221,9 @@ flowchart TD
 
   function renderReadOnlyRichFallback() {
     const reason = state.proseMirrorRichFallbackReason || 'prosemirror-unavailable';
-    const html = renderMarkdownHtml(state.markdown);
-    safeSetHtml(els.rich, html || '<p><br></p>');
+    const mathSession = createMathRenderSession();
+    const html = renderMarkdownHtml(state.markdown, mathSession);
+    safeSetHtml(els.rich, html || '<p><br></p>', mathSession);
     configureReadOnlyRichFallbackSurface(reason);
     setStatus(readOnlyRichFallbackMessage(reason));
   }
@@ -3495,8 +3498,9 @@ flowchart TD
   }
 
   function renderPreview() {
-    const html = renderMarkdownHtml(state.markdown);
-    safeSetHtml(els.preview, html);
+    const mathSession = createMathRenderSession();
+    const html = renderMarkdownHtml(state.markdown, mathSession);
+    safeSetHtml(els.preview, html, mathSession);
     requestDesktopImageReferenceAliases();
   }
 

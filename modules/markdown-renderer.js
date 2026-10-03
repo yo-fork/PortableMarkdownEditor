@@ -57,16 +57,101 @@
     const MAX_INLINE_TOKENS = 4096;
     const MAX_INLINE_OUTPUT_CHARS = 1000000;
     const INLINE_RENDER_LIMIT = Symbol('inline-render-limit');
+    const MATH_LIMITS = Object.freeze({ expressionChars: 4096, expressions: 256, sourceChars: 32768, outputChars: 1000000, nodes: 20000 });
+    const mathCache = new Map();
+    let mathCacheChars = 0;
+    let activeMathSession = null;
+    const mathRootSessions = new WeakMap();
+
+    function mathOutputCost(source, html) {
+      // KaTeX escapes attribute/text delimiters. Count tags and intervening text
+      // conservatively before any HTML parser can allocate their DOM nodes.
+      let tags = 0;
+      for (let index = html.indexOf('<'); index >= 0; index = html.indexOf('<', index + 1)) tags += 1;
+      return { chars: html.length + source.length * 6 + 256, nodes: tags * 2 + 2 };
+    }
+
+    function createMathRenderSession() {
+      let expressions = 0;
+      let sourceChars = 0;
+      let outputChars = 0;
+      let nodes = 0;
+      let exhausted = false;
+      function acceptSource(source) {
+        if (exhausted) return false;
+        if (source.length > MATH_LIMITS.expressionChars || ++expressions > MATH_LIMITS.expressions
+          || (sourceChars += source.length) > MATH_LIMITS.sourceChars) {
+          exhausted = true;
+          return false;
+        }
+        return true;
+      }
+      function acceptOutput(cost, copies) {
+        if (outputChars + cost.chars * copies > MATH_LIMITS.outputChars || nodes + cost.nodes * copies > MATH_LIMITS.nodes) {
+          exhausted = true;
+          return false;
+        }
+        outputChars += cost.chars * copies;
+        nodes += cost.nodes * copies;
+        return true;
+      }
+      return {
+        get exhausted() { return exhausted; },
+        reserve(source, html) {
+          return acceptSource(source) && acceptOutput(mathOutputCost(source, html), 1);
+        },
+        render(source, displayMode, copies = 1) {
+          source = String(source || '');
+          if (!acceptSource(source)) return null;
+          if (!window.katex?.renderToString) return null;
+          const key = `${Boolean(displayMode)}:${source}`;
+          let result = mathCache.get(key);
+          if (!result) {
+            try {
+              const html = window.katex.renderToString(source, {
+                displayMode: Boolean(displayMode), throwOnError: false, strict: 'ignore', trust: false, maxExpand: 1000,
+              });
+              // Bound a single result before scanning it or handing it to a DOM sink.
+              if (html.length > 100000) { exhausted = true; return null; }
+              result = { html, ...mathOutputCost(source, html) };
+              if (result.nodes > 4000) { exhausted = true; return null; }
+              while (mathCache.size && (mathCache.size >= 512 || mathCacheChars + key.length + html.length > 2000000)) {
+                const oldest = mathCache.keys().next().value;
+                mathCacheChars -= oldest.length + mathCache.get(oldest).html.length;
+                mathCache.delete(oldest);
+              }
+              mathCache.set(key, result);
+              mathCacheChars += key.length + html.length;
+            } catch (_) {
+              return null;
+            }
+          }
+          return acceptOutput(result, copies) ? result.html : null;
+        },
+      };
+    }
+
+    function withMathSession(session, render) {
+      const previous = activeMathSession;
+      activeMathSession = session || previous || createMathRenderSession();
+      try { return render(); } finally { activeMathSession = previous; }
+    }
+
+    function mathSourceFallback(source) {
+      return `<span class="math-source" title="数式の表示上限または描画エラーのため原文を表示しています">${escapeHtml(source)}</span>`;
+    }
 
     function inlineRenderLimitNotice() {
       return '<span class="inline-render-limit" role="note">表示上限を超えたため、この部分のプレビューを省略しました。原文はソース編集で確認できます。</span>';
     }
 
-    function renderMarkdownHtml(markdown) {
-      const blocks = buildBlockModel(stripRichCaretTokens(markdown));
-      const headings = buildHeadingIndex(blocks);
-      const references = collectReferenceDefinitions(markdown);
-      return blocks.map((block) => annotateRenderedBlockHtml(renderBlockHtml(block, headings, references), block)).join('\n');
+    function renderMarkdownHtml(markdown, mathSession = null) {
+      return withMathSession(mathSession, () => {
+        const blocks = buildBlockModel(stripRichCaretTokens(markdown));
+        const headings = buildHeadingIndex(blocks);
+        const references = collectReferenceDefinitions(markdown);
+        return blocks.map((block) => annotateRenderedBlockHtml(renderBlockHtml(block, headings, references), block)).join('\n');
+      });
     }
 
     function buildBlockModel(markdown) {
@@ -262,16 +347,18 @@
         if (!silent) {
           const token = inlineState.push('pme_math_inline', '', 0);
           token.content = match.value;
+          token.meta = { source: inlineState.src.slice(inlineState.pos, match.end) };
         }
         inlineState.pos = match.end;
         return true;
       });
-      md.renderer.rules.pme_math_inline = (tokens, index) => renderInlineMathHtml(tokens[index].content || '');
+      md.renderer.rules.pme_math_inline = (tokens, index) => renderInlineMathHtml(tokens[index].content || '', tokens[index].meta?.source);
     }
 
-    function renderInlineMathHtml(source) {
+    function renderInlineMathHtml(source, original = `$${source}$`) {
       const value = String(source || '');
-      return `<span class="math-inline" data-math-source="${escapeAttribute(value)}" data-math-display="false">${renderKaTeX(value, false)}</span>`;
+      const html = renderKaTeX(value, false);
+      return `<span class="math-inline" data-math-source="${escapeAttribute(value)}" data-math-display="false">${html === null ? mathSourceFallback(original) : html}</span>`;
     }
 
     function inlineMathTokenAt(text, start) {
@@ -636,7 +723,7 @@
         ` data-math-source="${escapeAttribute(source)}"`,
         ' data-math-display="true"',
         '>',
-        body,
+        body === null ? mathSourceFallback(raw) : body,
         '</div>',
       ].join('');
     }
@@ -828,7 +915,7 @@
       });
 
       text = splitMathSegments(text)
-        .map((part) => part.type === 'math' ? hold(renderInlineMathHtml(part.value)) : part.value)
+        .map((part) => part.type === 'math' ? hold(renderInlineMathHtml(part.value, part.source)) : part.value)
         .join('');
 
       text = escapeHtml(text);
@@ -1576,13 +1663,14 @@
   </html>`;
     }
 
-    function safeSetHtml(element, html) {
+    function safeSetHtml(element, html, mathSession = null) {
       element.innerHTML = html;
-      enhanceRenderedHtml(element);
+      mathRootSessions.delete(element);
+      enhanceRenderedHtml(element, mathSession);
     }
 
-    function enhanceRenderedHtml(root) {
-      renderKaTeXIn(root);
+    function enhanceRenderedHtml(root, mathSession = null) {
+      renderKaTeXIn(root, mathSession);
       wrapRenderedInlineAtoms(root);
       annotateRenderedInlineAtomRanges(root);
       renderMermaidIn(root);
@@ -1947,36 +2035,64 @@
       return Boolean(sanitizeLinkUrl(value));
     }
 
-    function renderKaTeXIn(root) {
+    function renderKaTeXIn(root, mathSession = null) {
       if (!window.katex?.renderToString || !document.createTreeWalker) return;
+      let session = mathRootSessions.get(root);
+      if (!session) {
+        session = mathSession || createMathRenderSession();
+        mathRootSessions.set(root, session);
+        if (!mathSession) {
+          for (const element of root.querySelectorAll('[data-math-source]')) {
+            if (!element.querySelector('.katex')) continue;
+            if (!session.reserve(element.getAttribute('data-math-source') || '', element.innerHTML)) {
+              element.textContent = element.getAttribute('data-math-display') === 'true'
+                ? `$$${element.getAttribute('data-math-source') || ''}$$` : `$${element.getAttribute('data-math-source') || ''}$`;
+              element.classList.add('math-source');
+            }
+          }
+        }
+      }
+      if (session.exhausted) return;
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
           if (!node.nodeValue || !/[\\$]/.test(node.nodeValue)) return NodeFilter.FILTER_REJECT;
-          if (node.parentElement?.closest('pre, code, textarea, .katex')) return NodeFilter.FILTER_REJECT;
+          if (node.parentElement?.closest('pre, code, textarea, .katex, .math-source, [data-math-source]')) return NodeFilter.FILTER_REJECT;
           return NodeFilter.FILTER_ACCEPT;
         },
       });
-      const nodes = [];
-      while (walker.nextNode()) nodes.push(walker.currentNode);
-      nodes.forEach(replaceMathTextNode);
+      let node = walker.nextNode();
+      while (node && !session.exhausted) {
+        const next = walker.nextNode();
+        replaceMathTextNode(node, session);
+        node = next;
+      }
     }
 
-    function replaceMathTextNode(node) {
-      const parts = splitMathSegments(node.nodeValue || '');
-      if (parts.length === 1 && parts[0].type === 'text') return;
+    function replaceMathTextNode(node, session) {
+      const source = node.nodeValue || '';
       const fragment = document.createDocumentFragment();
-      for (const part of parts) {
-        if (part.type === 'text') {
-          fragment.appendChild(document.createTextNode(part.value));
+      let cursor = 0;
+      let last = 0;
+      while (cursor < source.length && !session.exhausted) {
+        const match = inlineMathTokenAt(source, cursor);
+        if (!match) {
+          cursor += 1;
           continue;
         }
-        const span = document.createElement(part.display ? 'div' : 'span');
-        span.className = part.display ? 'math-display' : 'math-inline';
-        span.setAttribute('data-math-source', part.value);
-        span.setAttribute('data-math-display', String(part.display));
-        span.innerHTML = renderKaTeX(part.value, part.display);
+        const html = session.render(match.value, false);
+        if (html === null) break;
+        if (cursor > last) fragment.appendChild(document.createTextNode(source.slice(last, cursor)));
+        const span = document.createElement('span');
+        span.className = 'math-inline';
+        span.setAttribute('data-math-source', match.value);
+        span.setAttribute('data-math-display', 'false');
+        span.innerHTML = html;
         fragment.appendChild(span);
+        cursor = match.end;
+        last = cursor;
       }
+      if (!last) return;
+      if (last < source.length) fragment.appendChild(document.createTextNode(source.slice(last)));
       node.replaceWith(fragment);
     }
 
@@ -1992,7 +2108,7 @@
           continue;
         }
         if (cursor > last) parts.push({ type: 'text', value: source.slice(last, cursor) });
-        parts.push({ type: 'math', value: match.value, display: false });
+        parts.push({ type: 'math', value: match.value, source: source.slice(cursor, match.end), display: false });
         cursor = match.end;
         last = cursor;
       }
@@ -2002,16 +2118,7 @@
     }
 
     function renderKaTeX(source, displayMode) {
-      try {
-        return window.katex.renderToString(source, {
-          displayMode,
-          throwOnError: false,
-          strict: 'ignore',
-          trust: false,
-        });
-      } catch (_) {
-        return escapeHtml(source);
-      }
+      return (activeMathSession || createMathRenderSession()).render(source, displayMode);
     }
 
     function sanitizeLinkUrl(raw) {
@@ -2189,6 +2296,7 @@
       buildHeadingTree,
       buildOutlineTreeElement,
       cleanupUrl,
+      createMathRenderSession,
       decodeLocalImagePath,
       enhanceRenderedHtml,
       getLines,
@@ -2201,8 +2309,8 @@
       isRelativeImageReference,
       onPreviewImageError,
       parseMarkdownTarget,
-      renderBlockHtml,
-      renderInlineMarkdown,
+      renderBlockHtml: (...args) => withMathSession(null, () => renderBlockHtml(...args)),
+      renderInlineMarkdown: (...args) => withMathSession(null, () => renderInlineMarkdown(...args)),
       renderMarkdownHtml,
       renderMermaidIn,
       safeSetHtml,
