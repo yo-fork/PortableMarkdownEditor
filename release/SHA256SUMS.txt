@@ -1,1 +1,1 @@
-13c5da03dba87b0e4c0c6e0aeba6b95647bede9127f58f0c13d38b863cbf6629  PortableMarkdownEditor-win-x64.zip
+237f7258233ac0f24b36bfc3b48462d8167fd9937b2ba89bf7a4cb96cd90bdb8  PortableMarkdownEditor-win-x64.zip
