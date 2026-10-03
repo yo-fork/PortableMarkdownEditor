@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { createRequire } from 'node:module';
+import { blockedLinkUrls, blockedMarkdownLinks, relativeLinkUrls } from './link-policy-cases.mjs';
 
 const index = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const appEntry = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
@@ -444,7 +446,7 @@ TestURL.revokeObjectURL = () => {};
 let confirmResult = true;
 const instrumented = appEntry.replace(/\}\)\(\);\s*$/, 'return { buildExportHtml, normalizeDocumentFont, renderMarkdownHtml, sanitizeImageUrl, sanitizeLinkUrl, saveImageFileToAssets, ensureImageAssetWriteAccess, buildFolderAssetUrls, confirmDocumentReplacement, state };\n})();');
 const context = vm.createContext({
-  document: { addEventListener() {} },
+  document: { baseURI: 'file:///C:/PortableMarkdownEditor/index.html', addEventListener() {} },
   window: { isSecureContext: true },
   localStorage: {},
   URL: TestURL,
@@ -694,4 +696,52 @@ const toc = renderer.renderMarkdownHtml([
 assert.match(toc, /<details open>/, 'top-level TOC entries should be expanded');
 assert.match(toc, /<details>/, 'nested TOC entries should be collapsible');
 
-console.log('security smoke checks passed');
+for (const baseURI of [
+  'http://localhost:8773/editor/index.html',
+  'https://portable-markdown-editor.local/index.html',
+  'file:///C:/PortableMarkdownEditor/index.html',
+]) {
+  context.document.baseURI = baseURI;
+  renderer.state.allowedLinkDomains = ['example.com'];
+  for (const href of blockedLinkUrls) {
+    assert.equal(renderer.sanitizeLinkUrl(href), '', `${baseURI} must block ${JSON.stringify(href)}`);
+  }
+  for (const href of relativeLinkUrls) {
+    assert.equal(renderer.sanitizeLinkUrl(href), href, 'safe relative links must remain portable');
+    assert.equal(new URL(href, baseURI).host, new URL(baseURI).host);
+  }
+  assert.equal(renderer.sanitizeLinkUrl('HTTPS://EXAMPLE.COM/a/../guide'), 'https://example.com/guide');
+  assert.equal(renderer.sanitizeLinkUrl('http://docs.example.com/guide'), 'http://docs.example.com/guide');
+  renderer.state.allowedLinkDomains = [];
+  assert.equal(renderer.sanitizeLinkUrl('https://example.com/guide'), '', 'revoked domains must be blocked');
+}
+
+for (const baseURI of ['file://attacker.example/share/index.html', 'data:text/html,hello', 'about:blank']) {
+  context.document.baseURI = baseURI;
+  assert.equal(renderer.sanitizeLinkUrl('guide.md'), '', 'relative links must not acquire an unsafe base');
+}
+context.document.baseURI = 'file:///C:/PortableMarkdownEditor/index.html';
+renderer.state.allowedLinkDomains = ['example.com'];
+const require = createRequire(import.meta.url);
+for (const markdownit of [undefined, require('../vendor/markdown-it/markdown-it.min.js')]) {
+  context.window.markdownit = markdownit;
+  const markdownCases = [...blockedMarkdownLinks];
+  if (markdownit) markdownCases.push(...blockedMarkdownLinks.map((source) => `# ${source}`), '[reference][bad]\n\n[bad]: /%5cattacker.example/share');
+  for (const markdown of markdownCases) {
+    for (const html of [renderer.renderMarkdownHtml(markdown), renderer.buildExportHtml(markdown, 'links.md')]) {
+      if (markdownit && markdown.startsWith('# ')) assert.doesNotMatch(html, /<a\b[^>]*\bhref=/, `render/export must block decoded ${markdown}`);
+      for (const match of html.matchAll(/<a\b[^>]*\bhref="([^"]*)"/g)) {
+        const href = match[1].replaceAll('&amp;', '&');
+        const resolved = new URL(href, context.document.baseURI);
+        assert.equal(resolved.host, '', `fallback render/export must not acquire an authority: ${markdown}`);
+        assert.equal(resolved.protocol, 'file:');
+      }
+    }
+  }
+  const allowed = renderer.buildExportHtml('[local](guide.md) [anchor](#section) [approved](https://example.com/docs)', 'links.md');
+  for (const href of ['guide.md', '#section', 'https://example.com/docs']) {
+    assert.ok(allowed.includes(`href="${href}"`), `render/export must preserve ${href}`);
+  }
+}
+
+console.log('security smoke checks passed (link policy: HTTP, desktop HTTPS, file, fallback, markdown-it, export)');

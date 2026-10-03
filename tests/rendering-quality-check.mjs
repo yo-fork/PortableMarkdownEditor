@@ -20,7 +20,7 @@ const advancedGallery = readFileSync(new URL('../samples/mermaid-advanced-galler
 const mathGallery = readFileSync(new URL('../samples/math-syntax-gallery.md', import.meta.url), 'utf8');
 const instrumented = app.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml };\n})();');
 const context = vm.createContext({
-  document: { addEventListener() {} },
+  document: { baseURI: 'file:///C:/PortableMarkdownEditor/index.html', addEventListener() {} },
   window: { markdownit: MarkdownIt, katex },
   localStorage: {},
   URL,

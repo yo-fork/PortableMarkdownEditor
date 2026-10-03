@@ -21420,6 +21420,43 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     var mount = options.mount;
     var applyingExternal = false;
     var destroyed = false;
+    var linkViews = new Set();
+
+    function linkAttributes(mark) {
+      var href = String(mark.attrs.href || '');
+      var safe = typeof options.resolveLinkHref === 'function' ? options.resolveLinkHref(href) : '';
+      var attrs = {
+        'data-markdown-href': href,
+        rel: 'noopener noreferrer',
+        target: '_blank',
+        class: safe ? '' : 'blocked-link'
+      };
+      if (mark.attrs.title) attrs.title = mark.attrs.title;
+      if (safe) attrs.href = safe;
+      return attrs;
+    }
+
+    function createLinkView(mark) {
+      var dom = document.createElement('a');
+      function refresh() {
+        var attrs = linkAttributes(mark);
+        dom.removeAttribute('href');
+        Object.keys(attrs).forEach(function(name) { dom.setAttribute(name, attrs[name]); });
+      }
+      refresh();
+      linkViews.add(refresh);
+      return { dom: dom, contentDOM: dom, destroy: function() { linkViews.delete(refresh); } };
+    }
+
+    var baseClipboardSerializer = model.DOMSerializer.fromSchema(schema);
+    var clipboardSerializer = new model.DOMSerializer(baseClipboardSerializer.nodes,
+      extendObject(baseClipboardSerializer.marks, {
+        link: function(mark) {
+          var attrs = linkAttributes(mark);
+          return attrs.href ? ['a', attrs, 0] : ['span', { class: 'blocked-link' }, 0];
+        }
+      }));
+
     mount.textContent = '';
     var editorView = new view.EditorView(mount, {
       state: createState(options.markdown || ''),
@@ -21437,7 +21474,9 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       handleTextInput: preserveInlineCodeSelectionTextInput,
       handlePaste: handleMarkdownPlainTextPaste,
       clipboardTextParser: markdownClipboardTextParser,
+      clipboardSerializer: clipboardSerializer,
       nodeViews: extendedNodeViews(options || {}),
+      markViews: { link: createLinkView },
       attributes: {
         'aria-label': 'リッチMarkdown編集',
         class: 'pme-prosemirror-editor'
@@ -21455,6 +21494,11 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       unsupportedReason: unsupportedMarkdownReason,
       markdown: function() { return serializeMarkdown(editorView.state.doc); },
       selectedText: function() { return textSelectionMarkdown(editorView); },
+      refreshLinks: function() {
+        if (destroyed) return false;
+        linkViews.forEach(function(refresh) { refresh(); });
+        return true;
+      },
       refreshImages: function() {
         if (destroyed) return false;
         refreshImageNodeViews(editorView);

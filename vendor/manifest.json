@@ -1436,8 +1436,8 @@
     },
     {
       "path": "vendor/prosemirror/editor-integration.js",
-      "bytes": 167695,
-      "sha256": "83692de0f0adb87077c6475ace8030c48935cd6cca3d8680cefc618b61c60f1d"
+      "bytes": 169289,
+      "sha256": "7dd775b17dcd4d795fe83c7dc91af18e8fe17d3d2e7cdb7fa5925e80b99a807a"
     },
     {
       "path": "vendor/prosemirror/licenses/orderedmap/LICENSE",
@@ -1621,8 +1621,8 @@
     },
     {
       "path": "vendor/prosemirror/prosemirror-editor.js",
-      "bytes": 828318,
-      "sha256": "5ff0a063aa13ff7064829864fa03ef998de9b8fca6b5dca428c22dd78d6d5cb5"
+      "bytes": 829912,
+      "sha256": "10769d70236386a7ebc3d4c4f3ecf02c62aa761cc92d30ebb44ac907a2ca15a4"
     }
   ]
 }

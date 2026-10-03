@@ -51,6 +51,7 @@
 
     let mermaidRenderSerial = 0;
     let mermaidRenderQueue = Promise.resolve();
+    const mermaidLinkPolicies = new WeakMap();
     let vendorMarkdownRenderer = null;
 
     function renderMarkdownHtml(markdown) {
@@ -1533,6 +1534,13 @@
       if (!window.mermaid?.render) return;
       cleanupMermaidRenderScratchNodes();
       const targets = Array.from(root.querySelectorAll('.mermaid-render-target[data-mermaid-source]'));
+      const linkPolicy = JSON.stringify(state.allowedLinkDomains);
+      for (const target of targets) {
+        if (target.querySelector('svg.mermaid-svg') && mermaidLinkPolicies.get(target) !== linkPolicy) {
+          // Remove stale navigable links synchronously before the queued render.
+          target.textContent = '';
+        }
+      }
       mermaidRenderQueue = mermaidRenderQueue
         .then(() => renderMermaidTargets(targets))
         .catch(() => {});
@@ -1556,6 +1564,7 @@
             target.classList.remove('mermaid-fallback');
             target.removeAttribute('data-mermaid-error');
             target.innerHTML = safeSvg;
+            mermaidLinkPolicies.set(target, JSON.stringify(state.allowedLinkDomains));
             applyMermaidZoom(target);
           } else {
             target.classList.add('mermaid-fallback');
@@ -1949,21 +1958,23 @@
 
     function sanitizeLinkUrl(raw) {
       const value = cleanupUrl(raw);
-      if (!value) return '';
-      if (value.startsWith('#')) return value;
-      if (value.startsWith('//')) return '';
-      const external = sanitizeAllowedExternalLink(value);
-      if (external) return external;
-      if (/^[./A-Za-z0-9_-]/.test(value) && !value.includes(':')) return value;
-      return '';
-    }
-
-    function sanitizeAllowedExternalLink(value) {
-      if (!/^https?:\/\//i.test(value) || !state.allowedLinkDomains.length) return '';
+      if (!value || value.includes('\\') || value.startsWith('//')) return '';
       try {
-        const url = new URL(value);
-        if (!['http:', 'https:'].includes(url.protocol)) return '';
+        const base = new URL(document.baseURI);
+        const url = new URL(value, base);
         if (url.username || url.password) return '';
+
+        // Relative links must retain the base authority after browser URL parsing.
+        const relative = value.startsWith('#')
+          || (/^[./A-Za-z0-9_-]/.test(value) && !value.includes(':'));
+        if (relative) {
+          if (!['http:', 'https:', 'file:'].includes(url.protocol)) return '';
+          if (url.protocol !== base.protocol || url.host !== base.host) return '';
+          if (url.protocol === 'file:' && url.host) return '';
+          return value;
+        }
+
+        if (!/^https?:\/\//i.test(value) || !['http:', 'https:'].includes(url.protocol)) return '';
         const host = url.hostname.toLowerCase();
         if (!state.allowedLinkDomains.some((domain) => host === domain || host.endsWith(`.${domain}`))) return '';
         return url.href;

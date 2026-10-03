@@ -195,6 +195,7 @@ flowchart TD
     renderBlockHtml,
     renderInlineMarkdown,
     renderMarkdownHtml,
+    renderMermaidIn,
     safeSetHtml,
     sanitizeImageUrl,
     sanitizeLinkUrl,
@@ -1153,6 +1154,7 @@ flowchart TD
       markdown: state.markdown,
       onChange: handleProseMirrorRichChange,
       resolveImageSrc: sanitizeImageUrl,
+      resolveLinkHref: sanitizeLinkUrl,
       imageBlockReason,
     });
     return true;
@@ -1183,6 +1185,8 @@ flowchart TD
       if (typeof state.proseMirrorRich.refreshImages === 'function') {
         state.proseMirrorRich.refreshImages();
       }
+      state.proseMirrorRich.refreshLinks?.();
+      renderMermaidIn(els.rich);
       const requiresCanonicalNormalization = window.PMEProseMirror?.requiresCanonicalMarkdownNormalization;
       state.proseMirrorRichSourceChanged = typeof requiresCanonicalNormalization === 'function'
         && requiresCanonicalNormalization(state.markdown);
@@ -1530,6 +1534,14 @@ flowchart TD
       return;
     }
     if (isProseMirrorRichTarget(target)) {
+      const link = target.closest('a');
+      if (link) {
+        event.preventDefault();
+        if (event.ctrlKey || event.metaKey) {
+          handleRichLinkClick(event, link);
+          return;
+        }
+      }
       if (!isProseMirrorControlTarget(target)) focusProseMirrorTarget(target);
       return;
     }

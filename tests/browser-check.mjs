@@ -5,7 +5,8 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { blockedMarkdownLinks, blockedLinkUrls } from './link-policy-cases.mjs';
 
 const testsDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(testsDirectory, '..');
@@ -39,6 +40,18 @@ async function main() {
     await checkImageAssets(baseUrl, sessionId);
     await checkMermaidVisuals(baseUrl, sessionId);
     await checkAppStartup(baseUrl, sessionId);
+    await checkLinkPolicy(sessionId);
+    // Use a fresh tab so the dirty-document beforeunload guard remains enabled.
+    await connection.send('Target.closeTarget', { targetId });
+    ({ targetId } = await connection.send('Target.createTarget', { url: 'about:blank' }));
+    const { sessionId: fileSessionId } = await connection.send('Target.attachToTarget', { targetId, flatten: true });
+    await connection.send('Page.enable', {}, fileSessionId);
+    await connection.send('Runtime.enable', {}, fileSessionId);
+    await connection.send('Log.enable', {}, fileSessionId);
+    connection.onEvent((message) => collectBrowserError(message, fileSessionId));
+    await navigate(pathToFileURL(path.join(repoRoot, 'index.html')).href, fileSessionId);
+    await poll(`Boolean(document.querySelector('.source-pane .cm-editor'))`, Boolean, fileSessionId, 'file app startup');
+    await checkLinkPolicy(fileSessionId);
 
     assert.deepEqual(browserErrors, [], `browser console errors:\n${browserErrors.join('\n')}`);
     console.log(`browser checks passed (${path.basename(browserPath)})`);
@@ -294,6 +307,111 @@ async function checkAppStartup(baseUrl, sessionId) {
   await checkRichChecklistEditing(sessionId);
   await checkRichStrikethroughEditing(sessionId);
   await checkSplitScrollSync(sessionId);
+}
+
+async function checkLinkPolicy(sessionId) {
+  const markdown = [
+    ...blockedMarkdownLinks.map((source) => `# ${source}`),
+    '[approved](https://example.com/guide)',
+    '[relative](guide.md)',
+    '[anchor](#section)',
+  ].join('\n\n');
+  await switchMode('source', sessionId);
+  await setAppMarkdown(markdown, sessionId);
+  await switchMode('rich', sessionId);
+  const inspect = `(() => {
+    const base = new URL(document.baseURI);
+    const links = [...document.querySelectorAll('#preview a[href], #richEditor a[href]')];
+    return {
+      unsafe: links.filter(link => {
+        const url = new URL(link.href);
+        return url.host !== base.host && url.hostname !== 'example.com';
+      }).map(link => link.getAttribute('href')),
+      approved: Boolean(document.querySelector('#richEditor a[href="https://example.com/guide"]')),
+      relative: Boolean(document.querySelector('#richEditor a[href="guide.md"]')),
+      anchor: Boolean(document.querySelector('#richEditor a[href="#section"]')),
+      blocked: document.querySelectorAll('#richEditor a.blocked-link:not([href])').length
+    };
+  })()`;
+  for (const allowed of [false, true, false]) {
+    await clickSelector('[data-action="link-settings"]', sessionId);
+    await evaluate(`document.getElementById('allowedDomainsInput').value = ${JSON.stringify(allowed ? 'example.com' : '')}`, sessionId);
+    await clickSelector('[data-action="save-link-domains"]', sessionId);
+    const result = await poll(inspect, value => value?.approved === allowed, sessionId, 'live link policy refresh');
+    assert.deepEqual(result.unsafe, [], 'preview and rich DOM must not expose an unapproved authority');
+    assert.equal(result.relative, true, 'relative rich links remain available');
+    assert.equal(result.anchor, true, 'rich anchors remain available');
+    assert.ok(result.blocked >= blockedMarkdownLinks.length, 'all malicious rich links must have no href');
+    const opened = await evaluate(`(() => {
+      const opened = [];
+      const originalOpen = window.open;
+      window.open = href => { opened.push(href); return null; };
+      try {
+        for (const link of document.querySelectorAll('#richEditor a')) {
+          link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true }));
+        }
+      } finally { window.open = originalOpen; }
+      return opened;
+    })()`, sessionId);
+    assert.deepEqual(opened.sort(), (allowed ? ['#section', 'guide.md', 'https://example.com/guide'] : ['#section', 'guide.md']).sort(), 'Ctrl-click must recheck the current link policy');
+  }
+
+  const component = await evaluate(`(() => {
+    const errors = [];
+    const policy = { allowedLinkDomains: ['example.com'] };
+    const renderer = window.PMEMarkdownRenderer.createMarkdownRenderer({ state: policy, els: {} });
+    const mount = document.createElement('div');
+    document.body.appendChild(mount);
+    const editor = window.PMEProseMirror.createRichMarkdownEditor({
+      mount, markdown: '[label](guide.md)', resolveLinkHref: renderer.sanitizeLinkUrl
+    });
+    const linkType = editor.view.state.schema.marks.link;
+    function setHref(href) {
+      const tr = editor.view.state.tr.removeMark(1, 6, linkType).addMark(1, 6, linkType.create({ href }));
+      editor.view.dispatch(tr);
+    }
+    function copyHtml() {
+      const holder = document.createElement('div');
+      const serializer = editor.view.someProp('clipboardSerializer');
+      holder.appendChild(serializer.serializeFragment(editor.view.state.doc.content, { document }));
+      return holder;
+    }
+    try {
+      for (const href of ${JSON.stringify(blockedLinkUrls)}) {
+        setHref(href);
+        if (mount.querySelector('a[href]') || copyHtml().querySelector('a[href]')) errors.push('unsafe link: ' + href);
+        if (editor.view.state.doc.firstChild.firstChild.marks[0].attrs.href !== href) errors.push('source changed: ' + href);
+      }
+      setHref('https://example.com/guide');
+      if (!mount.querySelector('a[href]') || !copyHtml().querySelector('a[href]')) errors.push('allowed link missing');
+      policy.allowedLinkDomains = [];
+      editor.refreshLinks();
+      if (mount.querySelector('a[href]') || copyHtml().querySelector('a[href]')) errors.push('revoked link retained');
+      setHref('guide.md');
+      if (copyHtml().querySelector('a')?.getAttribute('href') !== 'guide.md') errors.push('relative copy changed');
+    } finally { editor.destroy(); mount.remove(); }
+    return { errors, protocol: location.protocol };
+  })()`, sessionId);
+  assert.deepEqual(component.errors, [], 'rich URL edits and copy/drag serializer must use the canonical policy');
+  await checkMermaidLinkPolicy(sessionId);
+  console.log(`link policy browser checks passed (${component.protocol})`);
+}
+
+async function checkMermaidLinkPolicy(sessionId) {
+  const markdown = '```mermaid\nflowchart TD\nA-->B\nclick A href "https://example.com"\n```';
+  await switchMode('source', sessionId);
+  await setAppMarkdown(markdown, sessionId);
+  await switchMode('rich', sessionId);
+  for (const allowed of [true, false, true]) {
+    await clickSelector('[data-action="link-settings"]', sessionId);
+    await evaluate(`document.getElementById('allowedDomainsInput').value = ${JSON.stringify(allowed ? 'example.com' : '')}`, sessionId);
+    await clickSelector('[data-action="save-link-domains"]', sessionId);
+    await poll(`(() => ({
+      ready: Boolean(document.querySelector('#richEditor svg a')),
+      href: document.querySelector('#richEditor svg a')?.getAttribute('href') || ''
+    }))()`, value => value?.ready && value.href === (allowed ? 'https://example.com/' : ''), sessionId, 'Mermaid link policy refresh');
+    assert.equal(await evaluate(`document.getElementById('sourceEditor').value`, sessionId), markdown, 'policy changes must preserve Mermaid source');
+  }
 }
 
 async function checkReferenceDefinitionProtection(sessionId) {
