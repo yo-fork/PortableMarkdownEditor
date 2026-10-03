@@ -19,7 +19,8 @@ Portable Markdown Editor は、Markdownファイルを完全ローカルで編�
 `index.html` に CSP を設定しています。
 
 - `default-src 'none'`
-- `connect-src 'none'`
+- `connect-src https://document.portable-markdown-editor.local`
+- `img-src 'self' blob:`
 - `script-src 'self'`
 - `style-src 'self' 'unsafe-inline'`
 - `object-src 'none'`
@@ -27,6 +28,8 @@ Portable Markdown Editor は、Markdownファイルを完全ローカルで編�
 - `base-uri 'none'`
 
 これにより、外部API通信、外部スクリプト、フォーム送信、object/embedの利用を禁止します。
+接続を許可する1つのホストは、Windows版がネットワークへ出さずに応答する文書画像専用の仮想ホストです。
+通常のブラウザ版からこのホストへ取得を要求することはありません。
 
 ### 2. Windowsネイティブホストの境界
 
@@ -47,6 +50,10 @@ Windowsホストへ解決を要求できるのは最大64件で、現在の文�
 アプリ資産は読み取り専用の仮想ホストへ割り当てます。
 
 文書画像用の仮想URLはフォルダへ直接割り当てず、ネイティブ側が要求ごとに現在の文書フォルダ内でパス、拡張子、バイト署名、25MB上限を検証して応答します。
+応答を許可するのは、固定アプリOriginからのHTTPS、既定ポート、GETの取得要求だけです。
+WebView2の要求分類はFetchまたはXmlHttpRequestに限定します。
+直接の画像要求やその他のOriginは拒否し、CORSも固定アプリOriginだけに限定します。
+取得したバイト列は共有画像検査を通してBlobへ変換し、仮想URLを画像要素へ直接設定しません。
 
 トップレベル画面はアプリオリジン以外へ遷移できません。
 
@@ -65,10 +72,24 @@ Markdown本文に含まれる `<script>`, `<img onerror=...>`, `<iframe>` など
 リンクと画像のURLは別々に検証します。
 
 - リンク: 完全ローカル性を優先し、相対リンク、アンカー、ユーザーが明示的に許可したドメインの `http`/`https` のみ許可。`mailto`, `tel`, `file` などのスキーム付きURLはリンク化しません。
-- 画像: `data:image/png`, `data:image/jpeg`, `data:image/gif`, `data:image/webp`, `blob:`, フォルダ選択時のMarkdownファイル基準の相対パスを許可。ブラウザ版は `file:` URL、Windowsドライブパス、UNCパスを直接読み込みません。Windowsアプリ版は文書フォルダ内の検証済み画像だけを相対参照へ解決します。
+- 画像: 対応ラスタ形式のdata画像とフォルダ内の相対参照は、実データの検証後にアプリ所有のBlob URLへ変換します。未所有のBlob URLは拒否します。ブラウザ版は `file:` URL、Windowsドライブパス、UNCパスを直接読み込みません。Windowsアプリ版は文書フォルダ内の検証済み画像だけを相対参照へ解決します。
 - `javascript:`, `vbscript:`, `data:text/html`, SVG data画像、プロトコル相対URL、外部リンク、外部画像はブロック。
 
-### 5. 画像挿入の制限
+### 5. 画像の取り込みと表示の制限
+
+フォルダ参照、画像挿入、埋め込み画像、Windows版の文書画像は `modules/image-policy.js` の同じ検査を通します。
+圧縮画素を展開する前にPNG/APNG、JPEG、GIF、WebPの署名、MIMEと拡張子、コンテナの長さ、寸法、フレーム構造を確認します。
+JPEGはbaseline、extended sequential、progressive Huffmanの各形式を扱い、DNLや階層形式など寸法の解釈に対応していない形式は拒否します。
+PNGのCRCや圧縮画素自体の完全なデコード検査は行いません。
+1画像は25MiB、各辺8,192、フレーム込み16,777,216画素、静止代替画像込み60フレームまでです。
+文書の画像セッションは失敗を含め64回の検証、合計64MiBの読込み、検証済み画像の合計33,554,432画素を上限とし、読込みは逐次実行して5秒で打ち切ります。
+プレビュー、リッチ表示、HTML出力、コピーとドラッグの各範囲は64画像、33,554,432画素までとし、同じ画像の繰返し参照も数えます。
+プレビューとリッチ表示の2面を合わせると最大128画像、67,108,864画素の見積もりになります。
+画像URLは参照時にだけ生成し、未参照のフォルダ画像ではバイト取得もURL生成も行いません。
+検証済みの埋め込み画像はHTML出力とコピーでdata URLを保持し、画面上は所有Blob URLから表示します。
+埋め込み画像の入力は既存のURL長制限と同じ200,000文字までとし、出力時も画像数と画素数の制限を適用します。
+文書切替時は検証の待機と未処理キューを中止し、遅延完了を採用せず、所有URLを破棄します。
+画像保存にも文書の世代と保存先の一致を確認し、旧文書の検証結果を新文書へ登録しません。
 
 Windowsアプリ版は、開いているMarkdownファイルの場所に `MarkdownFileName.assets/` を作成します。
 
@@ -119,7 +140,10 @@ File System Access API対応ブラウザでは、ユーザーが許可した設�
 
 ### 7. ローカル同梱ライブラリ
 
-Markdown解析、コードハイライト、Mermaid、KaTeXは `vendor/` 配下に同梱したブラウザ用ファイルだけを読み込みます。CDN、npm実行、実行時のパッケージ取得、外部API通信は使わず、CSPの `script-src 'self'` と `connect-src 'none'` は緩めません。ライセンスと同梱ファイルは `docs/third-party-licenses.md` と `vendor/manifest.json` に記録します。
+Markdown解析、コードハイライト、Mermaid、KaTeXは `vendor/` 配下に同梱したブラウザ用ファイルだけを読み込みます。
+CDN、npm実行、実行時のパッケージ取得、外部API通信は使いません。
+CSPはスクリプトを同一Originに、Fetchを前述のネイティブ文書画像ホストだけに制限します。
+ライセンスと同梱ファイルは `docs/third-party-licenses.md` と `vendor/manifest.json` に記録します。
 
 Mermaidは `securityLevel: 'strict'`、`htmlLabels: false` で初期化します。Mermaid/KaTeXの生成スタイル表示のため `style-src 'self' 'unsafe-inline'` を許可しますが、`script-src` と `connect-src` は緩めず、raw HTMLは無効のままです。MermaidのSVG描画結果は挿入前にスクリプト、イベントハンドラ、危険URL、危険なCSS URLを除去します。描画やSVG安全化に失敗した場合は、元のMermaidコードをエスケープ済みのフォールバックとして表示します。
 

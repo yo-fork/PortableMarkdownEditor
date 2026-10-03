@@ -34,6 +34,7 @@ function createRenderer(useVendor = true, mathEngine = katex) {
     console,
   });
   vm.runInContext(tablePolicyModule, context);
+  vm.runInContext(readFileSync(new URL('../modules/image-policy.js', import.meta.url), 'utf8'), context);
   vm.runInContext(markdownRendererModule, context);
   vm.runInContext(richEditorModule, context);
   vm.runInContext(richInputControllerModule, context);

@@ -47,6 +47,10 @@
       stripInlineMarkdown,
       stripRichCaretTokens,
       wrapRenderedInlineAtoms,
+      resolveImageAssetUrl,
+      getImageInfo,
+      getImageExportSrc,
+      imageAssetReason,
     } = dependencies;
 
     let mermaidRenderSerial = 0;
@@ -66,6 +70,14 @@
     const highlightCache = new Map();
     let highlightCacheChars = 0;
     let cachedHighlighter = null;
+    let activeImageBudget = null;
+    let exportingImages = false;
+
+    function withImageBudget(render) {
+      if (activeImageBudget) return render();
+      activeImageBudget = window.PMEImagePolicy.createRenderBudget();
+      try { return render(); } finally { activeImageBudget = null; }
+    }
 
     function mathOutputCost(source, html) {
       // KaTeX escapes attribute/text delimiters. Count tags and intervening text
@@ -150,12 +162,23 @@
     }
 
     function renderMarkdownHtml(markdown, mathSession = null) {
-      return withMathSession(mathSession, () => {
+      return withImageBudget(() => withMathSession(mathSession, () => {
         const blocks = buildBlockModel(stripRichCaretTokens(markdown));
         const headings = buildHeadingIndex(blocks);
         const references = collectReferenceDefinitions(markdown);
         return blocks.map((block) => annotateRenderedBlockHtml(renderBlockHtml(block, headings, references), block)).join('\n');
-      });
+      }));
+    }
+
+    function renderExportHtmlBody(markdown) {
+      const previous = exportingImages;
+      exportingImages = true;
+      try { return renderMarkdownHtml(markdown); }
+      finally { exportingImages = previous; }
+    }
+
+    function imageOutputUrl(url) {
+      return url && exportingImages ? getImageExportSrc?.(url) || '' : url;
     }
 
     function buildBlockModel(markdown) {
@@ -247,7 +270,7 @@
       md.renderer.rules.image = (tokens, index) => {
         const token = tokens[index];
         const src = restoreMarkdownLocalPath(token.attrGet('src') || '');
-        const safe = sanitizeImageUrl(src);
+        const safe = imageOutputUrl(sanitizeImageUrl(src));
         const alt = token.content || token.attrGet('alt') || 'no alt';
         if (!safe) return renderBlockedImage(src, alt);
         return `<img alt="${escapeAttribute(alt)}" src="${escapeAttribute(safe)}" data-markdown-src="${escapeAttribute(src)}">`;
@@ -692,6 +715,7 @@
     }
 
     function renderInlineMarkdown(raw, references = null) {
+      if (!activeImageBudget) return withImageBudget(() => renderInlineMarkdown(raw, references));
       const safeRaw = stripRichCaretTokens(raw);
       if (hasAmbiguousStrongDelimiterNeighborhood(safeRaw) || hasBlockedMarkdownLink(safeRaw)) return renderInline(safeRaw, references);
       const md = getVendorMarkdownRenderer();
@@ -875,6 +899,7 @@
     }
 
     function renderInline(raw, references = null) {
+      if (!activeImageBudget) return withImageBudget(() => renderInline(raw, references));
       const source = String(raw || '');
       if (source.length > MAX_INLINE_SOURCE_CHARS) return inlineRenderLimitNotice();
       try {
@@ -940,7 +965,7 @@
 
       text = text.replace(/!\[([^\]\n]*)\]\((<[^>\n]+>|(?:[^()\s\n]+|\([^()\n]*\))+)\)/g, (_match, alt, target) => {
         const url = parseMarkdownTarget(target);
-        const safe = sanitizeImageUrl(url);
+        const safe = imageOutputUrl(sanitizeImageUrl(url));
         if (!safe) return hold(renderBlockedImage(url, alt || 'no alt'));
         return hold(`<img alt="${escapeAttribute(alt)}" src="${escapeAttribute(safe)}" data-markdown-src="${escapeAttribute(url)}">`);
       });
@@ -1681,7 +1706,7 @@
 
     function buildExportHtml(markdown, fileName) {
       const title = escapeHtml(stripExtension(fileName || 'Markdown Document'));
-      const body = renderMarkdownHtml(markdown);
+      const body = renderExportHtmlBody(markdown);
       const exportedAt = escapeHtml(new Date().toLocaleString('ja-JP'));
       const documentFont = state.documentFont === 'serif'
         ? "'Yu Mincho','Hiragino Mincho ProN',Georgia,serif"
@@ -2196,11 +2221,11 @@
       const value = cleanupUrl(raw, { keepSpaces: true });
       const compact = cleanupUrl(raw);
       if (!value) return '';
-      if (compact.startsWith('blob:')) return compact;
-      if (/^data:image\/(png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=\s]+$/i.test(compact)) return compact.replace(/\s/g, '');
-      const local = normalizeLocalImageUrl(value);
-      if (local) return local;
-      return '';
+      const src = compact.startsWith('blob:') || /^data:/i.test(compact)
+        ? resolveImageAssetUrl(compact) : normalizeLocalImageUrl(value);
+      const info = src && getImageInfo(src);
+      if (!info || (activeImageBudget && !activeImageBudget.reserve(info))) return '';
+      return src;
     }
 
     function normalizeLocalImageUrl(raw) {
@@ -2210,7 +2235,7 @@
         const alias = state.desktopHost && state.desktopDocumentReady
           ? state.desktopImageAliases.get(desktopImageAliasKey(value))
           : '';
-        return alias ? desktopDocumentAssetUrl(alias) : '';
+        return alias ? resolveImageAssetUrl(alias, desktopDocumentAssetUrl(alias)) : '';
       }
       if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) return '';
       return relativeImageUrl(value);
@@ -2263,6 +2288,7 @@
       const decoded = decodeLocalImagePath(value);
       const compact = cleanupUrl(decoded);
       if (!value) return '画像パスが空です';
+      if (/^(?:data:|blob:)/i.test(compact)) return imageAssetReason(compact);
       if (/^https?:\/\//i.test(compact)) return 'http/https画像はローカル実行と追跡防止のためブロックしています';
       if (isLocalAbsoluteImageReference(decoded)) {
         if (state.desktopHost && state.desktopDocumentReady) {
@@ -2275,7 +2301,7 @@
         if (isUnsafeRelativePath(normalized)) return '安全でない相対パスです';
         if (state.desktopHost && !state.desktopDocumentReady) return '先にMarkdownファイルを保存すると相対画像を表示できます';
         if (!state.markdownRelativePath) return 'フォルダが許可されていないため、Markdownファイル基準の相対画像を読めません';
-        return '画像ファイルが見つからないか、PNG/JPEG/GIF/WebPとして検証できません';
+        return imageAssetReason(normalized.replace(/^\.\//, ''));
       }
       return '許可されていない画像パスです';
     }
@@ -2297,11 +2323,8 @@
     function resolveFolderAssetUrl(value) {
       const key = normalizeAssetPath(value);
       if (!key || isUnsafeRelativePath(key)) return '';
-      if (state.desktopHost && state.desktopDocumentReady) return desktopDocumentAssetUrl(key);
-      return state.assetUrls.get(key)
-        || state.assetUrls.get(key.replace(/^\.\//, ''))
-        || state.assetUrls.get(`./${key}`)
-        || '';
+      if (state.desktopHost && state.desktopDocumentReady) return resolveImageAssetUrl(key, desktopDocumentAssetUrl(key));
+      return resolveImageAssetUrl(key);
     }
 
     function desktopDocumentAssetUrl(value) {
@@ -2357,6 +2380,7 @@
       renderBlockHtml: (...args) => withMathSession(null, () => renderBlockHtml(...args)),
       renderInlineMarkdown: (...args) => withMathSession(null, () => renderInlineMarkdown(...args)),
       renderMarkdownHtml,
+      renderExportHtmlBody,
       renderMermaidIn,
       safeSetHtml,
       sanitizeImageUrl,

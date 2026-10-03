@@ -18,6 +18,7 @@ const state = {
 };
 const window = {};
 const sandbox = { window, Event };
+vm.runInNewContext(readFileSync(new URL('../modules/image-policy.js', import.meta.url), 'utf8'), sandbox);
 vm.runInNewContext(fileManagerSource, sandbox, { filename: 'file-manager.js' });
 vm.runInNewContext(controllerSource, sandbox, { filename: 'rich-input-controller.js' });
 const fileManager = window.PMEFileManager.createFileManager({

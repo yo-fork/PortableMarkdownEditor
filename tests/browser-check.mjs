@@ -46,6 +46,7 @@ async function main() {
     await checkLinkPolicy(sessionId);
     await checkCodeHighlightBudgets(sessionId);
     await checkMathRenderBudgets(sessionId);
+    await checkImageBudgets(sessionId);
     // Use a fresh tab so the dirty-document beforeunload guard remains enabled.
     await connection.send('Target.closeTarget', { targetId });
     ({ targetId } = await connection.send('Target.createTarget', { url: 'about:blank' }));
@@ -62,6 +63,7 @@ async function main() {
     await checkLinkPolicy(fileSessionId);
     await checkCodeHighlightBudgets(fileSessionId);
     await checkMathRenderBudgets(fileSessionId);
+    await checkImageBudgets(fileSessionId);
 
     assert.deepEqual(browserErrors, [], `browser console errors:\n${browserErrors.join('\n')}`);
     console.log(`browser checks passed (${path.basename(browserPath)})`);
@@ -1270,6 +1272,210 @@ async function checkMathRenderBudgets(sessionId) {
     console.log(`math budget browser checks passed (${reused.protocol})`);
   } finally {
     await evaluate(`(() => { window.__pmeMathBudgetProbe.restore(); delete window.__pmeMathBudgetProbe; })()`, sessionId);
+  }
+}
+
+async function checkImageBudgets(sessionId) {
+  await switchMode('source', sessionId);
+  const fixtures = await evaluate(`(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 1;
+    canvas.getContext('2d').fillRect(0, 0, 1, 1);
+    const canonical = canvas.toDataURL('image/png');
+    const valid = canonical.replace('image/png', 'image/PNG');
+    const bytes = Uint8Array.from(atob(valid.split(',')[1]), character => character.charCodeAt(0));
+    const wideBytes = bytes.slice();
+    new DataView(wideBytes.buffer).setUint32(16, 8193);
+    const oversized = 'data:image/png;base64,' + btoa(String.fromCharCode(...wideBytes));
+    const disguised = 'data:image/png;base64,' + btoa('<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+    const unowned = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
+    const originalCreate = URL.createObjectURL;
+    const probe = { created: [], unowned };
+    URL.createObjectURL = function(blob) {
+      const url = originalCreate.call(this, blob);
+      if (blob.type.startsWith('image/')) probe.created.push(url);
+      return url;
+    };
+    probe.inspect = root => {
+      // ProseMirror adds src-less separator imgs to position the text caret.
+      const images = Array.from(root.querySelectorAll('img[src]'));
+      const atoms = Array.from(root.querySelectorAll('.pme-image-node'));
+      return {
+        images: images.length, atoms: atoms.length,
+        separators: root.querySelectorAll('img.ProseMirror-separator:not([src])').length,
+        blocked: root.querySelectorAll('.blocked-image').length,
+        decoded: images.filter(image => image.complete && image.naturalWidth === 1 && image.naturalHeight === 1).length,
+        sources: images.map(image => image.getAttribute('src')),
+        markdownSources: images.map(image => image.getAttribute('data-markdown-src')),
+      };
+    };
+    probe.restore = () => { URL.createObjectURL = originalCreate; URL.revokeObjectURL(unowned); };
+    window.__pmeImageBudgetProbe = probe;
+    return { valid, canonical, oversized, disguised, unowned };
+  })()`, sessionId);
+  try {
+    // Distinct block types keep the boundary image views from being repurposed
+    // for their preceding paragraph when ProseMirror reconciles an insertion.
+    const markdown = Array.from({ length: 65 }, (_, index) =>
+      `${index === 63 ? '## ' : index === 64 ? '### ' : ''}![image-${index + 1}](${fixtures.valid})`).join('\n\n');
+    await setAppMarkdown(markdown, sessionId);
+    const initial = await poll(`(() => {
+      const probe = window.__pmeImageBudgetProbe;
+      return {
+        preview: probe.inspect(document.getElementById('preview')),
+        rich: probe.inspect(document.getElementById('richEditor')),
+        markdown: document.getElementById('sourceEditor').value, urls: probe.created,
+      };
+    })()`, value => value?.preview.decoded === 64 && value.rich.decoded === 64 && value.rich.atoms === 65,
+    sessionId, 'shared image validation and rendering budgets');
+    assert.equal(initial.markdown, markdown, 'image admission must retain the complete Markdown source');
+    assert.equal(initial.urls.length, 1, 'repeated data images across two roots must share one validated blob URL');
+    for (const [name, root] of [['preview', initial.preview], ['rich', initial.rich]]) {
+      assert.equal(root.images, 64, `${name} must count each repeated image occurrence`);
+      assert.equal(root.blocked, 1, `${name} must preserve the image beyond its render budget`);
+      assert.ok(root.sources.every(src => initial.urls.includes(src)), `${name} may use only the owned, validated blob URL`);
+      assert.ok(root.markdownSources.every(src => src === fixtures.valid), `${name} must retain original image references`);
+    }
+
+    const transitions = await evaluate(`(() => {
+      const probe = window.__pmeImageBudgetProbe;
+      const root = document.getElementById('richEditor');
+      const atoms = Array.from(root.querySelectorAll('.pme-image-node'));
+      const lastAllowed = atoms[63];
+      const firstBlocked = atoms[64];
+      const view = atoms[0].__pmeImageNodeView.editorView;
+      const initialMarkdown = document.getElementById('sourceEditor').value;
+      const paragraph = view.state.schema.nodes.paragraph.create(null,
+        view.state.schema.nodes.image.create({ src: ${JSON.stringify(fixtures.valid)}, alt: 'inserted-first' }));
+      view.dispatch(view.state.tr.insert(0, paragraph));
+      const inserted = {
+        ...probe.inspect(root), retained: root.contains(lastAllowed),
+        oldNodeBlocked: !lastAllowed.querySelector('img[src]'),
+      };
+      view.dispatch(view.state.tr.delete(0, paragraph.nodeSize));
+      const restored = {
+        ...probe.inspect(root), retained: root.contains(lastAllowed),
+        oldNodeRestored: Boolean(lastAllowed.querySelector('img[src]')),
+        markdownRestored: document.getElementById('sourceEditor').value === initialMarkdown,
+      };
+      const first = view.state.doc.firstChild;
+      const moved = view.state.tr.delete(0, first.nodeSize);
+      moved.insert(moved.doc.content.size - moved.doc.lastChild.nodeSize, first);
+      view.dispatch(moved);
+      const reordered = {
+        ...probe.inspect(root), retained: root.contains(firstBlocked),
+        oldBlockedNowRendered: Boolean(firstBlocked.querySelector('img[src]')),
+        finalNodeBlocked: !root.querySelectorAll('.pme-image-node')[64].querySelector('img[src]'),
+      };
+      const { state } = window.PMEProseMirror.modules;
+      view.dispatch(view.state.tr.setSelection(new state.AllSelection(view.state.doc)));
+      const clipboard = view.serializeForClipboard(view.state.selection.content());
+      const copy = probe.inspect(clipboard.dom);
+      const dataTransfer = new DataTransfer();
+      view.dom.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer }));
+      const dragRoot = document.createElement('template');
+      dragRoot.innerHTML = dataTransfer.getData('text/html');
+      const drag = probe.inspect(dragRoot.content);
+      view.dom.dispatchEvent(new DragEvent('dragend', { bubbles: true }));
+      return { inserted, restored, reordered, copy, drag, protocol: location.protocol };
+    })()`, sessionId);
+    for (const [name, root] of [['inserted', transitions.inserted], ['restored', transitions.restored], ['reordered', transitions.reordered]]) {
+      assert.equal(root.images, 64, `${name} rich document must preserve the per-root image limit`);
+      assert.equal(root.retained, true, `${name} case must exercise an existing ImageNodeView`);
+    }
+    assert.equal(transitions.inserted.atoms, 66);
+    assert.equal(transitions.inserted.oldNodeBlocked, true, 'an unchanged image moved beyond the budget must drop its stale img');
+    assert.equal(transitions.restored.oldNodeRestored, true, 'deleting earlier images must restore the retained image');
+    assert.equal(transitions.restored.markdownRestored, true, 'image budget transitions must preserve document contents');
+    assert.equal(transitions.reordered.oldBlockedNowRendered, true, 'moving an earlier image must admit the previously blocked image');
+    assert.equal(transitions.reordered.finalNodeBlocked, true, 'the moved image must become a placeholder at the end');
+    assert.equal(transitions.copy.images, 64, 'copying the document must enforce its own image budget');
+    assert.equal(transitions.copy.blocked, 1);
+    assert.ok(transitions.drag.images > 0 && transitions.drag.images <= 64, 'native ProseMirror drag HTML must use bounded image serialization');
+    for (const [name, root] of [['copy', transitions.copy], ['drag', transitions.drag]]) {
+      assert.ok(root.sources.every(src => src === fixtures.canonical), `${name} must export approved data images with canonical MIME types`);
+      assert.ok(root.markdownSources.every(src => src === fixtures.valid), `${name} must retain the original Markdown image source`);
+    }
+
+    const exported = await evaluate(`(async () => {
+      const probe = window.__pmeImageBudgetProbe;
+      const originalCreate = URL.createObjectURL;
+      const originalAnchorClick = HTMLAnchorElement.prototype.click;
+      const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+      let exportedHtml;
+      let copiedHtml;
+      URL.createObjectURL = function(blob) {
+        if (blob.type.startsWith('text/html')) exportedHtml = blob.text();
+        return originalCreate.call(this, blob);
+      };
+      HTMLAnchorElement.prototype.click = function() {
+        if (!this.download.endsWith('.html')) return originalAnchorClick.call(this);
+      };
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+        write(items) { copiedHtml = items[0].getType('text/html').then(blob => blob.text()); return Promise.resolve(); },
+        writeText(html) { copiedHtml = Promise.resolve(html); return Promise.resolve(); },
+      } });
+      try {
+        document.querySelector('[data-action="export-html"]').click();
+        document.querySelector('[data-action="copy-html"]').click();
+        const inspectHtml = html => {
+          if (typeof html !== 'string') throw new Error('HTML output was not captured');
+          const template = document.createElement('template');
+          template.innerHTML = html;
+          return probe.inspect(template.content);
+        };
+        return {
+          exported: inspectHtml(await exportedHtml), copied: inspectHtml(await copiedHtml),
+          preview: probe.inspect(document.getElementById('preview')),
+          rich: probe.inspect(document.getElementById('richEditor')),
+        };
+      } finally {
+        URL.createObjectURL = originalCreate;
+        HTMLAnchorElement.prototype.click = originalAnchorClick;
+        if (clipboardDescriptor) Object.defineProperty(navigator, 'clipboard', clipboardDescriptor);
+        else delete navigator.clipboard;
+      }
+    })()`, sessionId);
+    for (const [name, root] of [['HTML export', exported.exported], ['HTML copy', exported.copied]]) {
+      assert.equal(root.images, 64, `${name} must retain the render budget for portable data images`);
+      assert.ok(root.sources.every(src => src === fixtures.canonical), `${name} must remain usable after owned blob URLs are revoked`);
+    }
+    for (const root of [exported.preview, exported.rich]) {
+      assert.ok(root.sources.every(src => initial.urls.includes(src)), 'HTML output must leave live image surfaces on validated blob URLs');
+    }
+
+    const rejectedMarkdown = `![disguised](${fixtures.disguised})\n\n![oversized](${fixtures.oversized})\n\n![unowned](${fixtures.unowned})`;
+    await setAppMarkdown(rejectedMarkdown, sessionId);
+    await poll(`(() => {
+      const atoms = Array.from(document.querySelectorAll('#richEditor .pme-image-node'));
+      return { atoms: atoms.length, reasons: atoms.slice(0, 2).map(atom => {
+        const nodeView = atom.__pmeImageNodeView;
+        return nodeView.options.imageBlockReason(nodeView.node.attrs.src);
+      }) };
+    })()`, value => value?.atoms === 3 && value.reasons.every(reason => !reason.includes('検証中')),
+    sessionId, 'rejected image validation before browser decoding');
+    const rejected = await evaluate(`(() => {
+      const probe = window.__pmeImageBudgetProbe;
+      const root = document.getElementById('richEditor');
+      const view = root.querySelector('.pme-image-node').__pmeImageNodeView.editorView;
+      const { state } = window.PMEProseMirror.modules;
+      view.dispatch(view.state.tr.setSelection(new state.AllSelection(view.state.doc)));
+      const clipboard = view.serializeForClipboard(view.state.selection.content());
+      return {
+        preview: probe.inspect(document.getElementById('preview')), rich: probe.inspect(root),
+        copy: probe.inspect(clipboard.dom), urls: probe.created,
+        markdown: document.getElementById('sourceEditor').value,
+      };
+    })()`, sessionId);
+    for (const [name, root] of [['preview', rejected.preview], ['rich', rejected.rich], ['copy', rejected.copy]]) {
+      assert.equal(root.images, 0, `${name} must reject disguised PNG, oversized dimensions, and an unowned blob before image insertion`);
+      assert.equal(root.blocked, 3, `${name} must preserve every rejected image as a placeholder`);
+    }
+    assert.equal(rejected.urls.length, initial.urls.length, 'rejected image bytes must not receive browser-decoded object URLs');
+    assert.equal(rejected.markdown, rejectedMarkdown, 'rejected images must remain editable as their original Markdown');
+    console.log(`image budget browser checks passed (${transitions.protocol})`);
+  } finally {
+    await evaluate(`(() => { window.__pmeImageBudgetProbe.restore(); delete window.__pmeImageBudgetProbe; })()`, sessionId);
   }
 }
 

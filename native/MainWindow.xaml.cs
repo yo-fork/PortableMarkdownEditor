@@ -18,6 +18,7 @@ namespace PortableMarkdownEditor.Desktop
     public partial class MainWindow : Window
     {
         private const string AppHost = "portable-markdown-editor.local";
+        private const string AppOrigin = "https://" + AppHost;
         private const string DocumentHost = "document.portable-markdown-editor.local";
         private const string NewDocumentArgument = "--new-document";
         private const int MaxBridgeMessageCharacters = 80 * 1024 * 1024;
@@ -235,7 +236,7 @@ namespace PortableMarkdownEditor.Desktop
             core.PermissionRequested += Core_PermissionRequested;
             core.AddWebResourceRequestedFilter(
                 "https://" + DocumentHost + "/*",
-                CoreWebView2WebResourceContext.Image);
+                CoreWebView2WebResourceContext.All);
             core.WebResourceRequested += Core_WebResourceRequested;
             EditorWebView.Source = new Uri(
                 "https://" + AppHost + "/index.html?desktop=1&draft=" + Uri.EscapeDataString(_draftScope));
@@ -246,27 +247,37 @@ namespace PortableMarkdownEditor.Desktop
             object sender,
             CoreWebView2WebResourceRequestedEventArgs eventArgs)
         {
-            Uri requestUri;
-            if (eventArgs.ResourceContext != CoreWebView2WebResourceContext.Image
-                || !Uri.TryCreate(eventArgs.Request.Uri, UriKind.Absolute, out requestUri)
-                || requestUri.Scheme != Uri.UriSchemeHttps
-                || !string.Equals(requestUri.Host, DocumentHost, StringComparison.OrdinalIgnoreCase))
-            {
-                return;
-            }
-
             using (CoreWebView2Deferral deferral = eventArgs.GetDeferral())
             {
+                bool allowAppOrigin = false;
                 try
                 {
+                    allowAppOrigin = eventArgs.Request.Headers.Contains("Origin")
+                        && string.Equals(eventArgs.Request.Headers.GetHeader("Origin"), AppOrigin, StringComparison.Ordinal);
+                    Uri requestUri;
+                    // WebView2 can report JavaScript fetch() as XmlHttpRequest.
+                    if ((eventArgs.ResourceContext != CoreWebView2WebResourceContext.Fetch
+                        && eventArgs.ResourceContext != CoreWebView2WebResourceContext.XmlHttpRequest)
+                        || !string.Equals(eventArgs.Request.Method, "GET", StringComparison.Ordinal)
+                        || !allowAppOrigin
+                        || !Uri.TryCreate(eventArgs.Request.Uri, UriKind.Absolute, out requestUri)
+                        || requestUri.Scheme != Uri.UriSchemeHttps
+                        || !string.Equals(requestUri.Host, DocumentHost, StringComparison.OrdinalIgnoreCase)
+                        || !requestUri.IsDefaultPort
+                        || !string.IsNullOrEmpty(requestUri.UserInfo))
+                    {
+                        eventArgs.Response = CreateDocumentImageResponse(null, allowAppOrigin);
+                        return;
+                    }
+
                     DocumentImageContent image = await TryReadDocumentImageAsync(requestUri);
-                    eventArgs.Response = CreateDocumentImageResponse(image);
+                    eventArgs.Response = CreateDocumentImageResponse(image, allowAppOrigin);
                 }
                 catch (Exception)
                 {
                     try
                     {
-                        eventArgs.Response = CreateDocumentImageResponse(null);
+                        eventArgs.Response = CreateDocumentImageResponse(null, allowAppOrigin);
                     }
                     catch (Exception)
                     {
@@ -297,25 +308,33 @@ namespace PortableMarkdownEditor.Desktop
             }
         }
 
-        private CoreWebView2WebResourceResponse CreateDocumentImageResponse(DocumentImageContent image)
+        private CoreWebView2WebResourceResponse CreateDocumentImageResponse(
+            DocumentImageContent image,
+            bool allowAppOrigin)
         {
             CoreWebView2Environment environment = EditorWebView.CoreWebView2.Environment;
+            string headers = "Content-Type: " + (image == null ? "text/plain" : image.ContentType)
+                + "\r\nCache-Control: no-store"
+                + "\r\nX-Content-Type-Options: nosniff"
+                + "\r\nVary: Origin";
+            if (allowAppOrigin)
+            {
+                headers += "\r\nAccess-Control-Allow-Origin: " + AppOrigin;
+            }
             if (image == null)
             {
                 return environment.CreateWebResourceResponse(
                     new MemoryStream(new byte[0], false),
                     404,
                     "Not Found",
-                    "Content-Type: text/plain\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff");
+                    headers);
             }
 
             return environment.CreateWebResourceResponse(
                 new MemoryStream(image.Data, false),
                 200,
                 "OK",
-                "Content-Type: " + image.ContentType
-                    + "\r\nCache-Control: no-store"
-                    + "\r\nX-Content-Type-Options: nosniff");
+                headers);
         }
 
         private static void ConfigureWebViewSettings(CoreWebView2Settings settings)

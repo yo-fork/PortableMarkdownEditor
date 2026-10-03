@@ -5,12 +5,17 @@ const app = [
   readFileSync(new URL('../app.js', import.meta.url), 'utf8'),
   readFileSync(new URL('../modules/markdown-renderer.js', import.meta.url), 'utf8'),
   readFileSync(new URL('../modules/table-policy.js', import.meta.url), 'utf8'),
+  readFileSync(new URL('../modules/image-policy.js', import.meta.url), 'utf8'),
   readFileSync(new URL('../modules/rich-editor.js', import.meta.url), 'utf8'),
   readFileSync(new URL('../modules/rich-input-controller.js', import.meta.url), 'utf8'),
   readFileSync(new URL('../modules/file-manager.js', import.meta.url), 'utf8'),
   readFileSync(new URL('../modules/shortcut-manager.js', import.meta.url), 'utf8'),
 ].join('\n');
-const source = stripCommentsAndStrings(app);
+const nativeFetch = "window.fetch(input.nativeUrl, { credentials: 'omit', redirect: 'error', cache: 'no-store', signal })";
+assert.equal(app.split(nativeFetch).length - 1, 1, 'only the fixed native image transport may call fetch');
+assert.match(app, /target\.host !== DESKTOP_DOCUMENT_HOST/, 'native image transport must enforce the fixed document host');
+assert.match(app, /!state\.desktopHost \|\| !state\.desktopDocumentReady/, 'native image transport must require an open native document');
+const source = stripCommentsAndStrings(app.replace(nativeFetch, 'nativeImageTransport()'));
 
 const forbidden = [
   { name: 'eval()', pattern: /\beval\s*\(/ },

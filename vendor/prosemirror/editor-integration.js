@@ -3098,12 +3098,79 @@
     return '画像未表示: ' + label + (reason ? ' (' + reason + ')' : '');
   }
 
-  function resolveImageNodeSrc(src, options) {
-    if (options && typeof options.resolveImageSrc === 'function') {
-      try { return options.resolveImageSrc(src) || ''; }
-      catch (_) { return ''; }
-    }
-    return src || '';
+  function createImageRenderBudget() {
+    try {
+      return global.PMEImagePolicy && global.PMEImagePolicy.createRenderBudget();
+    } catch (_) { return null; }
+  }
+
+  function resolveImageNodeSrc(src, options, budget, token) {
+    if (!budget || !options || typeof options.resolveImageSrc !== 'function'
+      || typeof options.getImageInfo !== 'function') return '';
+    try {
+      var resolved = options.resolveImageSrc(src);
+      if (typeof resolved !== 'string' || !/^blob:/.test(resolved)) return '';
+      var info = options.getImageInfo(resolved);
+      return info && budget.reserve(info, token) ? resolved : '';
+    } catch (_) { return ''; }
+  }
+
+  function createImageRenderPlan(doc, options) {
+    var plan = new Map();
+    var budget = createImageRenderBudget();
+    if (!budget) return plan;
+    doc.descendants(function(node, pos) {
+      if (node.type !== schema.nodes.image) return true;
+      var src = node.attrs.src || '';
+      var resolved = resolveImageNodeSrc(src, options, budget, pos);
+      if (resolved) plan.set(pos, { src: src, url: resolved });
+      return false;
+    });
+    return plan;
+  }
+
+  function createImageClipboardSerializer(options, linkAttributes) {
+    var budget = null;
+    var depth = 0;
+    var base = model.DOMSerializer.fromSchema(schema);
+    var clipboard = new model.DOMSerializer(extendObject(base.nodes, {
+      image: function(node) {
+        var src = node.attrs.src || '';
+        var alt = node.attrs.alt || '';
+        var resolved = resolveImageNodeSrc(src, options, budget);
+        if (resolved && typeof options.getImageExportSrc === 'function') {
+          try { resolved = options.getImageExportSrc(resolved) || ''; }
+          catch (_) { resolved = ''; }
+        }
+        var attrs = { 'data-markdown-src': src, alt: alt };
+        if (node.attrs.title) attrs.title = node.attrs.title;
+        if (resolved) {
+          attrs.src = resolved;
+          return ['img', attrs];
+        }
+        return ['span', { class: 'blocked-image', 'data-markdown-src': src,
+          'data-markdown-alt': alt }, imageFallbackText(src, alt, options)];
+      }
+    }), extendObject(base.marks, {
+      link: function(mark) {
+        var attrs = linkAttributes(mark);
+        return attrs.href ? ['a', attrs, 0] : ['span', { class: 'blocked-link' }, 0];
+      }
+    }));
+    // Nested fragments share one budget; each copy or drag starts a fresh root.
+    ['serializeFragment', 'serializeNode'].forEach(function(method) {
+      var serialize = clipboard[method];
+      clipboard[method] = function() {
+        if (depth === 0) budget = createImageRenderBudget();
+        depth += 1;
+        try { return serialize.apply(this, arguments); }
+        finally {
+          depth -= 1;
+          if (depth === 0) budget = null;
+        }
+      };
+    });
+    return clipboard;
   }
 
   function markdownImageLabel(value) {
@@ -3150,11 +3217,12 @@
     return true;
   }
 
-  function ImageNodeView(node, editorView, getPos, options) {
+  function ImageNodeView(node, editorView, getPos, options, getImageSrc) {
     this.node = node;
     this.editorView = editorView;
     this.getPos = getPos;
     this.options = options || {};
+    this.getImageSrc = getImageSrc;
     this.dom = document.createElement('span');
     this.dom.className = 'pme-image-node';
     this.dom.setAttribute('data-pme-atom-node', 'image');
@@ -3192,7 +3260,11 @@
     var src = this.node.attrs.src || '';
     var alt = this.node.attrs.alt || '';
     var title = this.node.attrs.title || '';
-    var resolved = resolveImageNodeSrc(src, this.options);
+    var resolved = this.getImageSrc(this.node, this.getPos);
+    var currentImage = this.dom.querySelector('img');
+    if (resolved && currentImage && currentImage.getAttribute('src') === resolved
+      && currentImage.getAttribute('data-markdown-src') === src
+      && currentImage.alt === alt && (currentImage.title || '') === title) return;
     this.dom.textContent = '';
     this.dom.setAttribute('data-markdown-src', src);
     if (resolved) {
@@ -3477,7 +3549,7 @@
     this.languageInput.removeEventListener('keydown', this.onLanguageKeyDown);
   };
 
-  function extendedNodeViews(options, mathViews, getMathHtml) {
+  function extendedNodeViews(options, mathViews, getMathHtml, getImageSrc) {
     function createMathNodeView(node, editorView, getPos) {
       var nodeView = new MathNodeView(node, editorView, getPos, getMathHtml, function() { mathViews.delete(nodeView); });
       mathViews.add(nodeView);
@@ -3486,7 +3558,7 @@
     return {
       code_block: function(node, editorView, getPos) { return new CodeBlockNodeView(node, editorView, getPos); },
       list_item: function(node, editorView, getPos) { return new TaskListItemNodeView(node, editorView, getPos); },
-      image: function(node, editorView, getPos) { return new ImageNodeView(node, editorView, getPos, options); },
+      image: function(node, editorView, getPos) { return new ImageNodeView(node, editorView, getPos, options, getImageSrc); },
       math_inline: createMathNodeView,
       math_display: createMathNodeView,
       mermaid_block: function(node, editorView, getPos) { return new MermaidNodeView(node, editorView, getPos); },
@@ -3942,6 +4014,19 @@
     var linkViews = new Set();
     var mathViews = new Set();
     var mathPlan = new Map();
+    var imagePlan = new Map();
+
+    function prepareImagePlan(doc) {
+      imagePlan = createImageRenderPlan(doc, options);
+    }
+
+    function getImageSrc(node, getPos) {
+      var pos;
+      try { pos = getPos(); }
+      catch (_) { return ''; }
+      var planned = imagePlan.get(pos);
+      return planned && planned.src === (node.attrs.src || '') ? planned.url : '';
+    }
 
     function prepareMathPlan(doc) {
       mathPlan = new Map();
@@ -4017,27 +4102,27 @@
       return { dom: dom, contentDOM: dom, destroy: function() { linkViews.delete(refresh); } };
     }
 
-    var baseClipboardSerializer = model.DOMSerializer.fromSchema(schema);
-    var clipboardSerializer = new model.DOMSerializer(baseClipboardSerializer.nodes,
-      extendObject(baseClipboardSerializer.marks, {
-        link: function(mark) {
-          var attrs = linkAttributes(mark);
-          return attrs.href ? ['a', attrs, 0] : ['span', { class: 'blocked-link' }, 0];
-        }
-      }));
+    var clipboardSerializer = createImageClipboardSerializer(options, linkAttributes);
 
     mount.textContent = '';
     var initialState = createState(options.markdown || '', options.getCodeHighlight);
     prepareMathPlan(initialState.doc);
+    prepareImagePlan(initialState.doc);
     var editorView = new view.EditorView(mount, {
       state: initialState,
       dispatchTransaction: function(transaction) {
         if (destroyed) return;
         var next = editorView.state.apply(transaction);
         var docChanged = next.doc !== editorView.state.doc;
-        if (docChanged) prepareMathPlan(next.doc);
+        if (docChanged) {
+          prepareMathPlan(next.doc);
+          prepareImagePlan(next.doc);
+        }
         editorView.updateState(next);
-        if (docChanged) refreshMathViews();
+        if (docChanged) {
+          refreshMathViews();
+          refreshImageNodeViews(editorView);
+        }
         if (transaction.docChanged && !applyingExternal && typeof options.onChange === 'function') {
           options.onChange(serializeMarkdown(next.doc));
         }
@@ -4051,7 +4136,7 @@
       },
       clipboardTextParser: markdownClipboardTextParser,
       clipboardSerializer: clipboardSerializer,
-      nodeViews: extendedNodeViews(options, mathViews, getMathHtml),
+      nodeViews: extendedNodeViews(options, mathViews, getMathHtml, getImageSrc),
       markViews: { link: createLinkView },
       attributes: {
         'aria-label': 'リッチMarkdown編集',
@@ -4077,6 +4162,7 @@
       },
       refreshImages: function() {
         if (destroyed) return false;
+        prepareImagePlan(editorView.state.doc);
         refreshImageNodeViews(editorView);
         return true;
       },
@@ -4089,8 +4175,10 @@
         applyingExternal = true;
         try {
           prepareMathPlan(nextState.doc);
+          prepareImagePlan(nextState.doc);
           editorView.updateState(nextState);
           refreshMathViews();
+          refreshImageNodeViews(editorView);
         }
         finally { applyingExternal = false; }
         return true;

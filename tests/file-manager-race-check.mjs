@@ -6,6 +6,9 @@ import vm from 'node:vm';
 // All file handles, IndexedDB requests, writes, and object URLs are in memory.
 // Only the production JavaScript source is read from the real filesystem.
 const source = readFileSync(new URL('../modules/file-manager.js', import.meta.url), 'utf8');
+const imagePolicySource = readFileSync(new URL('../modules/image-policy.js', import.meta.url), 'utf8');
+const PNG_BYTES = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5xkAAAAASUVORK5CYII=', 'base64'));
+const NATIVE_DOCUMENT_HOST = 'pme-document.local';
 const DIRECTORY_KEY = 'document-directory';
 const PICKER_KEY = 'picker-directory';
 const INITIAL_BINDING_ID = 'draft-binding-old';
@@ -68,6 +71,25 @@ function memoryFile(name, text, type = 'text/markdown') {
   };
 }
 
+function memoryImage(name = 'picture.png', bytes = PNG_BYTES, type = 'image/png') {
+  return {
+    name, size: bytes.byteLength, type, readPause: null, readCalls: 0,
+    async arrayBuffer() {
+      this.readCalls += 1;
+      if (this.readPause) await this.readPause.wait();
+      return Uint8Array.from(bytes).buffer;
+    },
+  };
+}
+
+function pngWithDimensions(width, height) {
+  const bytes = Uint8Array.from(PNG_BYTES);
+  const header = new DataView(bytes.buffer);
+  header.setUint32(16, width);
+  header.setUint32(20, height);
+  return bytes;
+}
+
 function memoryRoot(name, markdown = '# File content', fileName = 'draft.md') {
   const writes = [];
   const directories = new Map();
@@ -126,7 +148,7 @@ function memoryRoot(name, markdown = '# File content', fileName = 'draft.md') {
     },
   };
   if (markdown !== null) root.addFile(memoryFile(fileName, markdown));
-  root.addFile(memoryFile(`${name}.png`, 'image bytes', 'image/png'));
+  root.addFile(memoryImage(`${name}.png`));
   return root;
 }
 
@@ -164,16 +186,19 @@ function createHarness(options = {}) {
   const filePickers = [];
   const effects = {
     statuses: [], renders: [], revokedUrls: [], downloads: [], warnings: [], persistedDrafts: 0, draftSnapshots: [],
+    createdUrls: [], imageRenders: 0, fetches: [], desktopMessages: [], canonicalBlobReads: 0,
   };
   const controls = {
     openPause: null, openFailure: null, readPause: null, deletePause: null, putPause: null, putFailure: null,
     confirmDirectory: true, allowReplacement: true,
+    imageTimeouts: new Map(), fetch: null, canonicalBlobPause: null, desktopMessage: null,
   };
   const state = {
     ...draft,
     directoryHandle: null, fileHandle: null, directoryName: '', pickerStartDirectoryHandle: null,
     documentGeneration: 0, documentRevision: 1, dirty: draft.dirty !== false, mode: 'source', assetUrls: new Map(),
     folderScanLimitMessage: '', folderInputMode: 'open', richUndoStack: [], desktopHost: false,
+    desktopAssetRequests: new Map(), desktopImageAliases: new Map(),
   };
   const els = {
     source: { value: state.markdown, scrollTop: 0 },
@@ -203,6 +228,14 @@ function createHarness(options = {}) {
   const db = { close() {}, transaction: () => ({ objectStore: () => store }) };
   const window = {
     isSecureContext: true,
+    AbortController,
+    chrome: { webview: {
+      addEventListener(type, listener) {
+        assert.equal(type, 'message');
+        controls.desktopMessage = listener;
+      },
+      postMessage(message) { effects.desktopMessages.push(message); },
+    } },
     crypto: { randomUUID: () => `generated-binding-${++bindingIdCounter}` },
     indexedDB: {
       open() {
@@ -234,8 +267,20 @@ function createHarness(options = {}) {
       return typeof chosen === 'function' ? chosen() : [chosen];
     },
     console: { warn: (...args) => effects.warnings.push(args) },
-    clearTimeout,
+    fetch(url, init) {
+      effects.fetches.push({ url, init });
+      assert.equal(typeof controls.fetch, 'function', 'unexpected native image fetch');
+      return controls.fetch(url, init);
+    },
+    clearTimeout(timer) {
+      if (!controls.imageTimeouts.delete(timer)) clearTimeout(timer);
+    },
     setTimeout(callback, delay = 0) {
+      if (options.manualImageTimeout && delay === 5000) {
+        const timer = {};
+        controls.imageTimeouts.set(timer, callback);
+        return timer;
+      }
       const timer = setTimeout(callback, delay);
       timer.unref();
       return timer;
@@ -244,7 +289,7 @@ function createHarness(options = {}) {
   let objectUrlId = 0;
   const document = {
     activeElement: els.source,
-    body: { appendChild() {} },
+    body: { dataset: {}, appendChild() {} },
     createElement(tag) {
       assert.equal(tag, 'a', 'unexpected DOM operation in file manager test');
       return { click() { effects.downloads.push(this.download); }, remove() {} };
@@ -254,6 +299,8 @@ function createHarness(options = {}) {
     normalizeAssetPath: (value) => String(value || '').replace(/\\/g, '/'),
     normalizeNewlines: (value) => String(value || '').replace(/\r\n?/g, '\n'),
     safeFileName: (value) => String(value || ''),
+    stripExtension: (value) => String(value || '').replace(/\.[^.\\/]+$/, ''),
+    decodeLocalImagePath: (value) => decodeURIComponent(value),
     basenamePath: (value) => path.posix.basename(value),
     dirnamePath: (value) => { const dir = path.posix.dirname(value); return dir === '.' ? '' : dir; },
     ensureExtension: (value, extension) => value.endsWith(extension) ? value : `${value}${extension}`,
@@ -269,6 +316,7 @@ function createHarness(options = {}) {
     isCodeMirrorSourceReady: () => false,
     isProseMirrorRichActive: () => false,
     getRichCaretBookmark: () => null,
+    shortcutAssignmentsForExport: () => [],
     setStatus: (message) => effects.statuses.push(message),
     renderAll: (reason) => effects.renders.push(reason),
     persistDraft: () => {
@@ -280,20 +328,32 @@ function createHarness(options = {}) {
       });
     },
     syncCodeMirrorSourceFromTextarea() {}, updateStatusBar() {},
-    renderPreview() {}, renderRich() {}, renderOutline() {}, applyOutlineVisibility() {},
+    renderPreview() { effects.imageRenders += 1; }, renderRich() {}, renderOutline() {}, applyOutlineVisibility() {},
     setSourceSelectionRange() {}, restoreRichCaret() {},
   };
   const sandbox = {
-    window, document, TextDecoder, Blob, performance, crypto: window.crypto,
-    URL: {
-      createObjectURL: () => `blob:memory-${++objectUrlId}`,
-      revokeObjectURL: (value) => effects.revokedUrls.push(value),
+    window, document, TextDecoder, Uint8Array, atob, btoa, performance, crypto: window.crypto,
+    Blob: class extends Blob {
+      async arrayBuffer() {
+        effects.canonicalBlobReads += 1;
+        if (controls.canonicalBlobPause) await controls.canonicalBlobPause.wait();
+        return super.arrayBuffer();
+      }
+    },
+    URL: class extends URL {
+      static createObjectURL(blob) {
+        const url = `blob:memory-${++objectUrlId}`;
+        effects.createdUrls.push({ url, blob });
+        return url;
+      }
+      static revokeObjectURL(value) { effects.revokedUrls.push(value); }
     },
     localStorage: { removeItem() {}, getItem: () => null, setItem() {} },
     confirm: () => controls.confirmDirectory,
     alert: (message) => effects.warnings.push(message),
     prompt: (_message, defaultValue) => defaultValue,
   };
+  vm.runInNewContext(imagePolicySource, sandbox, { filename: 'image-policy.js' });
   vm.runInNewContext(source, sandbox, { filename: 'file-manager.js' });
   const api = window.PMEFileManager.createFileManager({
     state, els, dependencies,
@@ -301,7 +361,9 @@ function createHarness(options = {}) {
       FSA_DB_NAME: 'memory-only', FSA_STORE_NAME: 'handles',
       FSA_DIRECTORY_HANDLE_KEY: DIRECTORY_KEY, FSA_PICKER_START_HANDLE_KEY: PICKER_KEY,
       FSA_SETTINGS_DIRECTORY_HANDLE_KEY: 'settings-directory',
-      ALLOWED_IMAGE_TYPES: new Set(['image/png']), MAX_FOLDER_SCAN_FILES: 100, MAX_FOLDER_SCAN_DEPTH: 4,
+      ALLOWED_IMAGE_TYPES: new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']),
+      DESKTOP_DOCUMENT_HOST: NATIVE_DOCUMENT_HOST, MAX_FOLDER_SCAN_FILES: 100, MAX_FOLDER_SCAN_DEPTH: 4,
+      DESKTOP_ASSET_REQUEST_TIMEOUT_MS: 1000,
       MAX_ASSET_IMAGE_BYTES: 25 * 1024 * 1024,
       MAX_FOLDER_SCAN_ENTRIES: 10000, MAX_FOLDER_SCAN_BYTES: 128 * 1024 * 1024,
       MAX_FOLDER_SCAN_PATH_BYTES: 1024 * 1024, MAX_FOLDER_SCAN_MS: 5000,
@@ -326,6 +388,7 @@ function visibleState(harness) {
     file: state.fileHandle, fileName: state.fileName, directoryName: state.directoryName,
     pickerStart: state.pickerStartDirectoryHandle, markdown: state.markdown, source: els.source.value,
     revision: state.documentRevision, dirty: state.dirty, assets: [...state.assetUrls],
+    imageCandidates: [...state.imageAssetFiles.keys()],
     scanLimitMessage: state.folderScanLimitMessage,
     statuses: [...effects.statuses], renders: [...effects.renders], revokedUrls: [...effects.revokedUrls],
     persistedDrafts: effects.persistedDrafts,
@@ -427,7 +490,7 @@ test('normal restore binds the exact file and preserves the draft', async () => 
   assert.equal(harness.state.fileHandle, harness.oldRoot.files.get('draft.md'));
   assert.equal(harness.state.markdown, '# Restored draft');
   assert.equal(harness.state.dirty, true);
-  assert.ok(harness.state.assetUrls.has('old-root.png'));
+  assert.ok(harness.state.imageAssetFiles.has('old-root.png'));
   assert.ok(Object.isFrozen(harness.state.documentBinding));
   await harness.api.saveMarkdown();
   assert.deepEqual(harness.oldRoot.writes, [{ root: 'old-root', path: 'draft.md', text: '# Restored draft' }]);
@@ -491,6 +554,7 @@ test('restore requires the captured Markdown path to exist in the scanned root',
 test('cancelling a picker preserves an established document binding', async () => {
   const harness = createHarness();
   await harness.api.restorePersistedDirectoryHandle();
+  await loadedImage(harness, 'old-root.png');
   const expected = visibleState(harness);
   harness.directoryPickers.push(namedError('AbortError'));
   await harness.api.openFolder();
@@ -994,8 +1058,8 @@ test('normal Markdown and image candidates retain extension and extensionless MI
   assert.equal(mimeImage.getFileCalls, 1);
   assert.equal(unrelated.getFileCalls, 0);
   assert.equal(harness.state.markdown, '# Extensionless document');
-  assert.ok(harness.state.assetUrls.has('photo.PNG'));
-  assert.ok(harness.state.assetUrls.has('picture'));
+  assert.ok(harness.state.imageAssetFiles.has('photo.PNG'));
+  assert.ok(harness.state.imageAssetFiles.has('picture'));
   assert.equal(harness.state.folderScanLimitMessage, '');
   assert.equal(harness.els.folderScanCancel.hidden, true);
 });
@@ -1013,8 +1077,8 @@ test('per-file size limits exclude large Markdown and images before content or o
   assert.equal(largeDocument.readCalls, 0);
   assert.equal(largeImage.readCalls, 0);
   assert.equal(harness.state.markdown, '# Small document');
-  assert.ok(harness.state.assetUrls.has('small.png'));
-  assert.equal(harness.state.assetUrls.has('large.png'), false);
+  assert.ok(harness.state.imageAssetFiles.has('small.png'));
+  assert.equal(harness.state.imageAssetFiles.has('large.png'), false);
   assertScanWarning(harness);
 });
 
@@ -1030,8 +1094,8 @@ test('the cumulative candidate byte budget retains only the prefix that fits', a
   assert.equal(accepted.getFileCalls, 1);
   assert.equal(overflow.getFileCalls, 1);
   assert.equal(untouched.getFileCalls, 0);
-  assert.ok(harness.state.assetUrls.has('first.png'));
-  assert.equal(harness.state.assetUrls.has('second.png'), false);
+  assert.ok(harness.state.imageAssetFiles.has('first.png'));
+  assert.equal(harness.state.imageAssetFiles.has('second.png'), false);
   assertScanWarning(harness);
 });
 
@@ -1220,7 +1284,7 @@ for (const route of ['directory', 'input']) {
       assert.equal(target.value, '');
     }
     assert.equal(harness.state.markdown, '# Root document');
-    assert.ok(harness.state.assetUrls.has('root.png'));
+    assert.ok(harness.state.imageAssetFiles.has('root.png'));
     assertScanWarning(harness);
   });
 }
@@ -1237,8 +1301,8 @@ test('folder input applies cumulative size limits before building image URLs', a
   await harness.api.onFolderChosen({ target });
   assert.deepEqual(reads, [0, 1, 2]);
   assert.equal(harness.state.markdown, 'x');
-  assert.ok(harness.state.assetUrls.has('first.png'));
-  assert.equal(harness.state.assetUrls.has('second.png'), false);
+  assert.ok(harness.state.imageAssetFiles.has('first.png'));
+  assert.equal(harness.state.imageAssetFiles.has('second.png'), false);
   assert.equal(target.value, '');
   assertScanWarning(harness);
 });
@@ -1283,6 +1347,7 @@ test('directory paths and their descendants share one cumulative path budget', a
 test('cancelling a scan retains an established binding and its image URLs', async () => {
   const harness = createHarness();
   await harness.api.restorePersistedDirectoryHandle();
+  await loadedImage(harness, 'old-root.png');
   const before = visibleState(harness);
   const pending = pause();
   const { root, documentHandle } = pendingScanRoot('getFile', pending);
@@ -1332,7 +1397,7 @@ test('directory values iterators preserve normal Markdown and image loading', as
   await openRoot(harness, root);
   assert.equal(harness.state.markdown, '# Values iterator');
   assert.equal(harness.state.directoryHandle, root);
-  assert.ok(harness.state.assetUrls.has('values-root.png'));
+  assert.ok(harness.state.imageAssetFiles.has('values-root.png'));
   assert.equal(harness.state.folderScanLimitMessage, '');
   assert.equal(harness.els.folderScanCancel.hidden, true);
 });
@@ -1352,6 +1417,572 @@ test('a folder containing only unsupported files explains the missing Markdown f
     assert.equal(harness.state.directoryHandle, null);
   }
 });
+
+async function until(predicate, label) {
+  await bounded((async () => {
+    while (!predicate()) await new Promise((resolve) => setTimeout(resolve, 1));
+  })(), label);
+}
+
+async function loadedImage(harness, key, nativeUrl = '') {
+  let url = '';
+  await until(() => (url = harness.api.resolveImageAssetUrl(key, nativeUrl)), `validated image ${key}`);
+  // Settle the scheduled refresh before callers snapshot the current UI state.
+  await new Promise((resolve) => setTimeout(resolve, 2));
+  return url;
+}
+
+async function rejectedImage(harness, key, reason, nativeUrl = '') {
+  assert.equal(harness.api.resolveImageAssetUrl(key, nativeUrl), '');
+  const recordKey = nativeUrl ? `native:${nativeUrl}` : key;
+  await until(() => reason.test(harness.api.imageAssetReason(recordKey)), `rejected image ${key}`);
+  assert.equal(harness.api.resolveImageAssetUrl(key, nativeUrl), '');
+}
+
+function imageEntries(harness, files) {
+  harness.api.buildFolderAssetUrls(files.map((file) => ({ file, relativePath: file.name })), '');
+}
+
+function nativeImageResponse(chunks, mimeType = 'image/png') {
+  const calls = { reads: 0, cancels: 0 };
+  let offset = 0;
+  return {
+    calls,
+    response: {
+      ok: true,
+      headers: { get: (key) => key.toLowerCase() === 'content-type' ? mimeType : null },
+      body: { getReader: () => ({
+        async read() {
+          calls.reads += 1;
+          return offset < chunks.length ? { value: chunks[offset++], done: false } : { done: true };
+        },
+        async cancel() { calls.cancels += 1; },
+      }) },
+    },
+  };
+}
+
+test('folder discovery never reads image bytes or creates URLs until an image is referenced', async () => {
+  const harness = createHarness();
+  const root = memoryRoot('lazy-folder', '# No image reference');
+  const image = root.files.get('lazy-folder.png').file;
+  await openRoot(harness, root);
+  assert.equal(harness.state.imageAssetFiles.get(image.name), image);
+  assert.equal(image.readCalls, 0);
+  assert.equal(harness.effects.createdUrls.length, 0);
+  assert.equal(harness.state.assetUrls.size, 0);
+  assert.equal(harness.api.resolveImageAssetUrl(image.name), '');
+  await until(() => harness.effects.imageRenders > 0, 'image validation refresh');
+  assert.equal(image.readCalls, 1);
+  assert.equal(harness.effects.createdUrls.length, 0, 'validation alone must not create an object URL');
+  const url = harness.api.resolveImageAssetUrl(image.name);
+  assert.ok(url.startsWith('blob:memory-'));
+  assert.equal(harness.effects.createdUrls.length, 1);
+  const info = harness.api.getImageInfo(url);
+  assert.equal(info.mimeType, 'image/png');
+  assert.equal(info.width, 1);
+  assert.equal(info.height, 1);
+  assert.equal(info.frames, 1);
+  assert.equal(info.pixels, 1);
+  assert.equal(info.size, PNG_BYTES.length);
+  const blob = harness.effects.createdUrls[0].blob;
+  assert.equal(blob.type, 'image/png');
+  assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), PNG_BYTES);
+});
+
+test('relative aliases and repeated references share one validation and one owned URL', async () => {
+  const harness = createHarness();
+  const file = memoryImage();
+  imageEntries(harness, [file]);
+  harness.state.imageAssetFiles.set('alias.png', file);
+  for (let index = 0; index < 100; index += 1) {
+    assert.equal(harness.api.resolveImageAssetUrl(index % 2 ? './picture.png' : 'alias.png'), '');
+  }
+  const url = await loadedImage(harness, 'picture.png');
+  assert.equal(harness.api.resolveImageAssetUrl('./picture.png'), url);
+  assert.equal(harness.api.resolveImageAssetUrl('alias.png'), url);
+  assert.equal(harness.api.resolveImageAssetUrl(url), url);
+  assert.equal(file.readCalls, 1);
+  assert.equal(harness.effects.createdUrls.length, 1);
+  assert.equal(harness.state.assetUrls.get('./picture.png'), url);
+  assert.equal(harness.api.resolveImageAssetUrl('blob:unowned'), '');
+  assert.equal(harness.api.getImageInfo('blob:unowned'), null);
+});
+
+for (const [name, file, reason] of [
+  ['SVG bytes named PNG', memoryFile('fake.png', '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>', 'image/png'), /PNG、JPEG/],
+  ['truncated PNG', memoryImage('short.png', PNG_BYTES.slice(0, 30)), /途中で切れ/],
+  ['MIME mismatch', memoryImage('wrong.png', PNG_BYTES, 'image/jpeg'), /MIME 型/],
+  ['extension mismatch', memoryImage('wrong.jpg'), /拡張子/],
+  ['huge dimension in a small payload', memoryImage('huge.png', pngWithDimensions(8193, 1)), /幅または高さ/],
+  ['per-image decoded pixel overflow', memoryImage('pixels.png', pngWithDimensions(4097, 4096)), /展開後の画素数/],
+]) {
+  test(`${name} is rejected before URL creation and is not retried`, async () => {
+    const harness = createHarness();
+    imageEntries(harness, [file]);
+    await rejectedImage(harness, file.name, reason);
+    for (let index = 0; index < 5; index += 1) assert.equal(harness.api.resolveImageAssetUrl(file.name), '');
+    assert.equal(file.readCalls, 1);
+    assert.equal(harness.effects.createdUrls.length, 0);
+    assert.equal(harness.state.assetUrls.size, 0);
+  });
+}
+
+test('an animated GIF over the frame limit is rejected before URL creation', async () => {
+  const header = Uint8Array.from(Buffer.from('GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff', 'binary'));
+  const frame = Uint8Array.from([0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 1, 0x4c, 0]);
+  const bytes = Uint8Array.from([...header, ...Array.from({ length: 61 }, () => [...frame]).flat(), 0x3b]);
+  const harness = createHarness();
+  const file = memoryImage('animation.gif', bytes, 'image/gif');
+  imageEntries(harness, [file]);
+  await rejectedImage(harness, file.name, /フレーム数/);
+  assert.equal(harness.effects.createdUrls.length, 0);
+});
+
+for (const [name, type] of [['photo.PNG', 'application/octet-stream'], ['picture', 'image/png'], ['empty-mime.png', '']]) {
+  test(`valid PNG bytes with ${name} and ${type || 'empty MIME'} are accepted canonically`, async () => {
+    const harness = createHarness();
+    const file = memoryImage(name, PNG_BYTES, type);
+    imageEntries(harness, [file]);
+    const url = await loadedImage(harness, name);
+    assert.equal(harness.api.getImageInfo(url).mimeType, 'image/png');
+    assert.equal(harness.effects.createdUrls[0].blob.type, 'image/png');
+  });
+}
+
+test('queued validations read one image at a time', async () => {
+  const harness = createHarness();
+  const first = memoryImage('first.png');
+  const second = memoryImage('second.png');
+  const pending = pause();
+  first.readPause = pending;
+  imageEntries(harness, [first, second]);
+  harness.api.resolveImageAssetUrl(first.name);
+  harness.api.resolveImageAssetUrl(second.name);
+  await pending.entered;
+  assert.equal(first.readCalls, 1);
+  assert.equal(second.readCalls, 0);
+  assert.equal(harness.effects.createdUrls.length, 0);
+  pending.release();
+  await loadedImage(harness, second.name);
+  assert.equal(second.readCalls, 1);
+  assert.equal(harness.effects.createdUrls.length, 1, 'only the image requested after validation should get a URL');
+});
+
+test('failed admission attempts consume the 64-image budget before a 65th read', async () => {
+  const harness = createHarness();
+  const files = Array.from({ length: 65 }, (_, index) => memoryFile(`${index}.png`, '<svg/>', 'image/png'));
+  imageEntries(harness, files);
+  for (const file of files) harness.api.resolveImageAssetUrl(file.name);
+  await until(() => /PNG、JPEG/.test(harness.api.imageAssetReason('63.png')), '64 failed admissions');
+  assert.equal(files.slice(0, 64).reduce((count, file) => count + file.readCalls, 0), 64);
+  assert.equal(files[64].readCalls, 0);
+  assert.equal(harness.api.resolveImageAssetUrl('64.png'), '');
+  assert.equal(harness.effects.createdUrls.length, 0);
+});
+
+test('declared file sizes reserve the 64 MiB aggregate budget even when reads are invalid', async () => {
+  const harness = createHarness();
+  const sizes = [25, 25, 14].map((mib) => mib * 1024 * 1024);
+  const files = sizes.map((size, index) => Object.assign(memoryImage(`${index}.png`), { size }));
+  const blocked = memoryImage('blocked.png');
+  imageEntries(harness, [...files, blocked]);
+  for (const file of files) await rejectedImage(harness, file.name, /画像サイズを確認/);
+  await rejectedImage(harness, blocked.name, /合計サイズ/);
+  assert.deepEqual(files.map((file) => file.readCalls), [1, 1, 1]);
+  assert.equal(blocked.readCalls, 0, 'no further arrayBuffer call is allowed after the aggregate byte budget');
+  assert.equal(harness.effects.createdUrls.length, 0);
+});
+
+test('oversized or invalid file sizes cannot reach arrayBuffer through insertion', async () => {
+  const harness = createHarness();
+  for (const size of [0, -1, NaN, Infinity, 1.5, 25 * 1024 * 1024 + 1]) {
+    const file = Object.assign(memoryImage('oversized.png'), { size });
+    await assert.rejects(harness.api.saveImageFileToAssets(file), /サイズ/);
+    assert.equal(file.readCalls, 0);
+  }
+  assert.equal(harness.effects.createdUrls.length, 0);
+});
+
+test('accepted images share the 32-million-pixel aggregate limit', async () => {
+  const harness = createHarness();
+  const first = memoryImage('first.png', pngWithDimensions(4096, 4096));
+  const second = memoryImage('second.png', pngWithDimensions(4096, 4096));
+  const overflow = memoryImage('overflow.png');
+  imageEntries(harness, [first, second, overflow]);
+  const firstUrl = await loadedImage(harness, first.name);
+  const secondUrl = await loadedImage(harness, second.name);
+  assert.equal(harness.api.getImageInfo(firstUrl).pixels + harness.api.getImageInfo(secondUrl).pixels, 32 * 1024 * 1024);
+  await rejectedImage(harness, overflow.name, /合計画素数/);
+  assert.equal(harness.effects.createdUrls.length, 2);
+});
+
+test('embedded raster data is validated once and receives an owned canonical URL', async () => {
+  const harness = createHarness();
+  const key = `data:image/PNG;base64,${Buffer.from(PNG_BYTES).toString('base64')}`;
+  assert.equal(harness.api.getImageExportSrc(key), '', 'raw data is never accepted by the export URL getter');
+  const url = await loadedImage(harness, key);
+  assert.equal(harness.api.resolveImageAssetUrl(key), url);
+  assert.equal(harness.effects.createdUrls.length, 1);
+  assert.equal(harness.api.getImageInfo(url).width, 1);
+  assert.equal(harness.state.assetUrls.size, 0);
+  assert.equal(harness.effects.fetches.length, 0);
+  assert.equal(harness.api.getImageExportSrc(url), key.replace('image/PNG', 'image/png'),
+    'export preserves approved embedded bytes with the validated MIME type');
+  assert.equal(harness.api.getImageExportSrc('blob:unowned'), '');
+  harness.api.clearAssetUrls();
+  assert.equal(harness.api.getImageExportSrc(url), '', 'an old document cannot supply export image data');
+});
+
+test('embedded data URLs above the existing source URL limit cannot become export payloads', async () => {
+  const harness = createHarness();
+  const key = 'data:image/png;base64,' + 'AAAA'.repeat(50000);
+  await rejectedImage(harness, key, /URLが表示上限/);
+  const normalizedOversize = 'data:image/jpg;base64,' + 'A'.repeat(200000 - 'data:image/jpg;base64,'.length);
+  assert.equal(normalizedOversize.length, 200000);
+  await rejectedImage(harness, normalizedOversize, /URLが表示上限/);
+  assert.equal(harness.effects.createdUrls.length, 0);
+  assert.equal(harness.api.getImageExportSrc(key), '');
+});
+
+for (const key of [
+  'data:image/svg+xml;base64,PHN2Zy8+', 'data:image/png;base64,PHN2Zy8+',
+  'data:image/png,percent-encoded', 'data:image/png;base64,%%%bad',
+]) {
+  test(`invalid embedded image ${key} is never displayed or fetched`, async () => {
+    const harness = createHarness();
+    await rejectedImage(harness, key, /不正|PNG、JPEG/);
+    assert.equal(harness.effects.createdUrls.length, 0);
+    assert.equal(harness.effects.fetches.length, 0);
+  });
+}
+
+test('the five-second read deadline releases the next queued image and rejects late bytes', async () => {
+  const harness = createHarness({ manualImageTimeout: true });
+  const pending = pause();
+  const stalled = memoryImage('stalled.png');
+  stalled.readPause = pending;
+  const next = memoryImage('next.png');
+  imageEntries(harness, [stalled, next]);
+  harness.api.resolveImageAssetUrl(stalled.name);
+  harness.api.resolveImageAssetUrl(next.name);
+  await pending.entered;
+  assert.equal(next.readCalls, 0);
+  assert.equal(harness.controls.imageTimeouts.size, 1, 'the production read deadline must be armed for 5000 ms');
+  for (const callback of harness.controls.imageTimeouts.values()) callback();
+  await rejectedImage(harness, stalled.name, /タイムアウト/);
+  const nextUrl = await loadedImage(harness, next.name);
+  pending.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.api.resolveImageAssetUrl(stalled.name), '');
+  assert.equal(harness.api.resolveImageAssetUrl(next.name), nextUrl);
+  assert.equal(harness.effects.createdUrls.length, 1);
+  assert.equal(harness.controls.imageTimeouts.size, 0);
+});
+
+test('replacement cancels stalled image insertion without waiting for the old file read', async () => {
+  const harness = createHarness();
+  await harness.api.restorePersistedDirectoryHandle();
+  const pending = pause();
+  const file = memoryImage('stale.png');
+  file.readPause = pending;
+  const completion = harness.api.saveImageFileToAssets(file);
+  const rejected = assert.rejects(completion, /文書が切り替わった/);
+  await pending.entered;
+  bindNewDocument(harness);
+  await bounded(rejected, 'cancelled image insertion');
+  const expected = visibleState(harness);
+  pending.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assertUnchanged(harness, expected, 'late cancelled insertion read');
+  assert.equal(harness.oldRoot.directories.size, 0);
+  assert.equal(harness.effects.createdUrls.length, 0);
+});
+
+test('replacement drops queued old reads and gives the new document an independent validation queue', async () => {
+  const harness = createHarness();
+  const pending = pause();
+  const first = memoryImage('first.png');
+  first.readPause = pending;
+  const queued = memoryImage('queued.png');
+  imageEntries(harness, [first, queued]);
+  harness.api.resolveImageAssetUrl(first.name);
+  harness.api.resolveImageAssetUrl(queued.name);
+  await pending.entered;
+  bindNewDocument(harness);
+  const fresh = memoryImage('fresh.png');
+  imageEntries(harness, [fresh]);
+  const url = await loadedImage(harness, fresh.name);
+  assert.equal(queued.readCalls, 0);
+  assert.equal(fresh.readCalls, 1);
+  const expected = visibleState(harness);
+  const imageRenders = harness.effects.imageRenders;
+  pending.reject(namedError('NotReadableError'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assertUnchanged(harness, expected, 'rejected late read from cancelled queue');
+  assert.equal(harness.effects.imageRenders, imageRenders);
+  assert.equal(harness.api.resolveImageAssetUrl(fresh.name), url);
+  assert.equal(harness.api.resolveImageAssetUrl(first.name), '');
+  assert.equal(queued.readCalls, 0);
+});
+
+test('replacing a document revokes each owned URL exactly once and invalidates metadata', async () => {
+  const harness = createHarness();
+  await harness.api.restorePersistedDirectoryHandle();
+  const url = await loadedImage(harness, 'old-root.png');
+  assert.equal(harness.api.resolveImageAssetUrl('./old-root.png'), url);
+  bindNewDocument(harness);
+  assert.deepEqual(harness.effects.revokedUrls, [url]);
+  assert.equal(harness.api.resolveImageAssetUrl(url), '');
+  assert.equal(harness.api.getImageInfo(url), null);
+  assert.equal(harness.state.imageAssetFiles.size, 0);
+  assert.equal(harness.state.assetUrls.size, 0);
+  harness.api.clearAssetUrls();
+  assert.deepEqual(harness.effects.revokedUrls, [url]);
+});
+
+test('a slow old-root image cannot publish into a newer folder with the same image path', async () => {
+  const harness = createHarness();
+  const first = memoryRoot('first', '# First');
+  const second = memoryRoot('second', '# Second');
+  const oldImage = memoryImage('shared.png');
+  const newImage = memoryImage('shared.png', pngWithDimensions(2, 1));
+  const pending = pause();
+  oldImage.readPause = pending;
+  first.addFile(oldImage);
+  second.addFile(newImage);
+  await openRoot(harness, first);
+  harness.api.resolveImageAssetUrl('shared.png');
+  await pending.entered;
+  await openRoot(harness, second);
+  const url = await loadedImage(harness, 'shared.png');
+  const expected = visibleState(harness);
+  pending.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assertUnchanged(harness, expected, 'old image validation');
+  assert.equal(harness.api.getImageInfo(url).width, 2);
+  assert.equal(newImage.readCalls, 1);
+  assert.equal(harness.effects.createdUrls.length, 1);
+});
+
+test('image insertion writes validated canonical bytes and leaves the URL lazy', async () => {
+  const harness = createHarness();
+  await harness.api.restorePersistedDirectoryHandle();
+  const file = memoryImage('photo.PNG', PNG_BYTES, 'application/octet-stream');
+  const saved = await harness.api.saveImageFileToAssets(file);
+  assert.equal(saved.markdownPath, 'draft.assets/photo.png');
+  assert.equal(saved.fileName, 'photo.png');
+  assert.equal(file.readCalls, 1);
+  assert.equal(harness.effects.createdUrls.length, 0);
+  const canonical = harness.state.imageAssetFiles.get(saved.markdownPath);
+  assert.equal(canonical.type, 'image/png');
+  assert.deepEqual(new Uint8Array(await canonical.arrayBuffer()), PNG_BYTES);
+  const assets = harness.oldRoot.directories.get('draft.assets');
+  assert.equal(assets.writes.length, 1);
+  assert.equal(assets.writes[0].path, 'photo.png');
+  const url = harness.api.resolveImageAssetUrl(saved.markdownPath);
+  assert.ok(url.startsWith('blob:'));
+  assert.equal(harness.api.getImageInfo(url).width, 1);
+  assert.equal(file.readCalls, 1, 'saved images must reuse their completed validation');
+});
+
+test('desktop insertion sends validated canonical bytes and publishes only after native save succeeds', async () => {
+  const harness = createHarness();
+  Object.assign(harness.state, { desktopHost: true, desktopDocumentReady: true });
+  harness.api.initializeDesktopBridge();
+  const file = memoryImage('photo.PNG', PNG_BYTES, 'application/octet-stream');
+  const completion = harness.api.saveImageFileToAssets(file);
+  await until(() => harness.effects.desktopMessages.some((message) => message.type === 'desktop.saveAsset'), 'desktop asset request');
+  const message = harness.effects.desktopMessages.find((entry) => entry.type === 'desktop.saveAsset');
+  assert.equal(message.fileName, 'photo.PNG');
+  assert.equal(message.mimeType, 'image/png');
+  assert.deepEqual(Uint8Array.from(Buffer.from(message.dataBase64, 'base64')), PNG_BYTES);
+  assert.equal(file.readCalls, 1);
+  assert.equal(harness.effects.canonicalBlobReads, 1);
+  assert.equal(harness.state.desktopAssetRequests.size, 1);
+  assert.equal(harness.state.imageAssetFiles.size, 0, 'a pending native write cannot publish a saved asset');
+  assert.equal(harness.effects.createdUrls.length, 0);
+  harness.controls.desktopMessage({ data: {
+    type: 'host.assetSaved', requestId: message.requestId,
+    fileName: 'photo.png', markdownPath: 'draft.assets/photo.png',
+  } });
+  const saved = await completion;
+  assert.equal(saved.markdownPath, 'draft.assets/photo.png');
+  assert.equal(harness.state.desktopAssetRequests.size, 0);
+  assert.equal(harness.state.imageAssetFiles.get(saved.markdownPath).type, 'image/png');
+  assert.equal(harness.effects.createdUrls.length, 0, 'successful native saves retain lazy URLs');
+  const nativeUrl = `https://${NATIVE_DOCUMENT_HOST}/${saved.markdownPath}`;
+  const url = harness.api.resolveImageAssetUrl(saved.markdownPath, nativeUrl);
+  const info = harness.api.getImageInfo(url);
+  assert.equal(info.width, 1);
+  assert.equal(harness.api.resolveImageAssetUrl(saved.markdownPath), url, 'native rendering reuses the saved canonical URL');
+  assert.equal(harness.api.getImageInfo(harness.api.resolveImageAssetUrl(saved.markdownPath, nativeUrl)), info);
+  assert.equal(harness.api.getImageExportSrc(url), url, 'folder and native images keep their existing output behavior');
+  assert.equal(harness.effects.fetches.length, 0, 'a newly saved native image must not be fetched and counted a second time');
+  assert.equal(harness.effects.canonicalBlobReads, 1, 'rendering must reuse the successful validation');
+  assert.equal(harness.effects.desktopMessages.filter((entry) => entry.type === 'desktop.saveAsset').length, 1);
+});
+
+test('desktop insertion cannot send an old asset after canonical Blob reading spans a document switch', async () => {
+  const harness = createHarness();
+  Object.assign(harness.state, { desktopHost: true, desktopDocumentReady: true });
+  harness.api.initializeDesktopBridge();
+  const pending = pause();
+  harness.controls.canonicalBlobPause = pending;
+  const file = memoryImage('stale.png');
+  const completion = harness.api.saveImageFileToAssets(file);
+  const rejected = assert.rejects(completion, /文書が切り替わった/);
+  await pending.entered;
+  assert.equal(file.readCalls, 1, 'the original image must already have passed validation');
+  assert.equal(harness.effects.canonicalBlobReads, 1, 'pause the post-validation Blob conversion');
+  harness.controls.desktopMessage({ data: {
+    type: 'host.loadDocument', fileName: 'newer.md', markdown: '# Newer desktop document',
+    hasDocumentFolder: true, dirty: false,
+  } });
+  const expected = visibleState(harness);
+  pending.release();
+  await rejected;
+  assert.equal(harness.effects.desktopMessages.filter((entry) => entry.type === 'desktop.saveAsset').length, 0);
+  assert.equal(harness.state.desktopAssetRequests.size, 0, 'stale conversion cannot leave an outstanding native request');
+  assert.equal(harness.state.imageAssetFiles.size, 0);
+  assert.equal(harness.effects.createdUrls.length, 0);
+  assertUnchanged(harness, expected, 'late desktop Blob conversion');
+});
+
+test('invalid inserted bytes cannot create an asset directory or file', async () => {
+  const harness = createHarness();
+  await harness.api.restorePersistedDirectoryHandle();
+  await assert.rejects(harness.api.saveImageFileToAssets(memoryFile('fake.png', '<svg/>', 'image/png')), /PNG、JPEG/);
+  assert.equal(harness.oldRoot.directories.size, 0);
+  assert.equal(harness.effects.createdUrls.length, 0);
+});
+
+test('switching documents while the assets directory is pending prevents file writes and publication', async () => {
+  const harness = createHarness();
+  await harness.api.restorePersistedDirectoryHandle();
+  const pending = pause();
+  const assets = emptyRoot('old-assets');
+  harness.oldRoot.getDirectoryHandle = async (name) => {
+    assert.equal(name, 'draft.assets');
+    await pending.wait();
+    return assets;
+  };
+  const completion = harness.api.saveImageFileToAssets(memoryImage('pending.png'));
+  const rejected = assert.rejects(completion, /文書が切り替わった/);
+  await pending.entered;
+  const newer = memoryRoot('newer');
+  await openRoot(harness, newer);
+  const expected = visibleState(harness);
+  pending.release();
+  await rejected;
+  assertUnchanged(harness, expected, 'pending old assets directory');
+  assert.equal(assets.files.size, 0);
+  assert.equal(assets.writes.length, 0);
+  assert.equal(newer.directories.size, 0);
+  assert.equal(harness.effects.createdUrls.length, 0);
+});
+
+test('native image responses are streamed, validated and retained as owned canonical blobs', async () => {
+  const harness = createHarness();
+  harness.state.desktopHost = true;
+  harness.state.desktopDocumentReady = true;
+  const nativeUrl = `https://${NATIVE_DOCUMENT_HOST}/folder/photo%20one.PNG`;
+  const stream = nativeImageResponse([PNG_BYTES.slice(0, 15), PNG_BYTES.slice(15)], 'application/octet-stream');
+  harness.controls.fetch = async () => stream.response;
+  const url = await loadedImage(harness, 'photo one.PNG', nativeUrl);
+  assert.equal(harness.effects.fetches.length, 1);
+  assert.equal(harness.effects.fetches[0].url, nativeUrl);
+  assert.equal(harness.effects.fetches[0].init.credentials, 'omit');
+  assert.equal(harness.effects.fetches[0].init.redirect, 'error');
+  assert.equal(harness.effects.fetches[0].init.cache, 'no-store');
+  assert.ok(harness.effects.fetches[0].init.signal instanceof AbortSignal);
+  assert.equal(stream.calls.reads, 3);
+  assert.equal(stream.calls.cancels, 1);
+  assert.equal(harness.api.getImageInfo(url).mimeType, 'image/png');
+  assert.equal(harness.effects.createdUrls[0].blob.type, 'image/png');
+  assert.deepEqual(new Uint8Array(await harness.effects.createdUrls[0].blob.arrayBuffer()), PNG_BYTES);
+  assert.equal(harness.api.resolveImageAssetUrl('second alias', nativeUrl), url);
+  assert.equal(harness.effects.fetches.length, 1);
+});
+
+for (const [name, nativeUrl, desktopHost, desktopDocumentReady] of [
+  ['HTTP', `http://${NATIVE_DOCUMENT_HOST}/photo.png`, true, true],
+  ['foreign host', 'https://external.example/photo.png', true, true],
+  ['credentials', `https://user:password@${NATIVE_DOCUMENT_HOST}/photo.png`, true, true],
+  ['file scheme', 'file:///C:/photo.png', true, true],
+  ['invalid URL', 'not a URL', true, true],
+  ['missing desktop host', `https://${NATIVE_DOCUMENT_HOST}/photo.png`, false, true],
+  ['document not ready', `https://${NATIVE_DOCUMENT_HOST}/photo.png`, true, false],
+]) {
+  test(`native image ${name} is refused before fetch`, async () => {
+    const harness = createHarness();
+    Object.assign(harness.state, { desktopHost, desktopDocumentReady });
+    assert.equal(harness.api.resolveImageAssetUrl('photo.png', nativeUrl), '');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(harness.effects.fetches.length, 0);
+    assert.equal(harness.effects.createdUrls.length, 0);
+  });
+}
+
+test('a native stream exceeding 25 MiB is cancelled before subsequent chunks are read', async () => {
+  const harness = createHarness();
+  Object.assign(harness.state, { desktopHost: true, desktopDocumentReady: true });
+  const nativeUrl = `https://${NATIVE_DOCUMENT_HOST}/large.png`;
+  const stream = nativeImageResponse([new Uint8Array(25 * 1024 * 1024 + 1), PNG_BYTES]);
+  harness.controls.fetch = async () => stream.response;
+  await rejectedImage(harness, 'large.png', /サイズ上限/, nativeUrl);
+  assert.equal(stream.calls.reads, 1);
+  assert.equal(stream.calls.cancels, 1);
+  assert.equal(harness.effects.fetches[0].init.signal.aborted, true);
+  assert.equal(harness.effects.createdUrls.length, 0);
+});
+
+test('replacement aborts a pending native read and cannot publish its late completion', async () => {
+  const harness = createHarness();
+  Object.assign(harness.state, { desktopHost: true, desktopDocumentReady: true });
+  const pending = pause();
+  let cancelled = 0;
+  const oldUrl = `https://${NATIVE_DOCUMENT_HOST}/old.png`;
+  const newUrl = `https://${NATIVE_DOCUMENT_HOST}/new.png`;
+  harness.controls.fetch = async (url) => url === oldUrl ? {
+    ok: true,
+    headers: { get: () => 'image/png' },
+    body: { getReader: () => ({
+      async read() { await pending.wait(); return { value: PNG_BYTES, done: false }; },
+      async cancel() { cancelled += 1; },
+    }) },
+  } : nativeImageResponse([PNG_BYTES]).response;
+  harness.api.resolveImageAssetUrl('old.png', oldUrl);
+  await pending.entered;
+  bindNewDocument(harness);
+  const url = await loadedImage(harness, 'new.png', newUrl);
+  assert.equal(harness.effects.fetches[0].init.signal.aborted, true);
+  const expected = visibleState(harness);
+  const imageRenders = harness.effects.imageRenders;
+  pending.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(cancelled, 1);
+  assertUnchanged(harness, expected, 'late native stream completion');
+  assert.equal(harness.effects.imageRenders, imageRenders);
+  assert.equal(harness.effects.createdUrls.length, 1);
+  assert.equal(harness.api.resolveImageAssetUrl('new.png', newUrl), url);
+});
+
+for (const [name, mimeType, suffix, reason] of [
+  ['MIME mismatch', 'image/jpeg', 'png', /MIME 型/],
+  ['extension mismatch', 'image/png', 'jpg', /拡張子/],
+]) {
+  test(`native image ${name} is rejected using response metadata and the decoded path`, async () => {
+    const harness = createHarness();
+    Object.assign(harness.state, { desktopHost: true, desktopDocumentReady: true });
+    const nativeUrl = `https://${NATIVE_DOCUMENT_HOST}/photo.${suffix}`;
+    const stream = nativeImageResponse([PNG_BYTES], mimeType);
+    harness.controls.fetch = async () => stream.response;
+    await rejectedImage(harness, `photo.${suffix}`, reason, nativeUrl);
+    assert.equal(stream.calls.cancels, 1);
+    assert.equal(harness.effects.createdUrls.length, 0);
+  });
+}
 
 let passed = 0;
 for (const { name, run } of tests) {

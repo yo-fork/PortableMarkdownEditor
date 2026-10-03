@@ -118,7 +118,7 @@ const codeMirrorSource = read('vendor/codemirror6/source-editor.js');
 const codeMirrorBundle = read('vendor/codemirror6/source-editor.bundle.js');
 
 assert.doesNotMatch(index, /<(?:script|link)\b[^>]+(?:src|href)=["']https?:\/\//i, 'index.html must not load remote JS/CSS');
-assert.match(index, /connect-src 'none'/, 'CSP must keep connect-src none');
+assert.match(index, /connect-src https:\/\/document\.portable-markdown-editor\.local;/, 'CSP must restrict fetch to the intercepted native image endpoint');
 assert.match(index, /script-src 'self'/, 'CSP must keep script-src self');
 assert.doesNotMatch(index, /script-src[^"]*sha256-/, 'CSP should not need an import-map hash for CodeMirror');
 assert.doesNotMatch(index, /type="importmap"/, 'CodeMirror should load through a local classic bundle instead of an import map');
@@ -138,7 +138,9 @@ assert.match(index, /data-format="strikethrough"[\s\S]+Control\+Shift\+X/, 'tool
 
 assert.doesNotMatch(app, /\beval\b/, 'app.js must not contain eval');
 assert.doesNotMatch(app, /new\s+Function\b/, 'app.js must not contain new Function');
-assert.doesNotMatch(app, /\bfetch\b/, 'app.js must not contain fetch');
+assert.equal((app.match(/\bfetch\s*\(/g) || []).length, 1, 'only the native raster transport may fetch');
+assert.match(app, /window\.fetch\(input\.nativeUrl, \{ credentials: 'omit', redirect: 'error', cache: 'no-store', signal \}\)/);
+assert.match(app, /target\.host !== DESKTOP_DOCUMENT_HOST/);
 assert.doesNotMatch(app, /XMLHttpRequest/, 'app.js must not contain XMLHttpRequest');
 assert.doesNotMatch(app, /WebSocket/, 'app.js must not contain WebSocket');
 assert.doesNotMatch(app, /\bWorker\b/, 'app.js must not contain Worker');
@@ -220,13 +222,13 @@ assert.match(proseMirrorBundle, /list_item:\s*function\(state, node\)[\s\S]+\[x\
 assert.doesNotMatch(proseMirrorBundle, /'Mod-[0-6]'|'Mod-b'|'Mod-i'|'Shift-Mod-[789]'/, 'configurable formatting shortcuts must not remain hard-coded in ProseMirror');
 assert.match(proseMirrorBundle, /'Mod-z': historyModule\.undo[\s\S]+'Mod-y': historyModule\.redo/, 'ProseMirror should retain editor-native undo and redo shortcuts');
 assert.match(proseMirrorBundle, /var delimiter = [^;]+\\\\\[/, 'ProseMirror display math parsing should recognize bracket delimiters');
-assert.match(proseMirrorBundle, /function\s+ImageNodeView\(node, editorView, getPos, options\)[\s\S]+data-pme-atom-node', 'image'[\s\S]+this\.render\(\)/, 'ProseMirror rich editor should render images through a node view');
-assert.match(proseMirrorBundle, /function\s+resolveImageNodeSrc\(src, options\)[\s\S]+options\.resolveImageSrc\(src\)/, 'ProseMirror image node views should resolve Markdown image src values through the app callback');
+assert.match(proseMirrorBundle, /function\s+ImageNodeView\(node, editorView, getPos, options, getImageSrc\)[\s\S]+data-pme-atom-node', 'image'[\s\S]+this\.render\(\)/, 'ProseMirror rich editor should render images through a node view');
+assert.match(proseMirrorBundle, /function\s+resolveImageNodeSrc\(src, options, budget, token\)[\s\S]+options\.resolveImageSrc\(src\)[\s\S]+options\.getImageInfo\(resolved\)[\s\S]+budget\.reserve\(info, token\)/, 'ProseMirror image node views should resolve and budget validated images through the app callbacks');
 assert.match(proseMirrorBundle, /ImageNodeView\.prototype\.render[\s\S]+image\.src = resolved[\s\S]+blocked-image[\s\S]+imageFallbackText/, 'ProseMirror image node views should show resolved images or blocked-image placeholders');
 assert.match(proseMirrorBundle, /function\s+parseImageSourceEditorValue\(value\)[\s\S]+source\.match\([\s\S]+src:[\s\S]+alt:[\s\S]+title:/, 'ProseMirror image node views should parse editable Markdown image source');
 assert.match(proseMirrorBundle, /function\s+updateImageNodeViewSource\(nodeView, value\)[\s\S]+updateNodeViewAttrs\(nodeView\.editorView, nodeView\.getPos, nodeView\.node, attrs\)/, 'ProseMirror image source editing should update image node attrs through a transaction');
-assert.match(proseMirrorBundle, /function\s+ImageNodeView\(node, editorView, getPos, options\)[\s\S]+createNodeSourceEditor\(\{[\s\S]+pme-node-source-editor--image[\s\S]+onConfirm:[\s\S]+setSelectionAfterNodeView/, 'ProseMirror image node views should expose direct Markdown source editing in rich mode');
-assert.match(proseMirrorBundle, /function\s+ImageNodeView\(node, editorView, getPos, options\)[\s\S]+this\.dom\.setAttribute\('contenteditable', 'false'\)[\s\S]+this\.sourceEditor = createNodeSourceEditor/, 'rendered images should stay display-only so their source popover is the sole image link editor');
+assert.match(proseMirrorBundle, /function\s+ImageNodeView\(node, editorView, getPos, options, getImageSrc\)[\s\S]+createNodeSourceEditor\(\{[\s\S]+pme-node-source-editor--image[\s\S]+onConfirm:[\s\S]+setSelectionAfterNodeView/, 'ProseMirror image node views should expose direct Markdown source editing in rich mode');
+assert.match(proseMirrorBundle, /function\s+ImageNodeView\(node, editorView, getPos, options, getImageSrc\)[\s\S]+this\.dom\.setAttribute\('contenteditable', 'false'\)[\s\S]+this\.sourceEditor = createNodeSourceEditor/, 'rendered images should stay display-only so their source popover is the sole image link editor');
 assert.match(proseMirrorBundle, /verticalBoundaryExit:\s*true[\s\S]+pme-node-source-editor--image/, 'image source editors should opt into up/down arrow exit behavior');
 assert.match(proseMirrorBundle, /ImageNodeView\.prototype\.stopEvent = stopNodeSourceEditorEvent[\s\S]+ImageNodeView\.prototype\.selectNode = selectAtomSourceNode[\s\S]+ImageNodeView\.prototype\.destroy = function\(\) \{ destroyNodeSourceEditor\(this\.sourceEditor\); \}/, 'ProseMirror image node source editors should own input events and clean up their popover');
 assert.match(proseMirrorBundle, /refreshImages:\s*function\(\)[\s\S]+refreshImageNodeViews\(editorView\)/, 'ProseMirror rich editor should expose image refresh for updated folder asset maps');

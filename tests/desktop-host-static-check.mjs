@@ -25,8 +25,8 @@ const portableReadme = read('../native/README-WINDOWS.txt');
 const projectReadme = read('../README.md');
 const releaseReadme = read('../release/README.md');
 
-assert.match(index, /img-src 'self' data: blob: https:\/\/document\.portable-markdown-editor\.local/);
-assert.match(index, /connect-src 'none'/);
+assert.match(index, /img-src 'self' blob:;/, 'document images must pass byte admission before a blob URL reaches the decoder');
+assert.match(index, /connect-src https:\/\/document\.portable-markdown-editor\.local;/, 'only the native document image transport may be fetched');
 assert.match(styles, /body\[data-desktop-host="true"\][\s\S]+data-action="open-folder"/);
 
 assert.match(app, /function\s+detectDesktopHost[\s\S]+currentLocation\?\.hostname === DESKTOP_APP_HOST[\s\S]+desktop=1/);
@@ -70,7 +70,18 @@ assert.match(windowXaml, /NativeStatusBar/);
 assert.match(windowXaml, /<wv2:WebView2/);
 
 assert.match(windowCode, /SetVirtualHostNameToFolderMapping\(AppHost,[\s\S]+DenyCors/);
-assert.match(windowCode, /AddWebResourceRequestedFilter\([\s\S]+DocumentHost[\s\S]+CoreWebView2WebResourceContext\.Image/);
+assert.match(windowCode, /AddWebResourceRequestedFilter\(\s*"https:\/\/" \+ DocumentHost \+ "\/\*",\s*CoreWebView2WebResourceContext\.All\)/, 'all document-host contexts must be intercepted to reject requests locally');
+const documentImageHandler = windowCode.match(/private async void Core_WebResourceRequested[\s\S]+?(?=private async Task<DocumentImageContent>)/)?.[0] || '';
+assert.match(documentImageHandler, /Headers\.Contains\("Origin"\)[\s\S]+Headers\.GetHeader\("Origin"\), AppOrigin, StringComparison\.Ordinal/, 'native image fetches must require the exact app Origin');
+assert.match(documentImageHandler, /ResourceContext != CoreWebView2WebResourceContext\.Fetch\s*&& eventArgs\.ResourceContext != CoreWebView2WebResourceContext\.XmlHttpRequest\)\s*\|\| !string\.Equals\(eventArgs\.Request\.Method, "GET", StringComparison\.Ordinal\)\s*\|\| !allowAppOrigin/, 'only same-app GET fetch requests and their WebView2 XHR classification may read document images');
+assert.match(documentImageHandler, /Uri\.TryCreate\(eventArgs\.Request\.Uri, UriKind\.Absolute, out requestUri\)[\s\S]+requestUri\.Scheme != Uri\.UriSchemeHttps[\s\S]+requestUri\.Host, DocumentHost, StringComparison\.OrdinalIgnoreCase[\s\S]+!requestUri\.IsDefaultPort[\s\S]+!string\.IsNullOrEmpty\(requestUri\.UserInfo\)/, 'native image fetches must target the fixed HTTPS origin without credentials');
+assert.match(documentImageHandler, /CreateDocumentImageResponse\(null, allowAppOrigin\);\s*return;[\s\S]+await TryReadDocumentImageAsync\(requestUri\)/, 'rejected fetches must get a local response before any file read');
+assert.match(windowCode, /private const string AppOrigin = "https:\/\/" \+ AppHost;/);
+const documentImageResponse = windowCode.match(/private CoreWebView2WebResourceResponse CreateDocumentImageResponse[\s\S]+?(?=private static void ConfigureWebViewSettings)/)?.[0] || '';
+assert.match(documentImageResponse, /image == null \? "text\/plain" : image\.ContentType/, 'successful fetches must retain the validated raster Content-Type');
+assert.match(documentImageResponse, /Cache-Control: no-store[\s\S]+X-Content-Type-Options: nosniff[\s\S]+Vary: Origin/);
+assert.match(documentImageResponse, /if \(allowAppOrigin\)\s*\{\s*headers \+= "\\r\\nAccess-Control-Allow-Origin: " \+ AppOrigin;/, 'CORS must expose success and error responses only to the fixed app origin');
+assert.doesNotMatch(documentImageResponse, /Access-Control-Allow-Credentials|Access-Control-Allow-Origin: \*/);
 assert.match(windowCode, /Core_WebResourceRequested[\s\S]+ReadDocumentImage[\s\S]+CreateWebResourceResponse/);
 assert.match(windowCode, /using \(CoreWebView2Deferral deferral = eventArgs\.GetDeferral\(\)\)/);
 assert.doesNotMatch(windowCode, /deferral\.Complete\(\)/);

@@ -17,14 +17,14 @@ const securitySample = readFileSync(new URL('../samples/security-check.md', impo
 
 assert.match(index, /Content-Security-Policy/);
 assert.match(index, /default-src 'none'/);
-assert.match(index, /connect-src 'none'/);
+assert.match(index, /connect-src https:\/\/document\.portable-markdown-editor\.local;/);
 assert.match(index, /script-src 'self'/);
 assert.doesNotMatch(index, /script-src[^"]*sha256-/, 'CodeMirror bundle should not require an import-map CSP hash');
 assert.doesNotMatch(index, /type="importmap"/, 'CodeMirror should load through the local classic bundle');
 assert.match(index, /vendor\/codemirror6\/source-editor\.bundle\.js/, 'CodeMirror should load from a vendored local bundle');
 assert.match(index, /style-src 'self' 'unsafe-inline'/);
 assert.doesNotMatch(index, /frame-ancestors/, 'frame-ancestors is ignored in meta CSP and should not be present');
-assert.match(index, /img-src 'self' data: blob:/);
+assert.match(index, /img-src 'self' blob:;/);
 assert.doesNotMatch(index, /img-src[^"]*file:/, 'file: images should not be allowed by CSP');
 assert.match(index, /vendor\/prosemirror\/prosemirror-editor\.js/, 'ProseMirror should load from a local classic script bundle');
 assert.match(index, /modules\/markdown-renderer\.js[\s\S]+app\.js/, 'the Markdown renderer module should load before the app entry point');
@@ -44,7 +44,7 @@ assert.match(app, /desktop\.resolveImageReferences/);
 assert.match(app, /function\s+renderMermaidBlock/);
 assert.match(app, /function\s+highlightCode/);
 assert.match(app, /javascript:alert\(1\)/, 'sample malicious link should exist in default markdown');
-assert.match(app, /data:image\\\/\(png\|jpeg\|jpg\|gif\|webp\)/, 'only raster data images should be allowed');
+assert.match(app, /imagePolicy\.inspectRaster/, 'all admitted image bytes must pass the shared raster policy');
 assert.match(securitySample, /https:\/\/example\.com\/tracker\.png/, 'sample remote image should be tested');
 assert.match(securitySample, /\\\\server\\share\\local sample\.webp/, 'UNC image sample should exist');
 assert.match(app, /pme_task_lists/, 'markdown-it task list extension should be enabled');
@@ -449,7 +449,7 @@ const instrumented = appEntry.replace(/\}\)\(\);\s*$/, 'return { buildExportHtml
 const draftStorage = new Map();
 const context = vm.createContext({
   document: { baseURI: 'file:///C:/PortableMarkdownEditor/index.html', body: { dataset: {} }, addEventListener() {} },
-  window: { isSecureContext: true },
+  window: { isSecureContext: true, clearTimeout, setTimeout(callback, delay) { return delay ? setTimeout(callback, delay).unref() : 0; } },
   localStorage: {
     getItem: (key) => draftStorage.get(key) ?? null,
     setItem: (key, value) => draftStorage.set(key, value),
@@ -457,6 +457,7 @@ const context = vm.createContext({
   },
   URL: TestURL,
   Blob,
+  atob,
   navigator: {},
   confirm() { return confirmResult; },
   prompt() { return ''; },
@@ -464,6 +465,7 @@ const context = vm.createContext({
   console,
 });
 vm.runInContext(readFileSync(new URL('../modules/table-policy.js', import.meta.url), 'utf8'), context);
+vm.runInContext(readFileSync(new URL('../modules/image-policy.js', import.meta.url), 'utf8'), context);
 vm.runInContext(markdownRendererModule, context);
 vm.runInContext(richEditorModule, context);
 vm.runInContext(richInputControllerModule, context);
@@ -584,8 +586,8 @@ renderer.state.desktopDocumentReady = true;
 renderer.state.desktopImageAliases.set(drivePath.toLowerCase(), 'images/local sample.webp');
 assert.equal(
   renderer.sanitizeImageUrl('Z:%5Cshare%5Clocal%20sample.webp'),
-  'https://document.portable-markdown-editor.local/images/local%20sample.webp',
-  'desktop mode should resolve a validated document-local absolute image alias',
+  '',
+  'a native path alias must not reach img before its bytes pass raster admission',
 );
 renderer.state.desktopImageAliases.clear();
 renderer.state.desktopHost = false;
@@ -647,7 +649,7 @@ assert.equal(renderer.sanitizeLinkUrl('https://docs.example.com/a'), 'https://do
 assert.equal(renderer.sanitizeLinkUrl('https://evil.example.net/a'), '');
 
 renderer.state.assetUrls.set('images/a.png', 'blob:local-image');
-assert.match(renderer.renderMarkdownHtml('![a](images/a.png)'), /src="blob:local-image"/);
+assert.doesNotMatch(renderer.renderMarkdownHtml('![a](images/a.png)'), /<img\b/, 'an unvalidated entry in the legacy URL map must not bypass admission');
 renderer.state.assetUrls.clear();
 const missingRelativeImage = renderer.renderMarkdownHtml('![image-3](sample.assets/image-3.png)');
 assert.match(missingRelativeImage, /画像未表示/, 'relative image without folder access should render an explanation');
@@ -707,17 +709,18 @@ const docsHandle = await rootHandle.getDirectoryHandle('docs', { create: true })
 renderer.state.fileName = 'sample.md';
 renderer.setDocumentBinding({ directoryHandle: rootHandle, markdownRelativePath: 'docs/sample.md', fileName: 'sample.md' });
 assert.equal(await renderer.ensureImageAssetWriteAccess(), true, 'opened folder handle should grant read/write image insertion');
-const pastedImage = new Blob(['image-bytes'], { type: 'image/png' });
+const pastedImage = new Blob([Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64')], { type: 'image/png' });
 Object.defineProperty(pastedImage, 'name', { value: 'clipboard image.png' });
 const savedImage = await renderer.saveImageFileToAssets(pastedImage);
 assert.equal(savedImage.markdownPath, 'sample.assets/clipboard image.png', 'images should be saved beside the Markdown file in a file-name assets directory');
 assert.ok(docsHandle.directories.get('sample.assets').files.has('clipboard image.png'), 'asset image should be written through the selected directory handle');
-assert.equal(docsHandle.directories.get('sample.assets').files.get('clipboard image.png').written, pastedImage, 'image bytes should be written to the allocated asset file');
+assert.deepEqual(await docsHandle.directories.get('sample.assets').files.get('clipboard image.png').written.arrayBuffer(), await pastedImage.arrayBuffer(), 'validated image bytes should be written unchanged');
 assert.match(renderer.renderMarkdownHtml(`![clipboard](<${savedImage.markdownPath}>)`), /src="blob:test-/, 'saved asset should render through the refreshed folder asset map');
 renderer.state.assetUrls.clear();
 renderer.buildFolderAssetUrls([
   { file: pastedImage, relativePath: 'docs/sample.assets/clipboard image.png' },
 ], 'docs');
+for (let attempt = 0; attempt < 20 && !renderer.sanitizeImageUrl(savedImage.markdownPath); attempt += 1) await new Promise(setImmediate);
 assert.match(renderer.renderMarkdownHtml(`![clipboard](<${savedImage.markdownPath}>)`), /src="blob:test-/, 'reopened folder entries should map assets relative to the Markdown file');
 
 const toc = renderer.renderMarkdownHtml([

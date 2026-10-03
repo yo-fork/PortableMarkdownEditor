@@ -13,6 +13,7 @@
       CONFIG_SETTINGS_FILE_NAME,
       DEFAULT_MARKDOWN,
       DESKTOP_ASSET_REQUEST_TIMEOUT_MS,
+      DESKTOP_DOCUMENT_HOST,
       DRAFT_STORAGE_PREFIX,
       FSA_DB_NAME,
       FSA_DIRECTORY_HANDLE_KEY,
@@ -74,7 +75,7 @@
       persistSettings,
       placeCaretAtPointer,
       renderAll,
-      renderMarkdownHtml,
+      renderExportHtmlBody,
       renderOutline,
       renderPreview,
       renderRich,
@@ -108,6 +109,11 @@
     let pendingFileInputGeneration = null;
     let pendingFolderInput = null;
     let activeFolderScan = null;
+    const imagePolicy = window.PMEImagePolicy;
+    if (!imagePolicy) throw new Error('Image policy module is not available');
+    let imageSession = createImageAssetSession();
+    state.imageAssetFiles = new Map();
+    let imageRefreshTimer = null;
 
     function isDocumentAccessCurrent(generation) {
       return generation === state.documentGeneration;
@@ -284,6 +290,7 @@
     }
 
     function applyDesktopSavedState(message) {
+      clearAssetUrls();
       state.fileName = safeFileName(message.fileName || state.fileName || 'untitled.md');
       state.desktopDocumentReady = message.hasDocumentFolder === true;
       setDocumentBinding({ fileName: state.fileName, markdownRelativePath: state.desktopDocumentReady ? state.fileName : '' });
@@ -416,7 +423,7 @@
         clearAssetUrls();
         buildFolderAssetUrls(entries, dirnamePath(binding.markdownRelativePath));
         renderAll('restore-folder');
-        setStatus(`${state.fileName} のフォルダ参照をFile System Access APIから復元しました。画像候補: ${state.assetUrls.size}${folderScanStatusSuffix()}`);
+        setStatus(`${state.fileName} のフォルダ参照をFile System Access APIから復元しました。画像候補: ${state.imageAssetFiles.size}${folderScanStatusSuffix()}`);
         return true;
       } catch (_) {
         if (!current()) return false;
@@ -671,15 +678,20 @@
     }
 
     async function insertImageFilesAsAssets(files, insertionContext, actionLabel) {
-      const imageFiles = Array.from(files || []).filter(isAllowedImageFile);
+      const imageFiles = [];
+      for (const file of files || []) {
+        if (imageFiles.length >= imagePolicy.LIMITS.assets) break;
+        if (isAllowedImageFile(file)) imageFiles.push(file);
+      }
       if (!imageFiles.length) {
         setStatus('PNG/JPEG/GIF/WebPのみ挿入できます');
         return false;
       }
       if (guardUnsupportedImageInsertionContext(insertionContext, actionLabel)) return false;
 
+      const generation = state.documentGeneration;
       const ready = await ensureImageAssetWriteAccess(actionLabel || '画像挿入');
-      if (!ready) return false;
+      if (!ready || !isDocumentAccessCurrent(generation)) return false;
 
       let inserted = 0;
       for (const file of imageFiles) {
@@ -689,6 +701,7 @@
         }
         try {
           const saved = await saveImageFileToAssets(file);
+          if (!isDocumentAccessCurrent(generation)) return false;
           const alt = sanitizeMarkdownLabel(stripExtension(saved.fileName));
           insertMarkdownAtImageContext(`![${alt}](${formatMarkdownTarget(saved.markdownPath)})`, insertionContext);
           inserted += 1;
@@ -758,28 +771,51 @@
     }
 
     async function saveImageFileToAssets(file) {
-      if (state.desktopHost) return saveImageFileToDesktopAssets(file);
-      const markdownDirHandle = await markdownDirectoryHandle();
-      const assetsDirName = markdownAssetsDirName();
+      const binding = state.documentBinding;
+      const session = imageSession;
+      const current = () => imageSession === session && state.documentBinding === binding
+        && isDocumentAccessCurrent(binding.generation);
+      const checkCurrent = () => { if (!current()) throw new Error('文書が切り替わったため画像挿入を中止しました'); };
+      const record = requestImageAsset(`insert:${session.records.size}`, { file }, false);
+      if (!record) throw new Error('画像の個数または合計サイズの上限に達しました');
+      await record.promise;
+      checkCurrent();
+      if (!record.info) throw new Error(record.error || '画像として検証できません');
+      if (state.desktopHost) {
+        const result = await saveImageFileToDesktopAssets(record.blob, file.name, checkCurrent);
+        checkCurrent();
+        state.imageAssetFiles.set(result.markdownPath, record.blob);
+        session.records.set(result.markdownPath, record);
+        return result;
+      }
+      const markdownDirHandle = await markdownDirectoryHandle(binding);
+      checkCurrent();
+      const assetsDirName = `${stripExtension(safeFileName(binding.fileName))}.assets`;
       const assetsDirHandle = await markdownDirHandle.getDirectoryHandle(assetsDirName, { create: true });
+      checkCurrent();
       const allocated = await allocateAssetFileHandle(assetsDirHandle, assetFileName(file));
+      checkCurrent();
       const writable = await allocated.handle.createWritable();
       try {
-        await writable.write(file);
+        checkCurrent();
+        await writable.write(record.blob);
       } finally {
         await writable.close();
       }
-
+      checkCurrent();
       const markdownPath = normalizeAssetPath(`${assetsDirName}/${allocated.fileName}`);
-      setAssetUrl(markdownPath, file);
+      state.imageAssetFiles.set(markdownPath, record.blob);
+      session.records.set(markdownPath, record);
       return { fileName: allocated.fileName, markdownPath };
     }
 
-    async function saveImageFileToDesktopAssets(file) {
+    async function saveImageFileToDesktopAssets(file, fileName, checkCurrent) {
       if (!state.desktopDocumentReady) throw new Error('先にMarkdownファイルを保存してください');
       const requestId = `asset-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       const buffer = await file.arrayBuffer();
+      checkCurrent();
       const dataBase64 = arrayBufferToBase64(buffer);
+      checkCurrent();
       const result = new Promise((resolve, reject) => {
         const timer = window.setTimeout(() => {
           state.desktopAssetRequests.delete(requestId);
@@ -790,7 +826,7 @@
       if (!postDesktopMessage({
         type: 'desktop.saveAsset',
         requestId,
-        fileName: safeFileName(file.name || 'image.png'),
+        fileName: safeFileName(fileName || 'image.png'),
         mimeType: String(file.type || ''),
         dataBase64,
       })) {
@@ -809,8 +845,7 @@
       return btoa(binary);
     }
 
-    async function markdownDirectoryHandle() {
-      const binding = state.documentBinding;
+    async function markdownDirectoryHandle(binding = state.documentBinding) {
       if (!binding.directoryHandle) throw new Error('フォルダが開かれていません');
       let handle = binding.directoryHandle;
       const parts = dirnamePath(binding.markdownRelativePath).split('/').filter(Boolean);
@@ -887,15 +922,6 @@
         fileName,
         handle: await directoryHandle.getFileHandle(fileName, { create: true }),
       };
-    }
-
-    function setAssetUrl(relativePath, file) {
-      const relative = normalizeAssetPath(relativePath);
-      const previous = state.assetUrls.get(relative);
-      if (previous?.startsWith?.('blob:')) URL.revokeObjectURL(previous);
-      const url = URL.createObjectURL(file);
-      state.assetUrls.set(relative, url);
-      state.assetUrls.set(`./${relative}`, url);
     }
 
     function insertMarkdownAtImageContext(markdown, context) {
@@ -1148,7 +1174,7 @@
         if (!isDocumentAccessCurrent(generation)) return false;
         renderAll('open-file-existing-folder');
         persistDraft();
-        setStatus(`${state.fileName} を開きました。既存のフォルダ許可を使用しています (${state.directoryName || 'selected folder'})。画像候補: ${state.assetUrls.size}${folderScanStatusSuffix()}`);
+        setStatus(`${state.fileName} を開きました。既存のフォルダ許可を使用しています (${state.directoryName || 'selected folder'})。画像候補: ${state.imageAssetFiles.size}${folderScanStatusSuffix()}`);
         return true;
       } catch (_) {
         return false;
@@ -1223,7 +1249,7 @@
       if (!isDocumentAccessCurrent(generation)) return false;
       renderAll('open-file-folder');
       persistDraft();
-      setStatus(`${state.fileName} を開きました。フォルダ参照を許可済み (${state.directoryName || 'selected folder'})。画像候補: ${state.assetUrls.size}${folderScanStatusSuffix()}`);
+      setStatus(`${state.fileName} を開きました。フォルダ参照を許可済み (${state.directoryName || 'selected folder'})。画像候補: ${state.imageAssetFiles.size}${folderScanStatusSuffix()}`);
       return true;
     }
 
@@ -1349,7 +1375,7 @@
       }
       if (!isDocumentAccessCurrent(generation)) return;
       const access = directoryHandle ? 'File System Access API' : 'フォルダ入力';
-      setStatus(`${state.fileName} の編集中内容を維持したままフォルダを許可しました (${access})。画像候補: ${state.assetUrls.size}${folderScanStatusSuffix()}`);
+      setStatus(`${state.fileName} の編集中内容を維持したままフォルダを許可しました (${access})。画像候補: ${state.imageAssetFiles.size}${folderScanStatusSuffix()}`);
     }
 
     async function findCurrentMarkdownEntry(entries) {
@@ -1693,7 +1719,7 @@
           await clearPersistedDirectoryHandle(generation);
         }
         if (!isDocumentAccessCurrent(generation)) return;
-        const count = state.assetUrls.size;
+        const count = state.imageAssetFiles.size;
         const suffix = folderName ? ` (${folderName})` : '';
         const access = directoryHandle ? 'File System Access API' : 'フォルダ入力';
         const assetsHint = directoryHandle ? '。貼り付け/ドロップ画像はassetsフォルダに保存できます' : '';
@@ -1838,7 +1864,7 @@
     }
 
     async function copyHtml() {
-      const html = renderMarkdownHtml(state.markdown);
+      const html = renderExportHtmlBody(state.markdown);
       try {
         if (navigator.clipboard && window.ClipboardItem) {
           const item = new ClipboardItem({
@@ -2280,21 +2306,198 @@
 
     function buildFolderAssetUrls(entries, baseDir) {
       const base = normalizeAssetPath(baseDir);
+      let pathBytes = 0;
+      let inspected = 0;
       for (const entry of entries) {
+        if (++inspected > MAX_FOLDER_SCAN_FILES) break;
         const file = entry.file || entry;
         if (!isAllowedImageFile(file)) continue;
+        if (!Number.isSafeInteger(file.size) || file.size <= 0 || file.size > imagePolicy.LIMITS.fileBytes) continue;
         const fullPath = normalizeAssetPath(entry.relativePath || file.webkitRelativePath || file.name || '');
+        pathBytes += fullPath.length * 2;
+        if (pathBytes > MAX_FOLDER_SCAN_PATH_BYTES) break;
         const relative = makeRelativePath(base, fullPath);
         if (!relative || isUnsafeRelativePath(relative)) continue;
-        const url = URL.createObjectURL(file);
-        state.assetUrls.set(relative, url);
-        state.assetUrls.set(`./${relative}`, url);
+        // Discovery retains bounded candidates. Bytes and URLs are acquired only on reference.
+        state.imageAssetFiles.set(relative.replace(/^\.\//, ''), file);
       }
     }
 
     function clearAssetUrls() {
-      for (const url of new Set(state.assetUrls.values())) URL.revokeObjectURL(url);
+      for (const url of new Set(state.assetUrls.values())) {
+        if (!imageSession.urls.has(url)) URL.revokeObjectURL(url);
+      }
+      imageSession.close();
+      imageSession = createImageAssetSession();
+      state.imageAssetFiles.clear();
+      window.clearTimeout(imageRefreshTimer);
+      imageRefreshTimer = null;
       state.assetUrls.clear();
+    }
+
+    function createImageAssetSession() {
+      let cancel;
+      const session = {
+        records: new Map(), urls: new Map(), files: new WeakMap(), count: 0, bytes: 0, pixels: 0,
+        tail: Promise.resolve(), closed: false,
+        cancelled: new Promise((resolve) => { cancel = resolve; }),
+        close() {
+          session.closed = true;
+          cancel();
+          for (const url of session.urls.keys()) URL.revokeObjectURL(url);
+          session.records.clear();
+          session.urls.clear();
+        },
+      };
+      return session;
+    }
+
+    function getImageInfo(url) {
+      return imageSession.urls.get(url)?.info || null;
+    }
+
+    function getImageExportSrc(url) {
+      const record = imageSession.urls.get(url);
+      return record?.info ? record.exportSrc || url : '';
+    }
+
+    function imageAssetReason(key) {
+      return imageSession.records.get(key)?.error || '画像を検証中か、画像の表示上限に達しています';
+    }
+
+    function resolveImageAssetUrl(key, nativeUrl = '') {
+      if (key.startsWith('blob:')) return imageSession.urls.has(key) ? key : '';
+      if (nativeUrl) {
+        try {
+          const target = new URL(nativeUrl);
+          if (!state.desktopHost || !state.desktopDocumentReady || target.protocol !== 'https:'
+            || target.host !== DESKTOP_DOCUMENT_HOST || target.username || target.password) return '';
+        } catch (_) { return ''; }
+      }
+      const relative = normalizeAssetPath(key).replace(/^\.\//, '');
+      const data = /^data:/i.test(key);
+      const recordKey = data ? key : nativeUrl ? `native:${nativeUrl}` : relative;
+      let record = imageSession.records.get(recordKey);
+      if (!record && nativeUrl) {
+        const saved = imageSession.records.get(relative);
+        if (saved?.info && state.imageAssetFiles.get(relative) === saved.blob) {
+          record = saved;
+          imageSession.records.set(recordKey, record);
+        }
+      }
+      if (!record) {
+        const file = !data && !nativeUrl ? state.imageAssetFiles.get(relative) : null;
+        if (!file && !data && !nativeUrl) return '';
+        record = requestImageAsset(recordKey, { file, data: data ? key : '', nativeUrl });
+      }
+      if (!record?.info || imageSession.closed) return '';
+      if (!record.url) {
+        record.url = URL.createObjectURL(record.blob);
+        imageSession.urls.set(record.url, record);
+      }
+      if (!data && !nativeUrl) {
+        state.assetUrls.set(relative, record.url);
+        state.assetUrls.set(`./${relative}`, record.url);
+      }
+      return record.url;
+    }
+
+    function requestImageAsset(key, input, refresh = true) {
+      const session = imageSession;
+      const cached = refresh && input.file && session.files.get(input.file);
+      if (cached) { session.records.set(key, cached); return cached; }
+      if (session.count >= imagePolicy.LIMITS.assets) return null;
+      session.count += 1;
+      const record = { info: null, blob: null, url: '', error: '', promise: null };
+      session.records.set(key, record);
+      if (input.file) session.files.set(input.file, record);
+      record.promise = session.tail.then(async () => {
+        if (session.closed) return;
+        const controller = window.AbortController ? new window.AbortController() : null;
+        let timer;
+        try {
+          const timeout = new Promise((_, reject) => {
+            timer = window.setTimeout(() => reject(new Error('画像の検証がタイムアウトしました')), imagePolicy.LIMITS.readMs);
+          });
+          const result = await Promise.race([
+            readImageAssetBytes(input, session, controller?.signal), timeout, session.cancelled,
+          ]);
+          if (session.closed || !result) return;
+          const info = imagePolicy.inspectRaster(result.bytes, result.mimeType, result.name);
+          if (session.pixels + info.pixels > imagePolicy.LIMITS.totalPixels) throw new Error('画像の合計画素数の上限に達しました');
+          session.pixels += info.pixels;
+          record.info = info;
+          record.blob = new Blob([result.bytes], { type: info.mimeType });
+          if (input.data) record.exportSrc = `data:${info.mimeType};base64,${input.data.slice(input.data.indexOf(',') + 1)}`;
+        } catch (error) {
+          record.error = error?.message || '画像の検証に失敗しました';
+        } finally {
+          controller?.abort();
+          window.clearTimeout(timer);
+        }
+        if (refresh && imageSession === session && !session.closed) scheduleImageAssetRefresh();
+      });
+      session.tail = record.promise;
+      return record;
+    }
+
+    async function readImageAssetBytes(input, session, signal) {
+      const limits = imagePolicy.LIMITS;
+      const remaining = Math.min(limits.fileBytes, limits.totalBytes - session.bytes);
+      if (remaining <= 0) throw new Error('画像の合計サイズの上限に達しました');
+      if (input.file) {
+        const file = input.file;
+        if (!Number.isSafeInteger(file.size) || file.size <= 0 || file.size > remaining) throw new Error('画像の個別または合計サイズの上限に達しました');
+        session.bytes += file.size;
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        if (bytes.length !== file.size) throw new Error('画像サイズを確認できません');
+        return { bytes, mimeType: file.type || '', name: file.name || '' };
+      }
+      if (input.data) {
+        if (input.data.length > 200000) throw new Error('埋め込み画像のURLが表示上限を超えています');
+        const match = input.data.match(/^data:(image\/(?:png|jpeg|jpg|gif|webp));base64,([A-Za-z0-9+/]*={0,2})$/i);
+        if (!match || match[2].length > Math.ceil(remaining / 3) * 4) throw new Error('埋め込み画像の形式またはサイズが不正です');
+        const mimeType = match[1].toLowerCase().replace(/^image\/jpg$/, 'image/jpeg');
+        if (input.data.length + mimeType.length - match[1].length > 200000) throw new Error('埋め込み画像のURLが表示上限を超えています');
+        const binary = atob(match[2]);
+        if (!binary.length || binary.length > remaining) throw new Error('埋め込み画像のサイズ上限に達しました');
+        session.bytes += binary.length;
+        return { bytes: Uint8Array.from(binary, (character) => character.charCodeAt(0)), mimeType, name: '' };
+      }
+      // The only fetch source is the app's native, document-scoped raster endpoint.
+      const response = await window.fetch(input.nativeUrl, { credentials: 'omit', redirect: 'error', cache: 'no-store', signal });
+      if (!response.ok || !response.body) throw new Error('画像ファイルを読み込めません');
+      const mimeType = (response.headers.get('Content-Type') || '').split(';', 1)[0].trim();
+      const reader = response.body.getReader();
+      const chunks = [];
+      let size = 0;
+      try {
+        while (!session.closed) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (size + value.byteLength > remaining) throw new Error('画像のサイズ上限に達しました');
+          size += value.byteLength;
+          session.bytes += value.byteLength;
+          chunks.push(value);
+        }
+      } finally {
+        reader.cancel().catch(() => {});
+      }
+      if (session.closed) return null;
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+      return { bytes, mimeType, name: decodeLocalImagePath(new URL(input.nativeUrl).pathname) };
+    }
+
+    function scheduleImageAssetRefresh() {
+      if (imageRefreshTimer !== null) return;
+      imageRefreshTimer = window.setTimeout(() => {
+        imageRefreshTimer = null;
+        renderPreview();
+        if (state.proseMirrorRich) state.proseMirrorRich.refreshImages?.();
+        else renderRich();
+      }, 0);
     }
 
     function isAllowedImageFile(file) {
@@ -2307,6 +2510,10 @@
       beginImageInsertion,
       cancelFolderScan,
       buildFolderAssetUrls,
+      getImageInfo,
+      getImageExportSrc,
+      imageAssetReason,
+      resolveImageAssetUrl,
       captureCurrentMarkdownFromEditor,
       clearAllLocalData,
       clearAllowedDomainsData,
