@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 const app = [
   readFileSync(new URL('../app.js', import.meta.url), 'utf8'),
   readFileSync(new URL('../modules/markdown-renderer.js', import.meta.url), 'utf8'),
+  readFileSync(new URL('../modules/table-policy.js', import.meta.url), 'utf8'),
   readFileSync(new URL('../modules/rich-editor.js', import.meta.url), 'utf8'),
   readFileSync(new URL('../modules/rich-input-controller.js', import.meta.url), 'utf8'),
   readFileSync(new URL('../modules/file-manager.js', import.meta.url), 'utf8'),

@@ -457,6 +457,7 @@ const context = vm.createContext({
   alert() {},
   console,
 });
+vm.runInContext(readFileSync(new URL('../modules/table-policy.js', import.meta.url), 'utf8'), context);
 vm.runInContext(markdownRendererModule, context);
 vm.runInContext(richEditorModule, context);
 vm.runInContext(richInputControllerModule, context);

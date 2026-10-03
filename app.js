@@ -1126,6 +1126,9 @@ flowchart TD
   }
 
   function readOnlyRichFallbackMessage(reason = state.proseMirrorRichFallbackReason) {
+    if (reason === 'table-render-limit') {
+      return '表の表示上限を超えたため、リッチ表示は読み取り専用です。ソース編集を使用してください';
+    }
     if (reason === 'link-reference-definitions') {
       return '参照リンク定義を保持するため、リッチ表示は読み取り専用です。ソース編集を使用してください';
     }
@@ -1155,6 +1158,7 @@ flowchart TD
       mount: els.rich,
       markdown: state.markdown,
       onChange: handleProseMirrorRichChange,
+      onUnsupportedMarkdown: () => setStatus('表の表示上限を超えているため挿入できません。ソース編集で貼り付けてください'),
       resolveImageSrc: sanitizeImageUrl,
       resolveLinkHref: sanitizeLinkUrl,
       createMathRenderSession,

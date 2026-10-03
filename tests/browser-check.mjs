@@ -41,6 +41,7 @@ async function main() {
     await checkMermaidVisuals(baseUrl, sessionId);
     await checkAppStartup(baseUrl, sessionId);
     await checkInlineTableRendering(sessionId);
+    await checkTableBudgets(sessionId);
     await checkLinkPolicy(sessionId);
     await checkCodeHighlightBudgets(sessionId);
     await checkMathRenderBudgets(sessionId);
@@ -55,6 +56,7 @@ async function main() {
     await navigate(pathToFileURL(path.join(repoRoot, 'index.html')).href, fileSessionId);
     await poll(`Boolean(document.querySelector('.source-pane .cm-editor'))`, Boolean, fileSessionId, 'file app startup');
     await checkInlineTableRendering(fileSessionId);
+    await checkTableBudgets(fileSessionId);
     await checkLinkPolicy(fileSessionId);
     await checkCodeHighlightBudgets(fileSessionId);
     await checkMathRenderBudgets(fileSessionId);
@@ -452,6 +454,196 @@ async function checkLinkPolicy(sessionId) {
   assert.deepEqual(component.errors, [], 'rich URL edits and copy/drag serializer must use the canonical policy');
   await checkMermaidLinkPolicy(sessionId);
   console.log(`link policy browser checks passed (${component.protocol})`);
+}
+
+async function checkTableBudgets(sessionId) {
+  const table = (columns, bodyRows, firstHeader = '<b>raw & source</b>') => [
+    `|${[firstHeader, ...Array(columns - 1).fill('h')].join('|')}|`,
+    `|${Array(columns).fill('---').join('|')}|`,
+    ...Array(bodyRows).fill('|'),
+  ].join('\n');
+  const wide = table(128, 128);
+  const cells = table(64, 64);
+  const cases = [
+    { name: 'wide sparse table', markdown: wide, raw: wide },
+    { name: 'too many rows', markdown: table(2, 256), raw: table(2, 256) },
+    { name: 'too many total cells', markdown: cells, raw: cells },
+    { name: 'reference-definition vendor path', markdown: `[guide]: #guide\n${cells}`, raw: cells },
+    {
+      name: 'nested blockquote vendor path',
+      markdown: ['> [guide]: #guide', '>', ...cells.split('\n').map(line => `> ${line}`)].join('\n'),
+      raw: cells,
+    },
+    { name: 'math pipes in a wide header', markdown: table(65, 1, '$|x|$'), raw: table(65, 1, '$|x|$') },
+  ];
+  for (const test of cases) {
+    const markdown = `${test.markdown}\n\n**After table budget**`;
+    await switchMode('source', sessionId);
+    await setAppMarkdown(markdown, sessionId);
+    await switchMode('split', sessionId);
+    await switchMode('rich', sessionId);
+    const result = await poll(`(() => {
+      const inspect = id => {
+        const root = document.getElementById(id);
+        const fallback = root.querySelector('pre.table-render-limit code');
+        return {
+          cells: root.querySelectorAll('th, td').length,
+          nodes: root.querySelectorAll('*').length,
+          fallback: fallback?.textContent || '',
+          fallbackElements: fallback?.childElementCount ?? -1,
+          following: root.querySelector('strong')?.textContent || '',
+        };
+      };
+      const rich = document.getElementById('richEditor');
+      return {
+        preview: inspect('preview'), rich: inspect('richEditor'),
+        reason: rich.dataset.richFallback || '',
+        readOnly: rich.getAttribute('aria-readonly') || '',
+        editable: Boolean(rich.querySelector('.ProseMirror, [contenteditable="true"]')),
+        markdown: document.getElementById('sourceEditor').value,
+      };
+    })()`, value => value?.reason === 'table-render-limit' && value.preview.fallback && value.rich.fallback,
+    sessionId, test.name);
+    assert.equal(result.readOnly, 'true', `${test.name}: rich fallback must be read-only`);
+    assert.equal(result.editable, false, `${test.name}: oversized tables must not enter an editable rich model`);
+    assert.equal(result.markdown, markdown, `${test.name}: rendering must preserve the complete source`);
+    for (const [name, root] of [['preview', result.preview], ['rich', result.rich]]) {
+      assert.equal(root.cells, 0, `${test.name}: ${name} must not allocate padded table cells`);
+      assert.ok(root.nodes < 100, `${test.name}: ${name} fallback DOM must remain bounded (${root.nodes})`);
+      assert.equal(root.fallback.trimEnd(), test.raw, `${test.name}: ${name} must retain the complete table as text`);
+      assert.equal(root.fallbackElements, 0, `${test.name}: ${name} table source must remain escaped plain text`);
+      assert.equal(root.following, 'After table budget', `${test.name}: ${name} must render the following paragraph`);
+    }
+    for (const mode of ['preview', 'source']) {
+      await switchMode(mode, sessionId);
+      assert.equal(await evaluate(`document.getElementById('sourceEditor').value`, sessionId), markdown,
+        `${test.name}: leaving read-only rich mode for ${mode} must preserve the exact source`);
+    }
+  }
+
+  const ordinary = [
+    '| Left | Center | Right |',
+    '| :--- | :---: | ---: |',
+    '| short |',
+    '| a\\|b | $x+1$ | <b>literal</b> |',
+  ].join('\n');
+  await setAppMarkdown(ordinary, sessionId);
+  await switchMode('rich', sessionId);
+  const restored = await poll(`(() => {
+    const inspect = id => {
+      const root = document.getElementById(id);
+      const rows = Array.from(root.querySelectorAll('table tr'));
+      return {
+        cells: root.querySelectorAll('th, td').length,
+        rows: rows.map(row => Array.from(row.children, cell => cell.textContent)),
+        alignments: Array.from(rows[0]?.children || [], cell => getComputedStyle(cell).textAlign),
+        math: root.querySelectorAll('table .katex').length,
+        limited: root.querySelectorAll('.table-render-limit').length,
+      };
+    };
+    return {
+      preview: inspect('preview'), rich: inspect('richEditor'),
+      editable: Boolean(document.querySelector('#richEditor .ProseMirror')),
+      reason: document.getElementById('richEditor').dataset.richFallback || '',
+      protocol: location.protocol,
+    };
+  })()`, value => value?.editable && value.preview.cells === 9 && value.rich.cells === 9,
+  sessionId, 'ordinary table after table limits');
+  assert.equal(restored.reason, '', 'a normal table must recover editable rich mode after a limited document');
+  for (const [name, root] of [['preview', restored.preview], ['rich', restored.rich]]) {
+    assert.equal(root.limited, 0, `${name}: ordinary tables must not retain the previous limit notice`);
+    assert.deepEqual(root.rows[1], ['short', '', ''], `${name}: ordinary short rows must still be padded`);
+    assert.equal(root.rows[2][0], 'a|b', `${name}: escaped cell pipes must not create extra columns`);
+    assert.equal(root.rows[2][2], '<b>literal</b>', `${name}: raw HTML in an ordinary table must remain text`);
+    assert.deepEqual(root.alignments, ['left', 'center', 'right'], `${name}: cell alignment must remain intact`);
+    assert.equal(root.math, 1, `${name}: ordinary table math must still render`);
+  }
+  await switchMode('source', sessionId);
+  assert.equal(await evaluate(`document.getElementById('sourceEditor').value`, sessionId), ordinary,
+    'entering and leaving an unedited normal table must preserve its exact source');
+  await checkTableInsertionBudgets(wide, sessionId);
+  console.log(`table budget browser checks passed (${restored.protocol})`);
+}
+
+async function checkTableInsertionBudgets(oversized, sessionId) {
+  const original = 'Keep the existing source.';
+  const ordinary = '| A | B |\n| --- | --- |\n| C | D |';
+  await setAppMarkdown(original, sessionId);
+  await switchMode('rich', sessionId);
+  await clickSelector('#richEditor .ProseMirror p', sessionId);
+  const paste = async markdown => evaluate(`(() => {
+    const target = document.querySelector('#richEditor .ProseMirror');
+    const clipboardData = new DataTransfer();
+    clipboardData.setData('text/plain', ${JSON.stringify(markdown)});
+    const event = new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true });
+    target.dispatchEvent(event);
+    return {
+      prevented: event.defaultPrevented,
+      markdown: document.getElementById('sourceEditor').value,
+      status: document.getElementById('statusMessage').textContent,
+      codeBlocks: target.querySelectorAll('pre').length,
+      tables: target.querySelectorAll('table').length,
+      cells: target.querySelectorAll('th, td').length,
+    };
+  })()`, sessionId);
+  const rejected = await paste(oversized);
+  assert.equal(rejected.prevented, true, 'an oversized table paste must prevent the browser default');
+  assert.equal(rejected.markdown, original, 'rejecting an oversized table paste must preserve the exact source');
+  assert.equal(rejected.codeBlocks, 0, 'a rejected table paste must not become a source-changing code block');
+  assert.equal(rejected.tables, 0, 'a rejected table paste must not insert any table');
+  assert.equal(rejected.status, '表の表示上限を超えているため挿入できません。ソース編集で貼り付けてください',
+    'an oversized table paste must explain how to retain the input in source editing');
+  await switchMode('source', sessionId);
+  assert.equal(await evaluate(`document.getElementById('sourceEditor').value`, sessionId), original,
+    'leaving rich mode after a rejected paste must preserve the original source');
+  await switchMode('rich', sessionId);
+  await clickSelector('#richEditor .ProseMirror p', sessionId);
+  const accepted = await paste(ordinary);
+  assert.equal(accepted.prevented, true, 'a normal Markdown table paste must use the editor paste handler');
+  assert.equal(accepted.tables, 1, 'a normal table paste must remain supported after a rejected paste');
+  assert.equal(accepted.cells, 4, 'a normal pasted table must retain its cells');
+  assert.equal(accepted.codeBlocks, 0, 'a normal pasted table must not become a code block');
+  assert.notEqual(accepted.markdown, original, 'a normal paste must update the Markdown source');
+  assert.match(accepted.markdown, /\| A \| B \|/, 'a normal pasted table must be serialized as a table');
+
+  const api = await evaluate(`(() => {
+    const mount = document.createElement('div');
+    document.body.appendChild(mount);
+    const reasons = [];
+    let changes = 0;
+    const editor = window.PMEProseMirror.createRichMarkdownEditor({
+      mount, markdown: ${JSON.stringify(original)},
+      onChange() { changes += 1; },
+      onUnsupportedMarkdown(reason) { reasons.push(reason); },
+    });
+    try {
+      const before = editor.markdown();
+      const documentBefore = editor.view.state.doc;
+      const rejected = editor.insertMarkdown(${JSON.stringify(oversized)});
+      const rejectedState = {
+        result: rejected, unchanged: editor.markdown() === before && editor.view.state.doc === documentBefore,
+        codeBlocks: mount.querySelectorAll('pre').length, tables: mount.querySelectorAll('table').length,
+        changes, reasons: [...reasons],
+      };
+      const accepted = editor.insertMarkdown(${JSON.stringify(ordinary)});
+      return {
+        rejected: rejectedState, accepted, changes, reasons,
+        markdown: editor.markdown(), tables: mount.querySelectorAll('table').length,
+        cells: mount.querySelectorAll('th, td').length, codeBlocks: mount.querySelectorAll('pre').length,
+      };
+    } finally { editor.destroy(); mount.remove(); }
+  })()`, sessionId);
+  assert.deepEqual(api.rejected, {
+    result: false, unchanged: true, codeBlocks: 0, tables: 0, changes: 0, reasons: ['table-render-limit'],
+  }, 'insertMarkdown must reject oversized tables without a transaction or source change and notify the caller');
+  assert.equal(api.accepted, true, 'insertMarkdown must continue accepting ordinary tables');
+  assert.equal(api.tables, 1, 'the accepted API insertion must create one table');
+  assert.equal(api.cells, 4, 'the accepted API insertion must retain all cells');
+  assert.equal(api.codeBlocks, 0, 'the accepted API insertion must not create a fallback code block');
+  assert.equal(api.changes, 1, 'only the accepted API insertion may notify a document change');
+  assert.deepEqual(api.reasons, ['table-render-limit'], 'an ordinary insertion must not report a table limit');
+  assert.match(api.markdown, /\| A \| B \|/, 'the accepted API insertion must remain table Markdown');
+  await switchMode('source', sessionId);
 }
 
 async function checkMermaidLinkPolicy(sessionId) {

@@ -4,10 +4,20 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 globalThis.window = globalThis;
 globalThis.markdownit = require('../vendor/markdown-it/markdown-it.min.js');
+require('../modules/table-policy.js');
 require('../vendor/prosemirror/prosemirror-editor.js');
 
 const proseMirror = globalThis.PMEProseMirror;
 assert.ok(proseMirror, 'ProseMirror bundle should expose its public API');
+
+for (const [columns, rows] of [[65, 2], [2, 257], [64, 65]]) {
+  // The raw pipe in the math header must use the same preprocessing for both
+  // editability detection and the actual ProseMirror document parser.
+  const source = ['|' + Array(columns).fill('$P(A|B)$').join('|') + '|',
+    '|' + Array(columns).fill('---').join('|') + '|', ...Array(rows - 1).fill('|')].join('\n');
+  assert.equal(proseMirror.unsupportedMarkdownReason(source), 'table-render-limit');
+  assert.ok(proseMirror.normalizeMarkdown(source).length < source.length * 2, 'direct parsing/clipboard normalization does not expand cells');
+}
 
 const unusedDefinition = '[unused]: https://example.com/path "title"\n';
 assert.equal(

@@ -125,6 +125,7 @@ assert.doesNotMatch(index, /type="importmap"/, 'CodeMirror should load through a
 assert.match(index, /vendor\/codemirror6\/source-editor\.bundle\.js/, 'CodeMirror should load from the local classic script bundle');
 assert.match(index, /vendor\/prosemirror\/prosemirror-editor\.js/, 'ProseMirror should load from the local classic script bundle');
 assert.match(index, /modules\/markdown-renderer\.js[\s\S]+app\.js/, 'the Markdown renderer module should load before the app entry point');
+assert.match(index, /modules\/table-policy\.js[\s\S]+vendor\/prosemirror\/prosemirror-editor\.js/, 'the shared table policy must load before the rich parser');
 assert.match(index, /modules\/rich-editor\.js[\s\S]+app\.js/, 'the rich editor module should load before the app entry point');
 assert.match(index, /modules\/rich-input-controller\.js[\s\S]+app\.js/, 'the rich input controller module should load before the app entry point');
 assert.match(index, /modules\/file-manager\.js[\s\S]+app\.js/, 'the file manager module should load before the app entry point');
@@ -327,7 +328,7 @@ assert.match(proseMirrorBundle, /markdownShapeNormalizationPlugin\(\)/, 'Markdow
 assert.match(proseMirrorBundle, /function\s+markdownClipboardTextParser[\s\S]+sliceFromMarkdown\(normalized,\s*inline\)/, 'plain text paste should parse Markdown through the same ProseMirror Markdown parser');
 assert.match(proseMirrorBundle, /clipboardTextParser:\s*markdownClipboardTextParser/, 'ProseMirror editor should install the Markdown clipboard text parser');
 assert.match(proseMirrorBundle, /function\s+handleMarkdownPlainTextPaste[\s\S]+event\.stopPropagation[\s\S]+replaceSelection\(slice\)/, 'Markdown-looking plain text paste should be handled inside ProseMirror and stopped before legacy rich paste handlers can duplicate it');
-assert.match(proseMirrorBundle, /handlePaste:\s*handleMarkdownPlainTextPaste/, 'ProseMirror editor should install a Markdown paste handler that owns Markdown-looking plain text paste');
+assert.match(proseMirrorBundle, /handlePaste:\s*function\(editorView, event\)\s*\{\s*return handleMarkdownPlainTextPaste\(editorView, event, options\.onUnsupportedMarkdown\)/, 'the Markdown paste handler should report rejected source without inserting a lossy fallback');
 assert.match(proseMirrorBundle, /function\s+escapeInlineMathPipesInMarkdownTables[\s\S]+function\s+parseMarkdown\(markdownText\)\s*\{\s*return parser\.parse\(escapeInlineMathPipesInMarkdownTables\(markdownText\)\);/, 'Markdown parsing should protect formula pipes only while parsing table rows');
 assert.match(proseMirrorBundle, /function\s+ensureEditableTrailingParagraph[\s\S]+doc\.copy\(doc\.content\.append\(model\.Fragment\.from\(schema\.nodes\.paragraph\.create\(\)\)\)\)/, 'rich editor state should append an editable trailing paragraph when the parsed document ends in a non-editable block');
 assert.match(proseMirrorBundle, /function\s+documentWithoutEditableTrailingParagraphs[\s\S]+while \(nodes\.length > 1 && isEmptyParagraphNode\(nodes\[nodes\.length - 1\]\)\) nodes\.pop\(\)/, 'Markdown serialization should remove editor-only trailing empty paragraphs');
@@ -429,6 +430,7 @@ const proseMirrorContext = {
 proseMirrorContext.window.window = proseMirrorContext.window;
 proseMirrorContext.window.navigator = proseMirrorContext.navigator;
 proseMirrorContext.window.document = proseMirrorContext.document;
+vm.runInNewContext(read('modules/table-policy.js'), proseMirrorContext);
 vm.runInNewContext(proseMirrorBundle, proseMirrorContext);
 assert.equal(
   proseMirrorContext.window.PMEProseMirror.normalizeMarkdown('\\- a'),

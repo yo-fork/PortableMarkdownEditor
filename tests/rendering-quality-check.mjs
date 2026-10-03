@@ -8,6 +8,7 @@ const MarkdownIt = require('../vendor/markdown-it/markdown-it.min.js');
 const katex = require('../vendor/katex/katex.min.js');
 
 const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+const tablePolicyModule = readFileSync(new URL('../modules/table-policy.js', import.meta.url), 'utf8');
 const markdownRendererModule = readFileSync(new URL('../modules/markdown-renderer.js', import.meta.url), 'utf8');
 const richEditorModule = readFileSync(new URL('../modules/rich-editor.js', import.meta.url), 'utf8');
 const richInputControllerModule = readFileSync(new URL('../modules/rich-input-controller.js', import.meta.url), 'utf8');
@@ -32,6 +33,7 @@ function createRenderer(useVendor = true, mathEngine = katex) {
     alert() {},
     console,
   });
+  vm.runInContext(tablePolicyModule, context);
   vm.runInContext(markdownRendererModule, context);
   vm.runInContext(richEditorModule, context);
   vm.runInContext(richInputControllerModule, context);
@@ -41,6 +43,29 @@ function createRenderer(useVendor = true, mathEngine = katex) {
   return { renderer, context };
 }
 const { renderer } = createRenderer();
+
+for (const useVendor of [false, true]) {
+  const { renderer: tableRenderer } = createRenderer(useVendor);
+  for (const [columns, rows, allowed] of [[64, 64, true], [16, 256, true], [65, 2, false], [2, 257, false], [64, 65, false], [128, 129, false]]) {
+    const source = ['|' + Array(columns).fill('h').join('|') + '|',
+      '|' + Array(columns).fill('---').join('|') + '|', ...Array(rows - 1).fill('|')].join('\n');
+    for (const references of ['', '\n\n[guide]: #guide']) {
+      const html = tableRenderer.renderMarkdownHtml(source + references);
+      assert.equal((html.match(/<t[dh][ >]/g) || []).length, allowed ? columns * rows : 0, 'custom table cell product is bounded before rendering');
+      assert.equal(html.includes('table-render-limit'), !allowed);
+      if (!allowed) {
+        assert.ok(html.includes(source), 'the entire over-budget source remains visible as text');
+        assert.ok(html.length < source.length * 2 + 1000, 'fallback output scales with source, not the cell product');
+        assert.doesNotMatch(tableRenderer.buildExportHtml(source), /<table/);
+      }
+    }
+  }
+  const mismatch = '|' + 'h|'.repeat(65) + '\n|---|---|\n|';
+  assert.doesNotMatch(tableRenderer.renderMarkdownHtml(mismatch), /<table/, 'custom tables use actual header width even if delimiter width differs');
+  const hostile = '|' + '<script>|'.repeat(65) + '\n|' + '---|'.repeat(65) + '\n|';
+  assert.doesNotMatch(tableRenderer.renderMarkdownHtml(hostile), /<script>|<table/);
+  assert.match(tableRenderer.renderMarkdownHtml(hostile), /&lt;script&gt;/);
+}
 
 function inlineTable(cell, references = false) {
   return `| content | control |\n| --- | --- |\n| ${cell} | still visible |${references ? '\n\n[guide]: #guide' : ''}`;

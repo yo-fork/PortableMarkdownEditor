@@ -199,6 +199,7 @@
           return highlightCode(code, lang);
         },
       });
+      window.PMETablePolicy.installMarkdownIt(md);
       preserveMarkdownLocalPaths(md);
       installMarkdownItMath(md);
       try {
@@ -851,6 +852,9 @@
       const lines = raw.split('\n').filter((line) => line.trim() !== '');
       if (lines.length < 2) return renderParagraph(raw, null, references);
       const headers = splitTableRow(lines[0]);
+      if (!window.PMETablePolicy.allowsDimensions(headers.length, lines.length - 1)) {
+        return `<pre class="table-render-limit" title="表の表示上限を超えたため原文を表示しています"><code>${escapeHtml(raw)}</code></pre>`;
+      }
       const aligns = splitTableRow(lines[1]).map(parseAlign);
       const rows = lines.slice(2).map(splitTableRow);
       const head = headers.map((cell, i) => `<th${alignAttr(aligns[i])}>${renderTableCell(cell, references)}</th>`).join('');

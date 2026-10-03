@@ -18,6 +18,10 @@ echo ^> node --check modules\markdown-renderer.js
 node --check modules\markdown-renderer.js || goto :failed
 
 echo.
+echo ^> node --check modules\table-policy.js
+node --check modules\table-policy.js || goto :failed
+
+echo.
 echo ^> node --check modules\rich-editor.js
 node --check modules\rich-editor.js || goto :failed
 
@@ -48,6 +52,10 @@ node tests\shortcut-manager-check.mjs || goto :failed
 echo.
 echo ^> node tests\prosemirror-roundtrip-check.mjs
 node tests\prosemirror-roundtrip-check.mjs || goto :failed
+
+echo.
+echo ^> node tests\table-policy-check.mjs
+node tests\table-policy-check.mjs || goto :failed
 
 echo.
 echo ^> node tests\icon-assets-check.mjs

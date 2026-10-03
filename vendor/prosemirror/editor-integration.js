@@ -24,10 +24,11 @@
     var markdownEnv = {};
     var tokens;
     try {
-      tokens = parser.tokenizer.parse(normalizeNewlines(markdownText || ''), markdownEnv);
+      tokens = parser.tokenizer.parse(escapeInlineMathPipesInMarkdownTables(markdownText || ''), markdownEnv);
     } catch (_) {
       return 'markdown-parse-failed';
     }
+    if (markdownEnv.pmeTableLimit) return 'table-render-limit';
     if (markdownEnv.references && Object.keys(markdownEnv.references).length) {
       return 'link-reference-definitions';
     }
@@ -438,6 +439,7 @@
     var tokenizer = MarkdownIt('commonmark', { html: false });
     preserveMarkdownLocalPaths(tokenizer);
     tokenizer.enable(['table', 'strikethrough']);
+    global.PMETablePolicy.installMarkdownIt(tokenizer);
     addTocBlockRule(tokenizer);
     addMathBlockRule(tokenizer);
     addMathInlineRule(tokenizer);
@@ -3907,8 +3909,20 @@
     return looksLikeMarkdownBlock(normalized) || inlineMarkdownSourceLooksInteresting(normalized);
   }
 
-  function handleMarkdownPlainTextPaste(editorView, event) {
+  function rejectOversizedTableInsertion(markdownText, onUnsupportedMarkdown) {
+    if (unsupportedMarkdownReason(markdownText) !== 'table-render-limit') return false;
+    if (typeof onUnsupportedMarkdown === 'function') onUnsupportedMarkdown('table-render-limit');
+    return true;
+  }
+
+  function handleMarkdownPlainTextPaste(editorView, event, onUnsupportedMarkdown) {
     var text = normalizeNewlines(event && event.clipboardData && event.clipboardData.getData('text/plain') || '');
+    var pasteParent = editorView.state.selection.$from.parent;
+    if (!pasteParent.type.spec.code && rejectOversizedTableInsertion(text, onUnsupportedMarkdown)) {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+      return true;
+    }
     if (!shouldHandleMarkdownPlainTextPaste(text, editorView.state)) return false;
     var parent = editorView.state.selection.$from.parent;
     var inline = Boolean(parent && parent.inlineContent && !looksLikeMarkdownBlock(text));
@@ -4032,7 +4046,9 @@
       handleDOMEvents: { beforeinput: preserveInlineCodeSelectionBeforeInput },
       handleKeyDown: preserveInlineCodeSelectionKeyDown,
       handleTextInput: preserveInlineCodeSelectionTextInput,
-      handlePaste: handleMarkdownPlainTextPaste,
+      handlePaste: function(editorView, event) {
+        return handleMarkdownPlainTextPaste(editorView, event, options.onUnsupportedMarkdown);
+      },
       clipboardTextParser: markdownClipboardTextParser,
       clipboardSerializer: clipboardSerializer,
       nodeViews: extendedNodeViews(options, mathViews, getMathHtml),
@@ -4107,6 +4123,7 @@
       },
       insertMarkdown: function(markdownText, insertOptions) {
         if (destroyed) return false;
+        if (rejectOversizedTableInsertion(markdownText, options.onUnsupportedMarkdown)) return false;
         var slice = sliceFromMarkdown(markdownText, Boolean(insertOptions && insertOptions.inline));
         var transaction = editorView.state.tr.replaceSelection(slice).scrollIntoView();
         editorView.dispatch(transaction);
