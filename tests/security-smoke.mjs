@@ -193,7 +193,7 @@ assert.match(app, /addEventListener\('paste', onMarkdownPaste\)/, 'source editor
 assert.match(app, /dataset\.folderAccess = state\.desktopDocumentReady[\s\S]+state\.directoryHandle[\s\S]+\? 'fsa'/, 'UI should expose desktop and File System Access API folder sources separately');
 assert.match(app, /function\s+restorePersistedDirectoryHandle/, 'File System Access directory handles should be restorable after reopening');
 assert.match(app, /window\.indexedDB\.open\(FSA_DB_NAME,\s*1\)/, 'persisted File System Access handles should use local IndexedDB only');
-assert.match(app, /persistDirectoryHandle\(directoryHandle\)/, 'opened File System Access directory handle should be persisted for reopen');
+assert.match(app, /persistDirectoryHandle\(directoryHandle, generation\)/, 'opened File System Access directory handle should be persisted for the current document generation');
 assert.match(app, /function\s+parseSettingsFile[\s\S]+allowedLinkDomains[\s\S]+documentFont[\s\S]+shortcuts/, 'settings file import should parse allowedLinkDomains, documentFont, and shortcuts explicitly');
 assert.match(app, /function\s+exportSettingsFile/, 'settings file export should be available without network access');
 assert.match(app, /allowedLinkDomains:\s*normalizeDomainList\(state\.allowedLinkDomains\)/, 'settings export should write normalized link allowlist domains');
@@ -444,11 +444,16 @@ TestURL.createObjectURL = () => `blob:test-${objectUrlIndex += 1}`;
 TestURL.revokeObjectURL = () => {};
 
 let confirmResult = true;
-const instrumented = appEntry.replace(/\}\)\(\);\s*$/, 'return { buildExportHtml, normalizeDocumentFont, renderMarkdownHtml, sanitizeImageUrl, sanitizeLinkUrl, saveImageFileToAssets, ensureImageAssetWriteAccess, buildFolderAssetUrls, confirmDocumentReplacement, state };\n})();');
+const instrumented = appEntry.replace(/\}\)\(\);\s*$/, 'return { buildExportHtml, normalizeDocumentFont, renderMarkdownHtml, sanitizeImageUrl, sanitizeLinkUrl, saveImageFileToAssets, ensureImageAssetWriteAccess, buildFolderAssetUrls, confirmDocumentReplacement, setDocumentBinding, persistDraft, restoreDraft, state, els };\n})();');
+const draftStorage = new Map();
 const context = vm.createContext({
-  document: { baseURI: 'file:///C:/PortableMarkdownEditor/index.html', addEventListener() {} },
+  document: { baseURI: 'file:///C:/PortableMarkdownEditor/index.html', body: { dataset: {} }, addEventListener() {} },
   window: { isSecureContext: true },
-  localStorage: {},
+  localStorage: {
+    getItem: (key) => draftStorage.get(key) ?? null,
+    setItem: (key, value) => draftStorage.set(key, value),
+    removeItem: (key) => draftStorage.delete(key),
+  },
   URL: TestURL,
   Blob,
   navigator: {},
@@ -465,6 +470,34 @@ vm.runInContext(fileManagerModule, context);
 vm.runInContext(shortcutManagerModule, context);
 const renderer = vm.runInContext(instrumented, context);
 
+// Exercise the app's actual localStorage round trip as well as the file-manager IDB tests.
+const originalMarkdown = renderer.state.markdown;
+const originalBinding = renderer.state.documentBinding;
+for (const key of ['stats', 'fileNameLabel', 'saveState', 'status']) renderer.els[key] = {};
+renderer.state.markdown = '# Bound draft';
+renderer.setDocumentBinding({ fileName: 'draft.md', markdownRelativePath: 'docs/draft.md' });
+const savedBinding = renderer.state.documentBinding;
+renderer.state.markdownRelativePath = 'unrelated.md';
+renderer.persistDraft();
+const [draftKey, draftJson] = [...draftStorage][0];
+const savedDraft = JSON.parse(draftJson);
+assert.equal(savedDraft.bindingId, savedBinding.bindingId, 'draft persistence must retain the directory binding identity');
+assert.equal(savedDraft.markdownRelativePath, 'docs/draft.md', 'draft paths must come from the same binding as the ID');
+renderer.setDocumentBinding({ fileName: 'untitled.md' });
+renderer.restoreDraft();
+assert.equal(renderer.state.documentBinding.bindingId, savedBinding.bindingId, 'startup must restore the persisted binding identity');
+assert.equal(renderer.state.documentBinding.markdownRelativePath, 'docs/draft.md');
+assert.equal(renderer.state.fileName, 'draft.md');
+assert.equal(renderer.state.markdown, '# Bound draft');
+delete savedDraft.bindingId;
+draftStorage.set(draftKey, JSON.stringify(savedDraft));
+renderer.restoreDraft();
+assert.notEqual(renderer.state.documentBinding.bindingId, savedBinding.bindingId, 'legacy drafts must not inherit an old writable binding');
+assert.equal(renderer.state.markdown, '# Bound draft', 'legacy draft text must remain available');
+draftStorage.clear();
+renderer.state.markdown = originalMarkdown;
+renderer.state.fileName = originalBinding.fileName;
+renderer.setDocumentBinding(originalBinding);
 renderer.state.dirty = false;
 
 renderer.state.documentFont = 'sans';
@@ -670,9 +703,8 @@ function memoryFileHandle(name) {
 
 const rootHandle = memoryDirectoryHandle();
 const docsHandle = await rootHandle.getDirectoryHandle('docs', { create: true });
-renderer.state.directoryHandle = rootHandle;
-renderer.state.markdownRelativePath = 'docs/sample.md';
 renderer.state.fileName = 'sample.md';
+renderer.setDocumentBinding({ directoryHandle: rootHandle, markdownRelativePath: 'docs/sample.md', fileName: 'sample.md' });
 assert.equal(await renderer.ensureImageAssetWriteAccess(), true, 'opened folder handle should grant read/write image insertion');
 const pastedImage = new Blob(['image-bytes'], { type: 'image/png' });
 Object.defineProperty(pastedImage, 'name', { value: 'clipboard image.png' });

@@ -99,6 +99,45 @@
       updateStatusBar,
     } = dependencies;
 
+    state.documentGeneration = 0;
+    setDocumentBinding(state);
+    let pendingFileInputGeneration = null;
+    let pendingFolderInput = null;
+
+    function isDocumentAccessCurrent(generation) {
+      return generation === state.documentGeneration;
+    }
+
+    function beginDocumentAccess() {
+      state.documentGeneration += 1;
+      // A cancelled picker keeps the current target but invalidates older work.
+      setDocumentBinding(state.documentBinding);
+      return state.documentGeneration;
+    }
+
+    function setDocumentBinding(fields = {}, generation = state.documentGeneration) {
+      if (!isDocumentAccessCurrent(generation)) return false;
+      const binding = Object.freeze({
+        generation,
+        // The draft and IndexedDB are separate stores; only matching records may restore a target.
+        bindingId: typeof fields.bindingId === 'string' && fields.bindingId
+          ? fields.bindingId
+          : window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`,
+        directoryHandle: fields.directoryHandle || null,
+        markdownRelativePath: normalizeAssetPath(fields.markdownRelativePath || ''),
+        fileHandle: fields.fileHandle || null,
+        fileName: fields.fileName || state.fileName || 'untitled.md',
+        directoryName: fields.directoryName || fields.directoryHandle?.name || '',
+      });
+      state.documentBinding = binding;
+      // These mirrors are for rendering and picker hints; saves use the record.
+      state.directoryHandle = binding.directoryHandle;
+      state.markdownRelativePath = binding.markdownRelativePath;
+      state.fileHandle = binding.fileHandle;
+      state.directoryName = binding.directoryName;
+      return true;
+    }
+
     function initializeDesktopBridge() {
       document.body.dataset.desktopHost = 'true';
       window.chrome.webview.addEventListener('message', onDesktopHostMessage);
@@ -209,16 +248,14 @@
     }
 
     function applyDesktopDocument(message, statusMessage) {
+      const generation = beginDocumentAccess();
       clearAssetUrls();
       resetDesktopImageReferenceAliases();
-      state.directoryHandle = null;
-      state.directoryName = '';
-      state.fileHandle = null;
       state.desktopDocumentReady = message.hasDocumentFolder === true;
       state.markdown = stripRichCaretTokens(normalizeNewlines(String(message.markdown || '')));
       advanceDocumentRevision();
       state.fileName = safeFileName(message.fileName || 'untitled.md');
-      state.markdownRelativePath = state.desktopDocumentReady ? state.fileName : '';
+      setDocumentBinding({ fileName: state.fileName, markdownRelativePath: state.desktopDocumentReady ? state.fileName : '' }, generation);
       state.dirty = message.dirty === true;
       els.source.value = state.markdown;
       syncCodeMirrorSourceFromTextarea('desktop-document');
@@ -243,7 +280,7 @@
     function applyDesktopSavedState(message) {
       state.fileName = safeFileName(message.fileName || state.fileName || 'untitled.md');
       state.desktopDocumentReady = message.hasDocumentFolder === true;
-      state.markdownRelativePath = state.desktopDocumentReady ? state.fileName : '';
+      setDocumentBinding({ fileName: state.fileName, markdownRelativePath: state.desktopDocumentReady ? state.fileName : '' });
       const savedRevision = Number.isSafeInteger(message.savedRevision) ? message.savedRevision : -1;
       state.dirty = savedRevision !== state.documentRevision;
       resetDesktopImageReferenceAliases();
@@ -342,26 +379,41 @@
 
 
     async function restorePersistedDirectoryHandle() {
-      if (!state.markdownRelativePath || state.directoryHandle) return false;
+      const binding = state.documentBinding;
+      const current = () => state.documentBinding === binding && isDocumentAccessCurrent(binding.generation);
+      if (!binding.markdownRelativePath || binding.directoryHandle) return false;
       if (!canPersistDirectoryHandle()) return false;
       try {
-        const directoryHandle = await readPersistedDirectoryHandle();
-        if (!directoryHandle) return false;
+        const persisted = await readPersistedDirectoryBinding();
+        if (!current() || !persisted) return false;
+        if (persisted.version !== 1 || persisted.bindingId !== binding.bindingId
+          || persisted.markdownRelativePath !== binding.markdownRelativePath
+          || persisted.fileName !== binding.fileName || !persisted.fileHandle || !persisted.directoryHandle) {
+          setStatus('下書きの保存先を確認できません。「フォルダ許可」または「フォルダから開く」を使ってください');
+          return false;
+        }
+        const directoryHandle = persisted.directoryHandle;
         const permission = await queryDirectoryPermission(directoryHandle, 'read');
+        if (!current()) return false;
         if (permission !== 'granted') {
           setStatus('前回のフォルダ権限が必要です。「フォルダ許可」または「フォルダから開く」を使ってください');
           return false;
         }
-        const entries = await collectLimitedDirectoryEntries(directoryHandle);
-        state.directoryHandle = directoryHandle;
+        const entries = await collectLimitedDirectoryEntries(directoryHandle, binding.generation);
+        if (!current()) return false;
+        const chosen = entries.find((entry) => normalizeAssetPath(entry.relativePath) === binding.markdownRelativePath);
+        if (!chosen?.handle || !isMarkdownFile(chosen.file)) return false;
+        const sameFile = await chosen.handle.isSameEntry(persisted.fileHandle);
+        if (!current() || !sameFile) return false;
+        setDocumentBinding({ ...binding, directoryHandle, fileHandle: chosen.handle, directoryName: directoryHandle.name }, binding.generation);
         state.pickerStartDirectoryHandle = directoryHandle;
-        state.directoryName = directoryHandle.name || '';
         clearAssetUrls();
-        buildFolderAssetUrls(entries, dirnamePath(state.markdownRelativePath));
+        buildFolderAssetUrls(entries, dirnamePath(binding.markdownRelativePath));
         renderAll('restore-folder');
         setStatus(`${state.fileName} のフォルダ参照をFile System Access APIから復元しました。画像候補: ${state.assetUrls.size}${folderScanStatusSuffix()}`);
         return true;
       } catch (_) {
+        if (!current()) return false;
         setStatus('前回のフォルダ参照を復元できませんでした。「フォルダ許可」または「フォルダから開く」を使ってください');
         return false;
       }
@@ -394,27 +446,42 @@
       }
     }
 
-    async function persistDirectoryHandle(directoryHandle) {
-      if (!directoryHandle || !canPersistDirectoryHandle()) return false;
+    async function persistDirectoryHandle(directoryHandle, generation = state.documentGeneration) {
+      const binding = state.documentBinding;
+      const current = () => state.documentBinding === binding && isDocumentAccessCurrent(generation);
+      if (!current() || !directoryHandle || binding.directoryHandle !== directoryHandle
+        || !binding.markdownRelativePath || !binding.fileHandle || !canPersistDirectoryHandle()) return false;
+      const persisted = {
+        version: 1,
+        bindingId: binding.bindingId,
+        directoryHandle: binding.directoryHandle,
+        markdownRelativePath: binding.markdownRelativePath,
+        fileHandle: binding.fileHandle,
+        fileName: binding.fileName,
+      };
       try {
         const db = await openFsaDatabase();
-        await idbRequest(db.transaction(FSA_STORE_NAME, 'readwrite').objectStore(FSA_STORE_NAME).put(directoryHandle, FSA_DIRECTORY_HANDLE_KEY));
-        db.close();
-        return true;
+        try {
+          if (!current()) return false;
+          await idbRequest(db.transaction(FSA_STORE_NAME, 'readwrite').objectStore(FSA_STORE_NAME).put(persisted, FSA_DIRECTORY_HANDLE_KEY));
+          return current();
+        } finally { db.close(); }
       } catch (_) {
         return false;
       }
     }
 
-    async function rememberPickerStartDirectory(directoryHandle) {
-      if (!directoryHandle) return false;
+    async function rememberPickerStartDirectory(directoryHandle, generation = state.documentGeneration) {
+      if (!isDocumentAccessCurrent(generation) || !directoryHandle) return false;
       state.pickerStartDirectoryHandle = directoryHandle;
       if (!canPersistDirectoryHandle()) return false;
       try {
         const db = await openFsaDatabase();
-        await idbRequest(db.transaction(FSA_STORE_NAME, 'readwrite').objectStore(FSA_STORE_NAME).put(directoryHandle, FSA_PICKER_START_HANDLE_KEY));
-        db.close();
-        return true;
+        try {
+          if (!isDocumentAccessCurrent(generation)) return false;
+          await idbRequest(db.transaction(FSA_STORE_NAME, 'readwrite').objectStore(FSA_STORE_NAME).put(directoryHandle, FSA_PICKER_START_HANDLE_KEY));
+          return isDocumentAccessCurrent(generation);
+        } finally { db.close(); }
       } catch (_) {
         return false;
       }
@@ -433,6 +500,12 @@
     }
 
     async function readPersistedDirectoryHandle() {
+      const persisted = await readPersistedDirectoryBinding();
+      // Legacy roots remain picker candidates for an explicitly opened file, never an automatic save target.
+      return persisted?.version === 1 ? persisted.directoryHandle : persisted;
+    }
+
+    async function readPersistedDirectoryBinding() {
       const db = await openFsaDatabase();
       try {
         return await idbRequest(db.transaction(FSA_STORE_NAME, 'readonly').objectStore(FSA_STORE_NAME).get(FSA_DIRECTORY_HANDLE_KEY));
@@ -451,12 +524,13 @@
     }
 
     async function readPickerStartDirectoryHandle() {
+      const generation = state.documentGeneration;
       if (state.pickerStartDirectoryHandle) return state.pickerStartDirectoryHandle;
       if (!canPersistDirectoryHandle()) return null;
       const db = await openFsaDatabase();
       try {
         const handle = await idbRequest(db.transaction(FSA_STORE_NAME, 'readonly').objectStore(FSA_STORE_NAME).get(FSA_PICKER_START_HANDLE_KEY));
-        if (!state.pickerStartDirectoryHandle) state.pickerStartDirectoryHandle = handle || null;
+        if (isDocumentAccessCurrent(generation) && !state.pickerStartDirectoryHandle) state.pickerStartDirectoryHandle = handle || null;
         return state.pickerStartDirectoryHandle;
       } catch (_) {
         return null;
@@ -474,13 +548,15 @@
       }
     }
 
-    async function clearPersistedDirectoryHandle() {
+    async function clearPersistedDirectoryHandle(generation = state.documentGeneration) {
       if (!canPersistDirectoryHandle()) return false;
       try {
         const db = await openFsaDatabase();
-        await idbRequest(db.transaction(FSA_STORE_NAME, 'readwrite').objectStore(FSA_STORE_NAME).delete(FSA_DIRECTORY_HANDLE_KEY));
-        db.close();
-        return true;
+        try {
+          if (!isDocumentAccessCurrent(generation)) return false;
+          await idbRequest(db.transaction(FSA_STORE_NAME, 'readwrite').objectStore(FSA_STORE_NAME).delete(FSA_DIRECTORY_HANDLE_KEY));
+          return isDocumentAccessCurrent(generation);
+        } finally { db.close(); }
       } catch (_) {
         return false;
       }
@@ -728,9 +804,10 @@
     }
 
     async function markdownDirectoryHandle() {
-      if (!state.directoryHandle) throw new Error('フォルダが開かれていません');
-      let handle = state.directoryHandle;
-      const parts = dirnamePath(state.markdownRelativePath).split('/').filter(Boolean);
+      const binding = state.documentBinding;
+      if (!binding.directoryHandle) throw new Error('フォルダが開かれていません');
+      let handle = binding.directoryHandle;
+      const parts = dirnamePath(binding.markdownRelativePath).split('/').filter(Boolean);
       for (const part of parts) {
         handle = await handle.getDirectoryHandle(part, { create: false });
       }
@@ -738,14 +815,10 @@
     }
 
     async function markdownFileHandleForSnapshot(snapshot) {
-      let directoryHandle = snapshot.directoryHandle;
-      const parts = dirnamePath(snapshot.markdownRelativePath).split('/').filter(Boolean);
-      for (const part of parts) {
-        directoryHandle = await directoryHandle.getDirectoryHandle(part, { create: false });
-      }
-      const fileName = basenamePath(snapshot.markdownRelativePath)
-        || ensureExtension(snapshot.fileName || 'untitled.md', '.md');
-      return directoryHandle.getFileHandle(fileName, { create: true });
+      // The handle was obtained together with the root and relative path.
+      // Never reconstruct a writable capability from independently mutable fields.
+      if (!snapshot.binding.fileHandle) throw new Error('保存先のファイルを確認できません');
+      return snapshot.binding.fileHandle;
     }
 
     function markdownAssetsDirName() {
@@ -885,6 +958,7 @@
 
     async function openMarkdownFile() {
       if (requestDesktopCommand('open')) return;
+      const generation = beginDocumentAccess();
       if (window.showOpenFilePicker) {
         let fileHandle = null;
         try {
@@ -900,15 +974,18 @@
             }],
           });
         } catch (error) {
+          if (!isDocumentAccessCurrent(generation)) return;
           handlePickerError(error, 'ファイル選択を開始できませんでした');
           return;
         }
 
-        if (!fileHandle) return;
+        if (!isDocumentAccessCurrent(generation) || !fileHandle) return;
         try {
           const file = await fileHandle.getFile();
-          await openSingleMarkdownFile(file, { fileHandle });
+          if (!isDocumentAccessCurrent(generation)) return;
+          await openSingleMarkdownFile(file, { fileHandle, generation });
         } catch (error) {
+          if (!isDocumentAccessCurrent(generation)) return;
           warnSafeError('open markdown file read failed', error);
           setStatus('ファイルの読み込みに失敗しました');
           return;
@@ -916,6 +993,7 @@
         return;
       }
 
+      pendingFileInputGeneration = generation;
       els.fileInput.click();
     }
 
@@ -997,67 +1075,71 @@
     async function onFileChosen(event) {
       const [file] = event.target.files || [];
       event.target.value = '';
-      if (!file) return;
-      await openSingleMarkdownFile(file);
+      const generation = pendingFileInputGeneration ?? beginDocumentAccess();
+      pendingFileInputGeneration = null;
+      if (!file || !isDocumentAccessCurrent(generation)) return;
+      await openSingleMarkdownFile(file, { generation });
     }
 
     async function openSingleMarkdownFile(file, options = {}) {
+      const generation = options.generation ?? beginDocumentAccess();
+      if (!isDocumentAccessCurrent(generation)) return;
       if (file.size > 10 * 1024 * 1024) {
         setStatus('10MBを超えるファイルは読み込みません');
         return;
       }
       if (!confirmDocumentReplacement('選択したファイル')) return;
+      const previousDirectoryHandle = state.documentBinding.directoryHandle;
 
       try {
         const text = await readTextFile(file);
-        const previousDirectoryHandle = state.directoryHandle;
+        if (!isDocumentAccessCurrent(generation)) return;
         state.markdown = normalizeNewlines(text);
         advanceDocumentRevision();
         state.fileName = safeFileName(file.name || 'untitled.md');
-        state.fileHandle = options.fileHandle || null;
         state.dirty = false;
         clearAssetUrls();
-        state.directoryHandle = null;
-        state.directoryName = '';
-        state.markdownRelativePath = '';
+        setDocumentBinding({ fileName: state.fileName, fileHandle: options.fileHandle }, generation);
         els.source.value = state.markdown;
         syncCodeMirrorSourceFromTextarea('open-file');
         renderAll('open');
         persistDraft();
         setStatus(`${state.fileName} を開きました`);
 
-        if (await attachPreviouslyGrantedDirectoryToOpenedMarkdown(file, options.fileHandle || null, previousDirectoryHandle)) {
+        if (await attachPreviouslyGrantedDirectoryToOpenedMarkdown(file, options.fileHandle || null, previousDirectoryHandle, generation)) {
           return;
         }
-
-        await clearPersistedDirectoryHandle();
-        await requestDirectoryForOpenedMarkdown(file, options.fileHandle || null);
+        if (!isDocumentAccessCurrent(generation)) return;
+        await clearPersistedDirectoryHandle(generation);
+        if (!isDocumentAccessCurrent(generation)) return;
+        await requestDirectoryForOpenedMarkdown(file, options.fileHandle || null, generation);
       } catch (error) {
+        if (!isDocumentAccessCurrent(generation)) return;
         warnSafeError('open single markdown failed', error);
         setStatus(fileReadFailureMessage(error));
       }
     }
 
-    async function attachPreviouslyGrantedDirectoryToOpenedMarkdown(file, fileHandle, directoryHandleOverride = null) {
+    async function attachPreviouslyGrantedDirectoryToOpenedMarkdown(file, fileHandle, directoryHandleOverride = null, generation = state.documentGeneration) {
       if (!fileHandle?.isSameEntry) return false;
       const directoryHandle = directoryHandleOverride || state.directoryHandle || await readPersistedDirectoryHandle();
-      if (!directoryHandle) return false;
+      if (!isDocumentAccessCurrent(generation) || !directoryHandle) return false;
       try {
         const permission = await queryDirectoryPermission(directoryHandle, 'readwrite');
-        if (permission !== 'granted') return false;
-        const entries = await collectLimitedDirectoryEntries(directoryHandle);
+        if (!isDocumentAccessCurrent(generation) || permission !== 'granted') return false;
+        const entries = await collectLimitedDirectoryEntries(directoryHandle, generation);
+        if (!isDocumentAccessCurrent(generation)) return false;
         const chosen = await findOpenedMarkdownEntry(entries, file, fileHandle);
-        if (!chosen) return false;
+        if (!isDocumentAccessCurrent(generation) || !chosen) return false;
 
-        state.markdownRelativePath = normalizeAssetPath(chosen.relativePath || chosen.file.name || state.fileName);
-        state.directoryHandle = directoryHandle;
+        setDocumentBinding({ directoryHandle, markdownRelativePath: chosen.relativePath || chosen.file.name, fileHandle: chosen.handle || fileHandle }, generation);
         state.pickerStartDirectoryHandle = directoryHandle;
-        state.directoryName = directoryHandle.name || '';
-        state.fileHandle = chosen.handle || fileHandle || null;
         clearAssetUrls();
         buildFolderAssetUrls(entries, dirnamePath(state.markdownRelativePath));
-        await persistDirectoryHandle(directoryHandle);
-        await rememberPickerStartDirectory(directoryHandle);
+        await persistDirectoryHandle(directoryHandle, generation);
+        if (!isDocumentAccessCurrent(generation)) return false;
+        await rememberPickerStartDirectory(directoryHandle, generation);
+        if (!isDocumentAccessCurrent(generation)) return false;
         renderAll('open-file-existing-folder');
         persistDraft();
         setStatus(`${state.fileName} を開きました。既存のフォルダ許可を使用しています (${state.directoryName || 'selected folder'})。画像候補: ${state.assetUrls.size}${folderScanStatusSuffix()}`);
@@ -1085,7 +1167,8 @@
         : 'ファイルの読み込みに失敗しました';
     }
 
-    async function requestDirectoryForOpenedMarkdown(file, fileHandle) {
+    async function requestDirectoryForOpenedMarkdown(file, fileHandle, generation) {
+      if (!isDocumentAccessCurrent(generation)) return false;
       if (!window.showDirectoryPicker) return false;
       if (!confirm('相対画像の表示と画像挿入のため、開いたMarkdownファイルがあるフォルダの使用を許可しますか？')) {
         setStatus(`${state.fileName} を開きました。相対画像やassets保存には「フォルダ許可」または「フォルダから開く」を使ってください`);
@@ -1099,37 +1182,41 @@
           { startInHandle: fileHandle || null }
         );
       } catch (error) {
+        if (!isDocumentAccessCurrent(generation)) return false;
         handlePickerError(error, 'フォルダ選択を開始できませんでした');
         return false;
       }
 
       try {
-        return await attachDirectoryToOpenedMarkdown(file, fileHandle, directoryHandle);
+        if (!isDocumentAccessCurrent(generation)) return false;
+        return await attachDirectoryToOpenedMarkdown(file, fileHandle, directoryHandle, generation);
       } catch (error) {
+        if (!isDocumentAccessCurrent(generation)) return false;
         warnSafeError('opened markdown folder read failed', error);
         setStatus('フォルダの読み込みに失敗しました');
         return false;
       }
     }
 
-    async function attachDirectoryToOpenedMarkdown(file, fileHandle, directoryHandle) {
-      const entries = await collectLimitedDirectoryEntries(directoryHandle);
+    async function attachDirectoryToOpenedMarkdown(file, fileHandle, directoryHandle, generation) {
+      const entries = await collectLimitedDirectoryEntries(directoryHandle, generation);
+      if (!isDocumentAccessCurrent(generation)) return false;
       const chosen = await findOpenedMarkdownEntry(entries, file, fileHandle);
+      if (!isDocumentAccessCurrent(generation)) return false;
       if (!chosen) {
         setStatus(`${state.fileName} を開きました。選択フォルダ内に同じMarkdownファイルが見つかりませんでした${folderScanStatusSuffix()}`);
         warnFolderScanLimitIfNeeded();
         return false;
       }
 
-      state.markdownRelativePath = normalizeAssetPath(chosen.relativePath || chosen.file.name || state.fileName);
-      state.directoryHandle = directoryHandle;
+      setDocumentBinding({ directoryHandle, markdownRelativePath: chosen.relativePath || chosen.file.name, fileHandle: chosen.handle || fileHandle }, generation);
       state.pickerStartDirectoryHandle = directoryHandle;
-      state.directoryName = directoryHandle.name || '';
-      state.fileHandle = chosen.handle || state.fileHandle || null;
       clearAssetUrls();
       buildFolderAssetUrls(entries, dirnamePath(state.markdownRelativePath));
-      await persistDirectoryHandle(directoryHandle);
-      await rememberPickerStartDirectory(directoryHandle);
+      await persistDirectoryHandle(directoryHandle, generation);
+      if (!isDocumentAccessCurrent(generation)) return false;
+      await rememberPickerStartDirectory(directoryHandle, generation);
+      if (!isDocumentAccessCurrent(generation)) return false;
       renderAll('open-file-folder');
       persistDraft();
       setStatus(`${state.fileName} を開きました。フォルダ参照を許可済み (${state.directoryName || 'selected folder'})。画像候補: ${state.assetUrls.size}${folderScanStatusSuffix()}`);
@@ -1145,6 +1232,7 @@
             if (await entry.handle.isSameEntry(fileHandle)) return entry;
           } catch (_) {}
         }
+        return null;
       }
 
       const candidates = entries.filter((entry) => (
@@ -1158,30 +1246,37 @@
     }
 
     async function openFolder() {
+      const generation = beginDocumentAccess();
       if (window.showDirectoryPicker) {
         let directoryHandle = null;
         try {
           directoryHandle = await showDirectoryPickerFromRecentDirectory({ id: 'pme-open-folder', mode: 'readwrite' });
+          if (!isDocumentAccessCurrent(generation)) return;
         } catch (error) {
+          if (!isDocumentAccessCurrent(generation)) return;
           handlePickerError(error, 'フォルダ選択を開始できませんでした');
           return;
         }
 
         try {
-          const entries = await collectLimitedDirectoryEntries(directoryHandle);
-          await openFolderEntries(entries, directoryHandle.name || 'selected folder', directoryHandle);
+          const entries = await collectLimitedDirectoryEntries(directoryHandle, generation);
+          if (!isDocumentAccessCurrent(generation)) return;
+          await openFolderEntries(entries, directoryHandle.name || 'selected folder', directoryHandle, generation);
           return;
         } catch (error) {
+          if (!isDocumentAccessCurrent(generation)) return;
           warnSafeError('open folder read failed', error);
           setStatus('フォルダの読み込みに失敗しました');
           return;
         }
       }
       state.folderInputMode = 'open';
+      pendingFolderInput = { mode: 'open', generation };
       els.folderInput.click();
     }
 
     async function grantFolderForCurrentDocument() {
+      const generation = beginDocumentAccess();
       captureCurrentMarkdownFromEditor();
       if (!state.fileName || state.fileName === 'untitled.md') {
         setStatus('先にMarkdownファイルを開くか、保存してファイル名を確定してください');
@@ -1192,16 +1287,20 @@
         let directoryHandle = null;
         try {
           directoryHandle = await showDirectoryPickerFromRecentDirectory({ id: 'pme-grant-folder', mode: 'readwrite' });
+          if (!isDocumentAccessCurrent(generation)) return;
         } catch (error) {
+          if (!isDocumentAccessCurrent(generation)) return;
           handlePickerError(error, 'フォルダ選択を開始できませんでした');
           return;
         }
 
         try {
-          const entries = await collectLimitedDirectoryEntries(directoryHandle);
-          await grantFolderEntriesForCurrentDocument(entries, directoryHandle.name || 'selected folder', directoryHandle);
+          const entries = await collectLimitedDirectoryEntries(directoryHandle, generation);
+          if (!isDocumentAccessCurrent(generation)) return;
+          await grantFolderEntriesForCurrentDocument(entries, directoryHandle.name || 'selected folder', directoryHandle, generation);
           return;
         } catch (error) {
+          if (!isDocumentAccessCurrent(generation)) return;
           warnSafeError('grant folder read failed', error);
           setStatus('フォルダ許可に失敗しました');
           return;
@@ -1209,12 +1308,15 @@
       }
 
       state.folderInputMode = 'grant-current';
+      pendingFolderInput = { mode: 'grant-current', generation };
       els.folderInput.click();
     }
 
-    async function grantFolderEntriesForCurrentDocument(entries, folderName, directoryHandle = null) {
+    async function grantFolderEntriesForCurrentDocument(entries, folderName, directoryHandle = null, generation = beginDocumentAccess()) {
+      if (!isDocumentAccessCurrent(generation)) return;
       if (!entries.length) return;
       const chosen = await findCurrentMarkdownEntry(entries);
+      if (!isDocumentAccessCurrent(generation)) return;
       if (!chosen) {
         setStatus(`${state.fileName} が選択フォルダ内に見つかりませんでした。編集中内容は変更していません${folderScanStatusSuffix()}`);
         warnFolderScanLimitIfNeeded();
@@ -1226,19 +1328,10 @@
       const sourceSelection = sourceSelectionBookmark();
       const richBookmark = previousMode === 'rich' ? getRichCaretBookmark() : null;
 
-      state.markdownRelativePath = normalizeAssetPath(chosen.relativePath || chosen.file.name || state.fileName);
-      state.directoryHandle = directoryHandle;
+      setDocumentBinding({ directoryHandle, markdownRelativePath: chosen.relativePath || chosen.file.name, fileHandle: chosen.handle || state.fileHandle, directoryName: directoryHandle?.name || folderName }, generation);
       state.pickerStartDirectoryHandle = directoryHandle || state.pickerStartDirectoryHandle;
-      state.directoryName = directoryHandle?.name || folderName || '';
-      state.fileHandle = chosen.handle || state.fileHandle || null;
       clearAssetUrls();
       buildFolderAssetUrls(entries, dirnamePath(state.markdownRelativePath));
-      if (directoryHandle) {
-        await persistDirectoryHandle(directoryHandle);
-        await rememberPickerStartDirectory(directoryHandle);
-      } else {
-        await clearPersistedDirectoryHandle();
-      }
       els.source.value = state.markdown;
       syncCodeMirrorSourceFromTextarea('grant-folder');
       refreshAfterFolderGrant(previousMode, richBookmark, sourceSelection);
@@ -1246,28 +1339,38 @@
       persistDraft();
       state.dirty = previousDirty;
       updateStatusBar();
+      if (directoryHandle) {
+        await persistDirectoryHandle(directoryHandle, generation);
+        if (!isDocumentAccessCurrent(generation)) return;
+        await rememberPickerStartDirectory(directoryHandle, generation);
+      } else {
+        await clearPersistedDirectoryHandle(generation);
+      }
+      if (!isDocumentAccessCurrent(generation)) return;
       const access = directoryHandle ? 'File System Access API' : 'フォルダ入力';
       setStatus(`${state.fileName} の編集中内容を維持したままフォルダを許可しました (${access})。画像候補: ${state.assetUrls.size}${folderScanStatusSuffix()}`);
       warnFolderScanLimitIfNeeded();
     }
 
     async function findCurrentMarkdownEntry(entries) {
-      if (state.fileHandle?.isSameEntry) {
+      const binding = state.documentBinding;
+      if (binding.fileHandle?.isSameEntry) {
         for (const entry of entries) {
           if (!entry.handle?.isSameEntry) continue;
           try {
-            if (await entry.handle.isSameEntry(state.fileHandle)) return entry;
+            if (await entry.handle.isSameEntry(binding.fileHandle)) return entry;
           } catch (_) {}
         }
+        return null;
       }
 
-      const currentRelative = normalizeAssetPath(state.markdownRelativePath || '');
+      const currentRelative = binding.markdownRelativePath;
       if (currentRelative) {
         const exact = entries.find((entry) => normalizeAssetPath(entry.relativePath || '') === currentRelative);
         if (exact) return exact;
       }
 
-      const currentName = safeFileName(state.fileName || '');
+      const currentName = safeFileName(binding.fileName || '');
       const candidates = entries.filter((entry) => isMarkdownFile(entry.file) && entry.file.name === currentName);
       if (candidates.length === 1) return candidates[0];
       if (candidates.length > 1) return chooseMarkdownEntry(candidates);
@@ -1329,23 +1432,25 @@
       const files = Array.from(event.target.files || []);
       event.target.value = '';
       if (!files.length) return;
+      const pending = pendingFolderInput || { mode: state.folderInputMode, generation: beginDocumentAccess() };
+      pendingFolderInput = null;
+      if (!isDocumentAccessCurrent(pending.generation)) return;
 
       const context = createFolderScanContext();
       const entries = folderInputEntriesWithinLimits(files, context);
       state.folderScanLimitMessage = folderScanLimitMessage(context);
-      const mode = state.folderInputMode;
+      const mode = pending.mode;
       state.folderInputMode = 'open';
       if (mode === 'grant-current') {
-        grantFolderEntriesForCurrentDocument(entries, '', null);
-        return;
+        return grantFolderEntriesForCurrentDocument(entries, '', null, pending.generation);
       }
-      openFolderEntries(entries, '', null);
+      return openFolderEntries(entries, '', null, pending.generation);
     }
 
-    async function collectLimitedDirectoryEntries(directoryHandle) {
+    async function collectLimitedDirectoryEntries(directoryHandle, generation = state.documentGeneration) {
       const context = createFolderScanContext();
       const entries = await collectDirectoryEntries(directoryHandle, '', context, 0);
-      state.folderScanLimitMessage = folderScanLimitMessage(context);
+      if (isDocumentAccessCurrent(generation)) state.folderScanLimitMessage = folderScanLimitMessage(context);
       return entries;
     }
 
@@ -1421,7 +1526,8 @@
       alert(`警告: ${message}`);
     }
 
-    async function openFolderEntries(entries, folderName, directoryHandle = null) {
+    async function openFolderEntries(entries, folderName, directoryHandle = null, generation = beginDocumentAccess()) {
+      if (!isDocumentAccessCurrent(generation)) return;
       if (!entries.length) return;
 
       const markdownEntries = entries.filter((entry) => isMarkdownFile(entry.file));
@@ -1432,7 +1538,7 @@
       }
 
       const chosen = await chooseMarkdownEntry(markdownEntries);
-      if (!chosen) return;
+      if (!isDocumentAccessCurrent(generation) || !chosen) return;
       if (chosen.file.size > 10 * 1024 * 1024) {
         setStatus('10MBを超えるファイルは読み込みません');
         return;
@@ -1441,27 +1547,28 @@
 
       try {
         const markdown = await readTextFile(chosen.file);
+        if (!isDocumentAccessCurrent(generation)) return;
         clearAssetUrls();
         state.markdown = normalizeNewlines(markdown);
         advanceDocumentRevision();
         state.fileName = safeFileName(chosen.file.name || 'untitled.md');
-        state.markdownRelativePath = normalizeAssetPath(chosen.relativePath || chosen.file.name || '');
-        state.directoryHandle = directoryHandle;
+        setDocumentBinding({ directoryHandle, markdownRelativePath: chosen.relativePath || chosen.file.name, fileHandle: chosen.handle, fileName: state.fileName, directoryName: directoryHandle?.name || folderName }, generation);
         state.pickerStartDirectoryHandle = directoryHandle || state.pickerStartDirectoryHandle;
-        state.directoryName = directoryHandle?.name || folderName || '';
-        state.fileHandle = chosen.handle || null;
         buildFolderAssetUrls(entries, dirnamePath(state.markdownRelativePath));
-        if (directoryHandle) {
-          await persistDirectoryHandle(directoryHandle);
-          await rememberPickerStartDirectory(directoryHandle);
-        } else {
-          await clearPersistedDirectoryHandle();
-        }
+        // Publish the new document before persistence can yield to another edit.
         state.dirty = false;
         els.source.value = state.markdown;
         syncCodeMirrorSourceFromTextarea('open-folder');
         renderAll('open-folder');
         persistDraft();
+        if (directoryHandle) {
+          await persistDirectoryHandle(directoryHandle, generation);
+          if (!isDocumentAccessCurrent(generation)) return;
+          await rememberPickerStartDirectory(directoryHandle, generation);
+        } else {
+          await clearPersistedDirectoryHandle(generation);
+        }
+        if (!isDocumentAccessCurrent(generation)) return;
         const count = state.assetUrls.size;
         const suffix = folderName ? ` (${folderName})` : '';
         const access = directoryHandle ? 'File System Access API' : 'フォルダ入力';
@@ -1469,6 +1576,7 @@
         setStatus(`${state.fileName} をフォルダ基準で開きました${suffix} (${access})。画像候補: ${count}${assetsHint}${folderScanStatusSuffix()}`);
         warnFolderScanLimitIfNeeded();
       } catch (error) {
+        if (!isDocumentAccessCurrent(generation)) return;
         warnSafeError('open folder markdown failed', error);
         setStatus(fileReadFailureMessage(error));
       }
@@ -1520,17 +1628,20 @@
       if (requestDesktopCommand('save')) return;
       const snapshot = currentDocumentSaveSnapshot();
       if (await saveMarkdownToOpenedFile(snapshot)) return;
+      if (snapshot.binding !== state.documentBinding) return;
       downloadMarkdown();
     }
 
     function currentDocumentSaveSnapshot() {
-      return {
+      const binding = state.documentBinding;
+      return Object.freeze({
         markdown: state.markdown,
         revision: state.documentRevision,
-        directoryHandle: state.directoryHandle,
-        markdownRelativePath: state.markdownRelativePath,
-        fileName: state.fileName,
-      };
+        binding,
+        directoryHandle: binding.directoryHandle,
+        markdownRelativePath: binding.markdownRelativePath,
+        fileName: binding.fileName,
+      });
     }
 
     async function saveMarkdownToOpenedFile(snapshot) {
@@ -1540,18 +1651,22 @@
         return false;
       }
       if (!await ensureDirectoryPermission(snapshot.directoryHandle, 'readwrite')) {
+        if (snapshot.binding !== state.documentBinding) return true;
         setStatus('Markdownファイルの上書き保存に必要なフォルダ書き込み権限がありません。ダウンロード保存に切り替えます');
         return false;
       }
 
       try {
+        if (snapshot.binding !== state.documentBinding) return true;
         const fileHandle = await markdownFileHandleForSnapshot(snapshot);
+        if (snapshot.binding !== state.documentBinding) return true;
         const writable = await fileHandle.createWritable();
         try {
           await writable.write(new Blob([snapshot.markdown], { type: 'text/markdown;charset=utf-8' }));
         } finally {
           await writable.close();
         }
+        if (snapshot.binding !== state.documentBinding) return true;
         const savedCurrentRevision = snapshot.revision === state.documentRevision;
         if (savedCurrentRevision) state.dirty = false;
         persistDraft();
@@ -1561,6 +1676,7 @@
           : `${snapshot.markdownRelativePath} に保存しました。保存中の変更は未保存です`);
         return true;
       } catch (_) {
+        if (snapshot.binding !== state.documentBinding) return true;
         setStatus('Markdownファイルの上書き保存に失敗しました。ダウンロード保存に切り替えます');
         return false;
       }
@@ -1653,6 +1769,7 @@
     }
 
     function resetDocumentState() {
+      const generation = beginDocumentAccess();
       window.clearTimeout(state.saveTimer);
       window.clearTimeout(state.renderTimer);
       window.clearTimeout(state.richReparseTimer);
@@ -1660,10 +1777,7 @@
       state.markdown = DEFAULT_MARKDOWN;
       advanceDocumentRevision();
       state.fileName = 'untitled.md';
-      state.markdownRelativePath = '';
-      state.directoryHandle = null;
-      state.directoryName = '';
-      state.fileHandle = null;
+      setDocumentBinding({ fileName: state.fileName }, generation);
       state.folderScanLimitMessage = '';
       state.dirty = false;
       state.lastAutoSaved = null;
@@ -1703,21 +1817,20 @@
     }
 
     async function clearFolderPermissionRecords(options = {}) {
-      await deleteFsaDatabase();
+      const generation = beginDocumentAccess();
       clearFolderPermissionState();
+      await deleteFsaDatabase();
+      if (!isDocumentAccessCurrent(generation)) return;
       renderAll('folder-permission-clear');
       if (options.status !== false) setStatus('フォルダ権限の記録を削除しました。保存済みファイルやassets画像は削除していません');
     }
 
     function clearFolderPermissionState() {
       clearAssetUrls();
-      state.directoryHandle = null;
+      setDocumentBinding({});
       state.pickerStartDirectoryHandle = null;
       state.settingsDirectoryHandle = null;
       state.settingsDirectoryName = '';
-      state.directoryName = '';
-      state.markdownRelativePath = '';
-      state.fileHandle = null;
       state.folderScanLimitMessage = '';
     }
 
@@ -2067,6 +2180,7 @@
 
 
     return Object.freeze({
+      beginDocumentAccess,
       beginImageInsertion,
       buildFolderAssetUrls,
       captureCurrentMarkdownFromEditor,
@@ -2109,6 +2223,7 @@
       saveImageFileToAssets,
       saveMarkdown,
       saveSettingsToConfigDirectory,
+      setDocumentBinding,
       showLinkDomainDialog,
     });
   }

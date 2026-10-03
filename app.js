@@ -388,6 +388,7 @@ flowchart TD
     throw new Error('File manager module is not available');
   }
   const {
+    beginDocumentAccess,
     beginImageInsertion,
     buildFolderAssetUrls,
     captureCurrentMarkdownFromEditor,
@@ -430,6 +431,7 @@ flowchart TD
     saveImageFileToAssets,
     saveMarkdown,
     saveSettingsToConfigDirectory,
+    setDocumentBinding,
     showLinkDomainDialog,
   } = fileManagerFactory({
     state,
@@ -703,7 +705,7 @@ flowchart TD
     restoreSettings();
     initializeShortcutUi();
     restoreDraft();
-    if (state.desktopHost) state.markdownRelativePath = '';
+    if (state.desktopHost) setDocumentBinding({});
     bindEvents();
     applyTheme();
     applyDocumentFont();
@@ -810,7 +812,7 @@ flowchart TD
     if (!draft || typeof draft.markdown !== 'string') return;
     state.markdown = stripRichCaretTokens(draft.markdown);
     state.fileName = safeFileName(draft.fileName || 'untitled.md');
-    state.markdownRelativePath = normalizeAssetPath(draft.markdownRelativePath || '');
+    setDocumentBinding({ bindingId: draft.bindingId, markdownRelativePath: draft.markdownRelativePath, fileName: state.fileName }, beginDocumentAccess());
     state.lastAutoSaved = draft.savedAt || null;
     state.dirty = draft.dirty !== false;
     advanceDocumentRevision();
@@ -2029,15 +2031,13 @@ flowchart TD
   function newDocument() {
     if (requestDesktopCommand('new')) return;
     if (!confirmDocumentReplacement('新規文書')) return;
+    const generation = beginDocumentAccess();
     clearAssetUrls();
     state.markdown = '# 無題\n\nここにMarkdownを書いてください。\n';
     advanceDocumentRevision();
     state.fileName = 'untitled.md';
-    state.directoryHandle = null;
-    state.directoryName = '';
-    state.markdownRelativePath = '';
-    state.fileHandle = null;
-    clearPersistedDirectoryHandle();
+    setDocumentBinding({ fileName: state.fileName }, generation);
+    clearPersistedDirectoryHandle(generation);
     state.dirty = false;
     els.source.value = state.markdown;
     syncCodeMirrorSourceFromTextarea('new-document');
@@ -3439,8 +3439,9 @@ flowchart TD
     state.markdown = stripRichCaretTokens(state.markdown);
     const ok = writeJson(STORAGE_KEY, {
       markdown: state.markdown,
-      fileName: state.fileName,
-      markdownRelativePath: state.markdownRelativePath,
+      bindingId: state.documentBinding.bindingId,
+      fileName: state.documentBinding.fileName,
+      markdownRelativePath: state.documentBinding.markdownRelativePath,
       dirty: state.dirty,
       savedAt: new Date().toISOString(),
     });
