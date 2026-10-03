@@ -59,8 +59,9 @@ function memoryFile(name, text, type = 'text/markdown') {
     size: new TextEncoder().encode(text).byteLength,
     type,
     text,
-    readPause: null,
+    readPause: null, readCalls: 0,
     async arrayBuffer() {
+      this.readCalls += 1;
       if (this.readPause) await this.readPause.wait();
       return new TextEncoder().encode(this.text).buffer;
     },
@@ -101,8 +102,12 @@ function memoryRoot(name, markdown = '# File content', fileName = 'draft.md') {
     },
     addFile(file) {
       const handle = {
-        kind: 'file', name: file.name, file, writePause: null, getFilePause: null, identityPause: null,
-        async getFile() { if (this.getFilePause) await this.getFilePause.wait(); return this.file; },
+        kind: 'file', name: file.name, file, writePause: null, getFilePause: null, identityPause: null, getFileCalls: 0,
+        async getFile() {
+          this.getFileCalls += 1;
+          if (this.getFilePause) await this.getFilePause.wait();
+          return this.file;
+        },
         async isSameEntry(other) { if (this.identityPause) await this.identityPause.wait(); return this === other; },
         async createWritable() {
           return {
@@ -172,7 +177,7 @@ function createHarness(options = {}) {
   };
   const els = {
     source: { value: state.markdown, scrollTop: 0 },
-    fileInput: { click() {} }, folderInput: { click() {} },
+    fileInput: { click() {} }, folderInput: { click() {} }, folderScanCancel: { hidden: true },
   };
   const store = {
     get(key) {
@@ -229,7 +234,12 @@ function createHarness(options = {}) {
       return typeof chosen === 'function' ? chosen() : [chosen];
     },
     console: { warn: (...args) => effects.warnings.push(args) },
-    clearTimeout() {}, setTimeout(callback) { callback(); return 0; },
+    clearTimeout,
+    setTimeout(callback, delay = 0) {
+      const timer = setTimeout(callback, delay);
+      timer.unref();
+      return timer;
+    },
   };
   let objectUrlId = 0;
   const document = {
@@ -274,7 +284,7 @@ function createHarness(options = {}) {
     setSourceSelectionRange() {}, restoreRichCaret() {},
   };
   const sandbox = {
-    window, document, TextDecoder, Blob, crypto: window.crypto,
+    window, document, TextDecoder, Blob, performance, crypto: window.crypto,
     URL: {
       createObjectURL: () => `blob:memory-${++objectUrlId}`,
       revokeObjectURL: (value) => effects.revokedUrls.push(value),
@@ -292,7 +302,11 @@ function createHarness(options = {}) {
       FSA_DIRECTORY_HANDLE_KEY: DIRECTORY_KEY, FSA_PICKER_START_HANDLE_KEY: PICKER_KEY,
       FSA_SETTINGS_DIRECTORY_HANDLE_KEY: 'settings-directory',
       ALLOWED_IMAGE_TYPES: new Set(['image/png']), MAX_FOLDER_SCAN_FILES: 100, MAX_FOLDER_SCAN_DEPTH: 4,
+      MAX_ASSET_IMAGE_BYTES: 25 * 1024 * 1024,
+      MAX_FOLDER_SCAN_ENTRIES: 10000, MAX_FOLDER_SCAN_BYTES: 128 * 1024 * 1024,
+      MAX_FOLDER_SCAN_PATH_BYTES: 1024 * 1024, MAX_FOLDER_SCAN_MS: 5000,
       DEFAULT_MARKDOWN: '# Default document',
+      ...options.scanLimits,
     },
   });
   assert.equal(typeof api.beginDocumentAccess, 'function', 'document access invalidation must be public for app document resets');
@@ -866,6 +880,477 @@ test('a document switch during restore identity verification invalidates the old
   await harness.api.saveMarkdown();
   assert.deepEqual(newRoot.writes, [{ root: 'new-root', path: 'draft.md', text: '# Newer selected document' }]);
   assert.deepEqual(harness.oldRoot.writes, []);
+});
+
+function emptyRoot(name) {
+  const root = memoryRoot(name, null);
+  root.files.clear();
+  return root;
+}
+
+function streamRoot(name, entryAt) {
+  const root = emptyRoot(name);
+  const calls = { next: 0, returned: 0 };
+  root.entries = () => {
+    let index = 0;
+    return {
+      async next() {
+        calls.next += 1;
+        const value = await entryAt(index++);
+        if (value === null) return { done: true };
+        calls.returned += 1;
+        return { value, done: false };
+      },
+      [Symbol.asyncIterator]() { return this; },
+    };
+  };
+  return { root, calls };
+}
+
+async function openRoot(harness, root) {
+  harness.directoryPickers.push(root);
+  await harness.api.openFolder();
+}
+
+function assertScanWarning(harness) {
+  assert.ok(harness.state.folderScanLimitMessage, 'the scan limit must remain visible in state');
+  assert.ok(harness.effects.warnings.some((message) => typeof message === 'string'
+    && message.includes(harness.state.folderScanLimitMessage)), 'a limited scan must show its warning');
+  assert.equal(harness.els.folderScanCancel.hidden, true, 'the cancel control must be hidden after completion');
+}
+
+function folderInputFile(name, text, relativePath, type = 'text/markdown') {
+  return Object.assign(memoryFile(name, text, type), { webkitRelativePath: relativePath });
+}
+
+function indexedFiles(length, fileAt) {
+  const reads = [];
+  const files = new Proxy({ length }, {
+    get(target, key) {
+      if (key === Symbol.iterator) throw new Error('folder input must not materialize or iterate the whole FileList');
+      if (typeof key === 'string' && /^\d+$/.test(key)) {
+        const index = Number(key);
+        reads.push(index);
+        return fileAt(index);
+      }
+      return Reflect.get(target, key);
+    },
+  });
+  return { files, reads };
+}
+
+test('empty directory entries consume the traversal budget even without candidate files', async () => {
+  const harness = createHarness({ scanLimits: { MAX_FOLDER_SCAN_ENTRIES: 3 } });
+  const empty = emptyRoot('empty');
+  const { root, calls } = streamRoot('directory-storm', (index) => index < 20 ? [`empty-${index}`, empty] : null);
+  await openRoot(harness, root);
+  assert.equal(calls.returned, 3);
+  assert.equal(calls.next, 3, 'the iterator must not be advanced beyond the entry budget');
+  assert.equal(harness.state.markdown, '# Restored draft');
+  assert.equal(harness.state.directoryHandle, null);
+  assertScanWarning(harness);
+});
+
+test('unrelated file entries are counted without obtaining their File objects', async () => {
+  const harness = createHarness({ scanLimits: { MAX_FOLDER_SCAN_ENTRIES: 4, MAX_FOLDER_SCAN_FILES: 100 } });
+  let fileReads = 0;
+  const { root, calls } = streamRoot('unrelated-storm', (index) => index < 20 ? [`archive-${index}.zip`, {
+    kind: 'file', name: `archive-${index}.zip`,
+    async getFile() { fileReads += 1; throw new Error('unrelated file metadata must not be read'); },
+  }] : null);
+  await openRoot(harness, root);
+  assert.equal(calls.returned, 4);
+  assert.equal(calls.next, 4);
+  assert.equal(fileReads, 0);
+  assert.equal(harness.state.markdown, '# Restored draft');
+  assertScanWarning(harness);
+});
+
+test('the file count budget includes ignored file handles before getFile', async () => {
+  const harness = createHarness({ scanLimits: { MAX_FOLDER_SCAN_FILES: 2 } });
+  const root = emptyRoot('file-budget');
+  const ignored = root.addFile(memoryFile('archive.zip', 'ignored', 'application/zip'));
+  const included = root.addFile(memoryFile('draft.md', '# Within count'));
+  const excluded = root.addFile(memoryFile('later.png', 'later', 'image/png'));
+  await openRoot(harness, root);
+  assert.equal(ignored.getFileCalls, 0);
+  assert.equal(included.getFileCalls, 1);
+  assert.equal(excluded.getFileCalls, 0);
+  assert.equal(harness.state.markdown, '# Within count');
+  assert.equal(harness.state.assetUrls.size, 0);
+  assertScanWarning(harness);
+});
+
+test('normal Markdown and image candidates retain extension and extensionless MIME compatibility', async () => {
+  const harness = createHarness();
+  const root = emptyRoot('candidate-types');
+  const markdown = root.addFile(memoryFile('README', '# Extensionless document', 'text/plain'));
+  const raster = root.addFile(memoryFile('photo.PNG', 'image', 'application/octet-stream'));
+  const mimeImage = root.addFile(memoryFile('picture', 'image', 'image/png'));
+  const unrelated = root.addFile(memoryFile('database.sqlite', 'ignored', 'text/plain'));
+  await openRoot(harness, root);
+  assert.equal(markdown.getFileCalls, 1);
+  assert.equal(raster.getFileCalls, 1);
+  assert.equal(mimeImage.getFileCalls, 1);
+  assert.equal(unrelated.getFileCalls, 0);
+  assert.equal(harness.state.markdown, '# Extensionless document');
+  assert.ok(harness.state.assetUrls.has('photo.PNG'));
+  assert.ok(harness.state.assetUrls.has('picture'));
+  assert.equal(harness.state.folderScanLimitMessage, '');
+  assert.equal(harness.els.folderScanCancel.hidden, true);
+});
+
+test('per-file size limits exclude large Markdown and images before content or object URL use', async () => {
+  const harness = createHarness({ scanLimits: { MAX_ASSET_IMAGE_BYTES: 16 } });
+  const root = emptyRoot('oversized-files');
+  const largeDocument = Object.assign(memoryFile('large.md', '# Must not open'), { size: 10 * 1024 * 1024 + 1 });
+  const largeImage = Object.assign(memoryFile('large.png', 'not loaded', 'image/png'), { size: 17 });
+  root.addFile(largeDocument);
+  root.addFile(largeImage);
+  root.addFile(memoryFile('draft.md', '# Small document'));
+  root.addFile(memoryFile('small.png', 'small', 'image/png'));
+  await openRoot(harness, root);
+  assert.equal(largeDocument.readCalls, 0);
+  assert.equal(largeImage.readCalls, 0);
+  assert.equal(harness.state.markdown, '# Small document');
+  assert.ok(harness.state.assetUrls.has('small.png'));
+  assert.equal(harness.state.assetUrls.has('large.png'), false);
+  assertScanWarning(harness);
+});
+
+test('the cumulative candidate byte budget retains only the prefix that fits', async () => {
+  const harness = createHarness({ scanLimits: { MAX_FOLDER_SCAN_BYTES: 8 } });
+  const root = emptyRoot('aggregate-bytes');
+  root.addFile(memoryFile('draft.md', 'x'));
+  const accepted = root.addFile(memoryFile('first.png', '1234', 'image/png'));
+  const overflow = root.addFile(memoryFile('second.png', '5678', 'image/png'));
+  const untouched = root.addFile(memoryFile('third.png', '9', 'image/png'));
+  await openRoot(harness, root);
+  assert.equal(harness.state.markdown, 'x');
+  assert.equal(accepted.getFileCalls, 1);
+  assert.equal(overflow.getFileCalls, 1);
+  assert.equal(untouched.getFileCalls, 0);
+  assert.ok(harness.state.assetUrls.has('first.png'));
+  assert.equal(harness.state.assetUrls.has('second.png'), false);
+  assertScanWarning(harness);
+});
+
+test('visited raw paths consume a UTF-16 byte budget before file metadata is read', async () => {
+  const harness = createHarness({ scanLimits: { MAX_FOLDER_SCAN_PATH_BYTES: 19 } });
+  const root = emptyRoot('path-budget');
+  root.addFile(memoryFile('a.md', '# Path budget'));
+  const overflow = root.addFile(memoryFile('🙂.png', 'image', 'image/png'));
+  const untouched = root.addFile(memoryFile('b.png', 'image', 'image/png'));
+  await openRoot(harness, root);
+  assert.equal(harness.state.markdown, '# Path budget');
+  assert.equal(overflow.getFileCalls, 0, '8 + 12 UTF-16 path bytes exceed the 19-byte budget');
+  assert.equal(untouched.getFileCalls, 0);
+  assert.equal(harness.state.assetUrls.size, 0);
+  assertScanWarning(harness);
+});
+
+test('paths of ignored entries still consume the shared path budget', async () => {
+  const harness = createHarness({ scanLimits: { MAX_FOLDER_SCAN_PATH_BYTES: 20 } });
+  const root = emptyRoot('ignored-path-budget');
+  root.addFile(memoryFile('a.md', '# First file'));
+  const ignored = root.addFile(memoryFile('very-long-archive.zip', 'ignored', 'application/zip'));
+  const untouched = root.addFile(memoryFile('b.png', 'image', 'image/png'));
+  await openRoot(harness, root);
+  assert.equal(harness.state.markdown, '# First file');
+  assert.equal(ignored.getFileCalls, 0);
+  assert.equal(untouched.getFileCalls, 0);
+  assertScanWarning(harness);
+});
+
+function pendingScanRoot(stage, pending) {
+  const root = emptyRoot(`pending-${stage}`);
+  const documentHandle = root.addFile(memoryFile('draft.md', '# Partial scan document'));
+  const imageHandle = root.addFile(memoryFile('pending.png', 'image', 'image/png'));
+  const untouched = root.addFile(memoryFile('later.png', 'image', 'image/png'));
+  if (stage === 'next') {
+    root.entries = async function* entries() {
+      yield ['draft.md', documentHandle];
+      await pending.wait();
+      yield ['pending.png', imageHandle];
+      yield ['later.png', untouched];
+    };
+  } else {
+    imageHandle.getFilePause = pending;
+  }
+  return { root, documentHandle, imageHandle, untouched };
+}
+
+for (const stage of ['next', 'getFile']) {
+  test(`the time limit releases a stalled ${stage} and preserves already collected candidates`, async () => {
+    const harness = createHarness({ scanLimits: { MAX_FOLDER_SCAN_MS: 30 } });
+    const pending = pause();
+    const { root, imageHandle, untouched } = pendingScanRoot(stage, pending);
+    const completion = openRoot(harness, root);
+    await bounded(pending.entered, `time-limited ${stage} entered`);
+    assert.equal(harness.els.folderScanCancel.hidden, false);
+    await bounded(completion, `time-limited ${stage} returns without releasing I/O`);
+    assert.equal(harness.state.markdown, '# Partial scan document');
+    assert.equal(harness.state.assetUrls.size, 0);
+    assertScanWarning(harness);
+    assert.equal(imageHandle.getFileCalls, stage === 'getFile' ? 1 : 0);
+    assert.equal(untouched.getFileCalls, 0);
+    const expected = visibleState(harness);
+    pending.release();
+    await new Promise((resolve) => setImmediate(resolve));
+    assertUnchanged(harness, expected, `late ${stage} after timeout`);
+    assert.equal(untouched.getFileCalls, 0);
+  });
+
+  for (const cancellation of ['user', 'generation']) {
+    test(`${cancellation} cancellation releases a stalled ${stage} and stops subsequent I/O`, async () => {
+      const harness = createHarness();
+      const pending = pause();
+      const { root, documentHandle, imageHandle, untouched } = pendingScanRoot(stage, pending);
+      const completion = openRoot(harness, root);
+      await bounded(pending.entered, `cancelled ${stage} entered`);
+      assert.equal(harness.els.folderScanCancel.hidden, false);
+      if (cancellation === 'user') harness.api.cancelFolderScan();
+      else bindNewDocument(harness);
+      await bounded(completion, `${cancellation} cancellation must not await stalled ${stage}`);
+      assert.equal(harness.state.markdown, cancellation === 'user' ? '# Restored draft' : '# New unsaved document');
+      assert.equal(harness.state.directoryHandle, null);
+      assert.equal(documentHandle.file.readCalls, 0, 'partial candidates must not replace the document after cancellation');
+      assert.equal(harness.els.folderScanCancel.hidden, true);
+      assert.equal(imageHandle.getFileCalls, stage === 'getFile' ? 1 : 0);
+      assert.equal(untouched.getFileCalls, 0);
+      const expected = visibleState(harness);
+      if (cancellation === 'generation') pending.reject(namedError('NotReadableError'));
+      else pending.release();
+      await new Promise((resolve) => setImmediate(resolve));
+      assertUnchanged(harness, expected, `${cancellation} late ${stage}`);
+      assert.equal(untouched.getFileCalls, 0);
+    });
+  }
+}
+
+test('a scan deadline also warns when no candidates have been collected', async () => {
+  const harness = createHarness({ scanLimits: { MAX_FOLDER_SCAN_MS: 30 } });
+  const root = emptyRoot('empty-timeout');
+  const pending = pause();
+  root.scanPause = pending;
+  const completion = openRoot(harness, root);
+  await bounded(pending.entered, 'empty scan started');
+  await bounded(completion, 'empty stalled scan returns at deadline');
+  assert.equal(harness.state.markdown, '# Restored draft');
+  assertScanWarning(harness);
+  pending.release();
+});
+
+test('folder input reads only a bounded FileList prefix without copying or iteration', async () => {
+  const harness = createHarness({ scanLimits: { MAX_FOLDER_SCAN_ENTRIES: 4 } });
+  const { files, reads } = indexedFiles(1000000000, (index) => {
+    assert.ok(index < 8, 'the mock stops runaway reads if the scan budget regresses');
+    return index === 0
+      ? folderInputFile('draft.md', '# Bounded input', 'selected/draft.md')
+      : folderInputFile(`${index}.zip`, 'ignored', `selected/${index}.zip`, 'application/zip');
+  });
+  const target = { files, value: 'selected' };
+  await harness.api.onFolderChosen({ target });
+  assert.deepEqual(reads, [0, 1, 2, 3]);
+  assert.equal(harness.state.markdown, '# Bounded input');
+  assert.equal(target.value, '');
+  assertScanWarning(harness);
+});
+
+for (const cancellation of ['user', 'generation']) {
+  test(`folder input yields between batches so ${cancellation} cancellation stops index reads`, async () => {
+    const harness = createHarness({ scanLimits: { MAX_FOLDER_SCAN_FILES: 5000 } });
+    const length = 2000;
+    let readsAtCancellation = null;
+    const cancellationRan = deferred();
+    const { files, reads } = indexedFiles(length, (index) => {
+      if (index === 0) {
+        setTimeout(() => {
+          readsAtCancellation = reads.length;
+          assert.equal(harness.els.folderScanCancel.hidden, false);
+          if (cancellation === 'user') harness.api.cancelFolderScan();
+          else bindNewDocument(harness);
+          cancellationRan.resolve();
+        }, 0);
+      }
+      return folderInputFile(`${index}.png`, 'image', `selected/${index}.png`, 'image/png');
+    });
+    const target = { files, value: 'selected' };
+    const completion = harness.api.onFolderChosen({ target });
+    await cancellationRan.promise;
+    await completion;
+    assert.ok(readsAtCancellation > 0 && readsAtCancellation < length, 'the main event loop must run before the whole input is consumed');
+    assert.equal(reads.length, readsAtCancellation, 'no FileList access may follow cancellation');
+    assert.equal(harness.state.markdown, cancellation === 'user' ? '# Restored draft' : '# New unsaved document');
+    assert.equal(harness.state.assetUrls.size, 0);
+    assert.equal(target.value, '');
+    assert.equal(harness.els.folderScanCancel.hidden, true);
+  });
+}
+
+test('folder input is reset even when reading a FileList entry fails', async () => {
+  const harness = createHarness();
+  const { files } = indexedFiles(1, () => { throw namedError('NotReadableError'); });
+  const target = { files, value: 'selected' };
+  await Promise.resolve(harness.api.onFolderChosen({ target })).catch(() => {});
+  assert.equal(target.value, '');
+  assert.equal(harness.els.folderScanCancel.hidden, true);
+  assert.equal(harness.state.markdown, '# Restored draft');
+});
+
+for (const route of ['directory', 'input']) {
+  test(`${route} scan treats files immediately below the selected root as depth zero`, async () => {
+    const harness = createHarness({ scanLimits: { MAX_FOLDER_SCAN_DEPTH: 0 } });
+    if (route === 'directory') {
+      const root = emptyRoot('selected');
+      const child = emptyRoot('child');
+      child.addFile(memoryFile('deep.md', '# Too deep'));
+      root.directories.set('child', child);
+      root.addFile(memoryFile('draft.md', '# Root document'));
+      root.addFile(memoryFile('root.png', 'image', 'image/png'));
+      await openRoot(harness, root);
+      assert.equal(child.files.get('deep.md').getFileCalls, 0);
+    } else {
+      const target = { value: 'selected', files: [
+        folderInputFile('deep.md', '# Too deep', 'selected/child/deep.md'),
+        folderInputFile('draft.md', '# Root document', 'selected/draft.md'),
+        folderInputFile('root.png', 'image', 'selected/root.png', 'image/png'),
+      ] };
+      await harness.api.onFolderChosen({ target });
+      assert.equal(target.value, '');
+    }
+    assert.equal(harness.state.markdown, '# Root document');
+    assert.ok(harness.state.assetUrls.has('root.png'));
+    assertScanWarning(harness);
+  });
+}
+
+test('folder input applies cumulative size limits before building image URLs', async () => {
+  const harness = createHarness({ scanLimits: { MAX_FOLDER_SCAN_BYTES: 8 } });
+  const { files, reads } = indexedFiles(4, (index) => [
+    folderInputFile('draft.md', 'x', 'selected/draft.md'),
+    folderInputFile('first.png', '1234', 'selected/first.png', 'image/png'),
+    folderInputFile('second.png', '5678', 'selected/second.png', 'image/png'),
+    folderInputFile('later.png', 'x', 'selected/later.png', 'image/png'),
+  ][index]);
+  const target = { files, value: 'selected' };
+  await harness.api.onFolderChosen({ target });
+  assert.deepEqual(reads, [0, 1, 2]);
+  assert.equal(harness.state.markdown, 'x');
+  assert.ok(harness.state.assetUrls.has('first.png'));
+  assert.equal(harness.state.assetUrls.has('second.png'), false);
+  assert.equal(target.value, '');
+  assertScanWarning(harness);
+});
+
+test('folder input includes raw root paths in its cumulative path budget', async () => {
+  const firstPath = 'selected/a.md';
+  const secondPath = 'selected/🙂.png';
+  const harness = createHarness({ scanLimits: {
+    MAX_FOLDER_SCAN_PATH_BYTES: (firstPath.length + secondPath.length) * 2 - 1,
+  } });
+  const { files, reads } = indexedFiles(3, (index) => [
+    folderInputFile('a.md', '# Raw paths', firstPath),
+    folderInputFile('🙂.png', 'image', secondPath, 'image/png'),
+    folderInputFile('later.png', 'image', 'selected/later.png', 'image/png'),
+  ][index]);
+  const target = { files, value: 'selected' };
+  await harness.api.onFolderChosen({ target });
+  assert.deepEqual(reads, [0, 1]);
+  assert.equal(harness.state.markdown, '# Raw paths');
+  assert.equal(harness.state.assetUrls.size, 0);
+  assert.equal(target.value, '');
+  assertScanWarning(harness);
+});
+
+test('directory paths and their descendants share one cumulative path budget', async () => {
+  const harness = createHarness({ scanLimits: { MAX_FOLDER_SCAN_PATH_BYTES: 23 } });
+  const root = emptyRoot('nested-paths');
+  const child = emptyRoot('sub');
+  const childFile = child.addFile(memoryFile('a.md', '# Exceeds shared path budget'));
+  root.directories.set('sub', child);
+  const rootFile = root.addFile(memoryFile('later.md', '# Must not read'));
+  // "sub" consumes 6 bytes; "sub/a.md" consumes another 16 bytes.
+  const otherChildFile = child.addFile(memoryFile('b.png', 'image', 'image/png'));
+  await openRoot(harness, root);
+  assert.equal(harness.state.markdown, '# Exceeds shared path budget');
+  assert.equal(childFile.getFileCalls, 1);
+  assert.equal(otherChildFile.getFileCalls, 0);
+  assert.equal(rootFile.getFileCalls, 0);
+  assertScanWarning(harness);
+});
+
+test('cancelling a scan retains an established binding and its image URLs', async () => {
+  const harness = createHarness();
+  await harness.api.restorePersistedDirectoryHandle();
+  const before = visibleState(harness);
+  const pending = pause();
+  const { root, documentHandle } = pendingScanRoot('getFile', pending);
+  const completion = openRoot(harness, root);
+  await bounded(pending.entered, 'replacement scan pending');
+  harness.api.cancelFolderScan();
+  await bounded(completion, 'cancel preserves established document');
+  assert.equal(harness.state.directoryHandle, before.root);
+  assert.equal(harness.state.fileHandle, before.file);
+  assert.equal(harness.state.markdown, before.markdown);
+  assert.equal(harness.els.source.value, before.source);
+  assert.equal(harness.state.markdownRelativePath, before.relativePath);
+  assert.equal(harness.state.documentBinding.bindingId, before.binding.bindingId);
+  assert.equal(harness.state.dirty, before.dirty);
+  assert.deepEqual([...harness.state.assetUrls], before.assets);
+  assert.deepEqual(harness.effects.revokedUrls, before.revokedUrls);
+  assert.equal(documentHandle.file.readCalls, 0);
+  assert.equal(harness.els.folderScanCancel.hidden, true);
+  pending.release();
+});
+
+test('completion of a superseded scan cannot hide the cancel control for a newer scan', async () => {
+  const harness = createHarness();
+  const firstPending = pause();
+  const first = pendingScanRoot('next', firstPending);
+  const firstCompletion = openRoot(harness, first.root);
+  await bounded(firstPending.entered, 'first scan pending');
+  const secondPending = pause();
+  const second = pendingScanRoot('getFile', secondPending);
+  const secondCompletion = openRoot(harness, second.root);
+  await bounded(secondPending.entered, 'second scan pending');
+  await bounded(firstCompletion, 'superseded scan returns without its pending I/O');
+  assert.equal(harness.els.folderScanCancel.hidden, false);
+  harness.api.cancelFolderScan();
+  await bounded(secondCompletion, 'newer scan cancellation');
+  assert.equal(harness.els.folderScanCancel.hidden, true);
+  assert.equal(harness.state.markdown, '# Restored draft');
+  firstPending.release();
+  secondPending.release();
+});
+
+test('directory values iterators preserve normal Markdown and image loading', async () => {
+  const harness = createHarness();
+  const root = memoryRoot('values-root', '# Values iterator');
+  delete root.entries;
+  root.values = async function* values() { yield* root.files.values(); };
+  await openRoot(harness, root);
+  assert.equal(harness.state.markdown, '# Values iterator');
+  assert.equal(harness.state.directoryHandle, root);
+  assert.ok(harness.state.assetUrls.has('values-root.png'));
+  assert.equal(harness.state.folderScanLimitMessage, '');
+  assert.equal(harness.els.folderScanCancel.hidden, true);
+});
+
+test('a folder containing only unsupported files explains the missing Markdown for open and grant', async () => {
+  for (const action of ['openFolder', 'grantFolderForCurrentDocument']) {
+    const harness = createHarness();
+    const root = emptyRoot('unsupported');
+    const ignored = root.addFile(memoryFile('archive.zip', 'zip', 'application/zip'));
+    harness.directoryPickers.push(root);
+    await harness.api[action]();
+    assert.equal(ignored.getFileCalls, 0);
+    assert.ok(harness.effects.statuses.some((message) => action === 'openFolder'
+      ? message.includes('フォルダ内にMarkdownファイルがありません')
+      : message.includes('が選択フォルダ内に見つかりませんでした')));
+    assert.equal(harness.state.markdown, '# Restored draft');
+    assert.equal(harness.state.directoryHandle, null);
+  }
 });
 
 let passed = 0;

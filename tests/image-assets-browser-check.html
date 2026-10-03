@@ -179,6 +179,7 @@
 
     <footer class="statusbar" aria-live="polite">
       <span id="statusMessage">準備完了</span>
+      <button id="folderScanCancel" type="button" data-action="cancel-folder-scan" hidden>フォルダ走査を中止</button>
       <span id="documentStats">0文字 / 0語</span>
       <span id="saveState">自動保存: 未保存</span>
     </footer>
@@ -312,6 +313,78 @@
         return true;
       }
 
+      async function testFolderScanCancellation() {
+        const originalPicker = window.showDirectoryPicker;
+        const cancelButton = document.querySelector('#folderScanCancel[data-action="cancel-folder-scan"]');
+        assert(cancelButton?.hidden, 'folder scan cancel button was not initially hidden');
+        const source = document.getElementById('sourceEditor');
+        const sourceBefore = source.value;
+        const fileNameBefore = document.getElementById('fileNameLabel').textContent;
+        const readDraft = () => JSON.parse(localStorage.getItem('portable-markdown-editor:draft:v2') || '{}');
+        const draftBefore = readDraft();
+        assert(draftBefore.bindingId && draftBefore.markdownRelativePath === 'sample.md', 'sample document target was not persisted before cancellation');
+        let nextCalls = 0;
+        let getFileCalls = 0;
+        let returnCalls = 0;
+        let releaseNext;
+        const pendingNext = new Promise((resolve) => { releaseNext = resolve; });
+        const lateEntry = {
+          done: false,
+          value: ['cancelled.md', {
+            kind: 'file',
+            name: 'cancelled.md',
+            async getFile() {
+              getFileCalls += 1;
+              return new File(['# Cancelled folder must not replace sample.md\n'], 'cancelled.md', { type: 'text/markdown' });
+            },
+          }],
+        };
+        window.showDirectoryPicker = async () => ({
+          kind: 'directory',
+          name: 'cancelled-folder',
+          entries: () => ({
+            next() {
+              nextCalls += 1;
+              return nextCalls === 1 ? pendingNext : Promise.resolve({ done: true });
+            },
+            return() {
+              returnCalls += 1;
+              return Promise.resolve({ done: true });
+            },
+          }),
+        });
+
+        const assertDocumentPreserved = () => {
+          assert(source.value === sourceBefore, 'cancelled folder scan replaced the current Markdown');
+          assert(document.getElementById('fileNameLabel').textContent === fileNameBefore, 'cancelled folder scan changed the current file name');
+          assert(document.body.dataset.folderAccess === 'fsa', 'cancelled folder scan cleared the existing folder access');
+          const draft = readDraft();
+          for (const key of ['markdown', 'bindingId', 'fileName', 'markdownRelativePath', 'dirty']) {
+            assert(draft[key] === draftBefore[key], `cancelled folder scan changed draft ${key}`);
+          }
+        };
+        try {
+          document.querySelector('[data-action="open-folder"]').click();
+          await waitFor(() => nextCalls === 1 && !cancelButton.hidden, 'folder scan did not expose cancellation while iterator.next was pending');
+          assert(cancelButton.getClientRects().length > 0 && getComputedStyle(cancelButton).visibility !== 'hidden', 'folder scan cancel button was not visible');
+          cancelButton.click();
+          await waitFor(() => cancelButton.hidden, 'cancel did not finish while iterator.next was still pending', 1000);
+          assert(document.getElementById('statusMessage').textContent.includes('フォルダ走査を中止しました'), 'cancel action did not publish its completion status');
+          assert(returnCalls === 1, 'cancel did not close the pending folder iterator');
+          assertDocumentPreserved();
+
+          releaseNext(lateEntry);
+          await pendingNext;
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          assert(nextCalls === 1 && getFileCalls === 0, 'late iterator completion started further folder I/O after cancellation');
+          assert(cancelButton.hidden, 'late iterator completion exposed the cancel button again');
+          assertDocumentPreserved();
+        } finally {
+          releaseNext(lateEntry);
+          window.showDirectoryPicker = originalPicker;
+        }
+      }
+
       async function testSaveRevisionRace() {
         const prototype = FileSystemFileHandle.prototype;
         const originalDescriptor = Object.getOwnPropertyDescriptor(prototype, 'createWritable');
@@ -430,7 +503,9 @@
         await testShortcutCustomization();
         document.querySelector('[data-action="open-folder"]').click();
         await waitFor(() => document.body.dataset.folderAccess === 'fsa', 'folder was not opened through File System Access API');
+        await waitFor(() => document.getElementById('statusMessage').textContent.includes('をフォルダ基準で開きました'), 'sample folder target persistence did not finish');
         assert(document.getElementById('sourceEditor').value.includes('existing.png'), 'sample Markdown was not opened');
+        await testFolderScanCancellation();
 
         const rich = focusRichEnd();
         pasteImage(rich, imageFile('pasted.png'));
@@ -462,7 +537,7 @@
         assert(document.documentElement.dataset.documentFont === 'serif', 'restored document font was not applied');
         await hasAsset('pasted.png');
         await hasAsset('dropped.png');
-        pass('document font and custom shortcuts persisted across reload; paste/drop images saved to sample.assets, Markdown uses relative references, and FSA directory handle restored.');
+        pass('folder scan cancellation preserved the document and target after late iterator completion; document font and custom shortcuts persisted across reload; paste/drop images saved to sample.assets, Markdown uses relative references, and FSA directory handle restored.');
       }
 
       window.addEventListener('DOMContentLoaded', () => {

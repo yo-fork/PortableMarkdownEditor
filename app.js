@@ -15,6 +15,10 @@
   const MAX_HIGHLIGHT_CHARS = 120000;
   const MAX_FOLDER_SCAN_FILES = 5000;
   const MAX_FOLDER_SCAN_DEPTH = 8;
+  const MAX_FOLDER_SCAN_ENTRIES = 10000;
+  const MAX_FOLDER_SCAN_BYTES = 128 * 1024 * 1024;
+  const MAX_FOLDER_SCAN_PATH_BYTES = 1024 * 1024;
+  const MAX_FOLDER_SCAN_MS = 5000;
   const DESKTOP_APP_HOST = 'portable-markdown-editor.local';
   const DESKTOP_DOCUMENT_HOST = 'document.portable-markdown-editor.local';
   const DESKTOP_ASSET_REQUEST_TIMEOUT_MS = 45000;
@@ -390,6 +394,7 @@ flowchart TD
   const {
     beginDocumentAccess,
     beginImageInsertion,
+    cancelFolderScan,
     buildFolderAssetUrls,
     captureCurrentMarkdownFromEditor,
     clearAllLocalData,
@@ -452,6 +457,10 @@ flowchart TD
       MAX_ASSET_IMAGE_BYTES,
       MAX_FOLDER_SCAN_DEPTH,
       MAX_FOLDER_SCAN_FILES,
+      MAX_FOLDER_SCAN_ENTRIES,
+      MAX_FOLDER_SCAN_BYTES,
+      MAX_FOLDER_SCAN_PATH_BYTES,
+      MAX_FOLDER_SCAN_MS,
       RICH_SOURCE_BLOCK_SELECTOR,
       SETTINGS_KEY,
       STORAGE_KEY,
@@ -785,6 +794,7 @@ flowchart TD
     els.markdownEntryCancel = document.getElementById('markdownEntryCancel');
     els.folderScanWarningDialog = document.getElementById('folderScanWarningDialog');
     els.folderScanWarningMessage = document.getElementById('folderScanWarningMessage');
+    els.folderScanCancel = document.getElementById('folderScanCancel');
     els.inlineInsertDialog = document.getElementById('inlineInsertDialog');
     els.inlineInsertTitle = document.getElementById('inlineInsertTitle');
     els.inlineInsertDescription = document.getElementById('inlineInsertDescription');
@@ -1320,6 +1330,9 @@ flowchart TD
         break;
       case 'open-folder':
         openFolder();
+        break;
+      case 'cancel-folder-scan':
+        cancelFolderScan();
         break;
       case 'grant-folder':
         grantFolderForCurrentDocument();

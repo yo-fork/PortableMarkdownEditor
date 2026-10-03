@@ -24,6 +24,10 @@
       MAX_ASSET_IMAGE_BYTES,
       MAX_FOLDER_SCAN_DEPTH,
       MAX_FOLDER_SCAN_FILES,
+      MAX_FOLDER_SCAN_ENTRIES = 10000,
+      MAX_FOLDER_SCAN_BYTES = 128 * 1024 * 1024,
+      MAX_FOLDER_SCAN_PATH_BYTES = 1024 * 1024,
+      MAX_FOLDER_SCAN_MS = 5000,
       RICH_SOURCE_BLOCK_SELECTOR,
       SETTINGS_KEY,
       STORAGE_KEY,
@@ -103,12 +107,14 @@
     setDocumentBinding(state);
     let pendingFileInputGeneration = null;
     let pendingFolderInput = null;
+    let activeFolderScan = null;
 
     function isDocumentAccessCurrent(generation) {
       return generation === state.documentGeneration;
     }
 
     function beginDocumentAccess() {
+      activeFolderScan?.stop('cancelled');
       state.documentGeneration += 1;
       // A cancelled picker keeps the current target but invalidates older work.
       setDocumentBinding(state.documentBinding);
@@ -1143,7 +1149,6 @@
         renderAll('open-file-existing-folder');
         persistDraft();
         setStatus(`${state.fileName} を開きました。既存のフォルダ許可を使用しています (${state.directoryName || 'selected folder'})。画像候補: ${state.assetUrls.size}${folderScanStatusSuffix()}`);
-        warnFolderScanLimitIfNeeded();
         return true;
       } catch (_) {
         return false;
@@ -1205,7 +1210,6 @@
       if (!isDocumentAccessCurrent(generation)) return false;
       if (!chosen) {
         setStatus(`${state.fileName} を開きました。選択フォルダ内に同じMarkdownファイルが見つかりませんでした${folderScanStatusSuffix()}`);
-        warnFolderScanLimitIfNeeded();
         return false;
       }
 
@@ -1220,7 +1224,6 @@
       renderAll('open-file-folder');
       persistDraft();
       setStatus(`${state.fileName} を開きました。フォルダ参照を許可済み (${state.directoryName || 'selected folder'})。画像候補: ${state.assetUrls.size}${folderScanStatusSuffix()}`);
-      warnFolderScanLimitIfNeeded();
       return true;
     }
 
@@ -1314,12 +1317,10 @@
 
     async function grantFolderEntriesForCurrentDocument(entries, folderName, directoryHandle = null, generation = beginDocumentAccess()) {
       if (!isDocumentAccessCurrent(generation)) return;
-      if (!entries.length) return;
       const chosen = await findCurrentMarkdownEntry(entries);
       if (!isDocumentAccessCurrent(generation)) return;
       if (!chosen) {
         setStatus(`${state.fileName} が選択フォルダ内に見つかりませんでした。編集中内容は変更していません${folderScanStatusSuffix()}`);
-        warnFolderScanLimitIfNeeded();
         return;
       }
 
@@ -1349,7 +1350,6 @@
       if (!isDocumentAccessCurrent(generation)) return;
       const access = directoryHandle ? 'File System Access API' : 'フォルダ入力';
       setStatus(`${state.fileName} の編集中内容を維持したままフォルダを許可しました (${access})。画像候補: ${state.assetUrls.size}${folderScanStatusSuffix()}`);
-      warnFolderScanLimitIfNeeded();
     }
 
     async function findCurrentMarkdownEntry(entries) {
@@ -1428,19 +1428,27 @@
       applyOutlineVisibility();
     }
 
-    function onFolderChosen(event) {
-      const files = Array.from(event.target.files || []);
-      event.target.value = '';
+    async function onFolderChosen(event) {
+      const files = event.target.files || [];
       if (!files.length) return;
       const pending = pendingFolderInput || { mode: state.folderInputMode, generation: beginDocumentAccess() };
       pendingFolderInput = null;
       if (!isDocumentAccessCurrent(pending.generation)) return;
-
-      const context = createFolderScanContext();
-      const entries = folderInputEntriesWithinLimits(files, context);
-      state.folderScanLimitMessage = folderScanLimitMessage(context);
       const mode = pending.mode;
       state.folderInputMode = 'open';
+      let entries;
+      try {
+        entries = await runFolderScan(pending.generation, (context) => folderInputEntriesWithinLimits(files, context));
+      } catch (error) {
+        if (!isDocumentAccessCurrent(pending.generation)) return;
+        warnSafeError('folder input read failed', error);
+        setStatus('フォルダの読み込みに失敗しました');
+        return;
+      } finally {
+        // Keep the FileList alive while consuming only the bounded prefix.
+        if (event.target.files === files) event.target.value = '';
+      }
+      if (!isDocumentAccessCurrent(pending.generation)) return;
       if (mode === 'grant-current') {
         return grantFolderEntriesForCurrentDocument(entries, '', null, pending.generation);
       }
@@ -1448,67 +1456,185 @@
     }
 
     async function collectLimitedDirectoryEntries(directoryHandle, generation = state.documentGeneration) {
-      const context = createFolderScanContext();
-      const entries = await collectDirectoryEntries(directoryHandle, '', context, 0);
-      if (isDocumentAccessCurrent(generation)) state.folderScanLimitMessage = folderScanLimitMessage(context);
-      return entries;
+      return runFolderScan(generation, (context) => collectDirectoryEntries(directoryHandle, '', context, 0));
     }
 
-    async function collectDirectoryEntries(directoryHandle, prefix = '', context = createFolderScanContext(), depth = 0) {
-      const entries = [];
+    async function collectDirectoryEntries(directoryHandle, prefix, context, depth) {
+      checkFolderScan(context);
       const iterator = directoryHandle.entries ? directoryHandle.entries() : directoryHandle.values();
-      for await (const item of iterator) {
-        if (context.files >= MAX_FOLDER_SCAN_FILES) {
-          context.fileLimitHit = true;
-          break;
-        }
-        const handle = Array.isArray(item) ? item[1] : item;
-        const name = Array.isArray(item) ? item[0] : handle.name;
-        const relativePath = normalizeAssetPath(`${prefix}${name || handle.name || ''}`);
-        if (handle.kind === 'file') {
-          const file = await handle.getFile();
-          entries.push(fileEntry(file, relativePath, handle));
-          context.files += 1;
-        } else if (handle.kind === 'directory') {
-          if (depth >= MAX_FOLDER_SCAN_DEPTH) {
-            context.depthLimitHit = true;
-            continue;
+      let complete = false;
+      try {
+        while (true) {
+          await folderScanCheckpoint(context);
+          const step = await awaitFolderScan(context, () => iterator.next());
+          if (step.done) { complete = true; break; }
+          const item = step.value;
+          const handle = Array.isArray(item) ? item[1] : item;
+          const name = String((Array.isArray(item) ? item[0] : handle.name) || handle.name || '');
+          const rawPath = `${prefix}${name}`;
+          visitFolderScanEntry(context, rawPath, handle.kind === 'file');
+          const relativePath = normalizeAssetPath(rawPath);
+          if (handle.kind === 'file') {
+            if (!isFolderCandidateName(name)) continue;
+            const file = await awaitFolderScan(context, () => handle.getFile());
+            retainFolderScanFile(context, file, relativePath, handle);
+          } else if (handle.kind === 'directory') {
+            if (depth >= MAX_FOLDER_SCAN_DEPTH) { context.depthLimitHit = true; continue; }
+            await collectDirectoryEntries(handle, `${relativePath}/`, context, depth + 1);
           }
-          entries.push(...await collectDirectoryEntries(handle, `${relativePath}/`, context, depth + 1));
+        }
+      } finally {
+        if (!complete && iterator.return) {
+          // FSA cannot abort an in-flight next(); do not wait for it during cleanup.
+          try {
+            Promise.resolve(iterator.return()).catch(() => {});
+          } catch (_) {}
         }
       }
-      return entries;
     }
 
-    function folderInputEntriesWithinLimits(files, context = createFolderScanContext()) {
-      const entries = [];
-      for (const file of files) {
-        if (context.files >= MAX_FOLDER_SCAN_FILES) {
-          context.fileLimitHit = true;
-          break;
-        }
-        const relativePath = normalizeAssetPath(file.webkitRelativePath || file.name || '');
-        const depth = Math.max(0, relativePath.split('/').filter(Boolean).length - 1);
-        if (depth > MAX_FOLDER_SCAN_DEPTH) {
-          context.depthLimitHit = true;
-          continue;
-        }
-        entries.push(fileEntry(file));
-        context.files += 1;
+    async function folderInputEntriesWithinLimits(files, context) {
+      for (let index = 0; index < files.length; index += 1) {
+        await folderScanCheckpoint(context);
+        const file = files[index];
+        const rawPath = String(file.webkitRelativePath || file.name || '');
+        visitFolderScanEntry(context, rawPath, true);
+        const relativePath = normalizeAssetPath(rawPath);
+        // webkitRelativePath includes the selected root; FSA paths do not.
+        const depth = Math.max(0, relativePath.split('/').filter(Boolean).length - (file.webkitRelativePath ? 2 : 1));
+        if (depth > MAX_FOLDER_SCAN_DEPTH) { context.depthLimitHit = true; continue; }
+        if (isFolderCandidateName(file.name || '')) retainFolderScanFile(context, file, relativePath);
       }
-      return entries;
     }
 
-    function createFolderScanContext() {
-      return { files: 0, fileLimitHit: false, depthLimitHit: false };
+    function isFolderCandidateName(name) {
+      return /\.(?:md|markdown|txt)$/i.test(name) || hasRasterImageExtension(name) || !name.includes('.');
+    }
+
+    function visitFolderScanEntry(context, rawPath, isFile) {
+      context.visited += 1;
+      if (isFile) context.files += 1;
+      context.pathBytes += rawPath.length * 2;
+      if (context.pathBytes > MAX_FOLDER_SCAN_PATH_BYTES) {
+        context.stop('pathLimitHit');
+        checkFolderScan(context);
+      }
+    }
+
+    function retainFolderScanFile(context, file, relativePath, handle = null) {
+      const markdown = isMarkdownFile(file);
+      if (!markdown && !isAllowedImageFile(file)) return;
+      const perFileLimit = markdown ? 10 * 1024 * 1024 : MAX_ASSET_IMAGE_BYTES;
+      if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > perFileLimit) {
+        context.sizeLimitHit = true;
+        return;
+      }
+      if (file.size > MAX_FOLDER_SCAN_BYTES - context.bytes) {
+        context.stop('byteLimitHit');
+        checkFolderScan(context);
+      }
+      context.bytes += file.size;
+      context.entries.push(fileEntry(file, relativePath, handle));
+    }
+
+    function folderScanNow() {
+      return window.performance?.now() ?? Date.now();
+    }
+
+    function createFolderScanContext(generation) {
+      let release;
+      const context = {
+        generation, entries: [], files: 0, visited: 0, bytes: 0, pathBytes: 0, nextYieldAt: 0,
+        deadline: folderScanNow() + MAX_FOLDER_SCAN_MS,
+        stopped: new Promise((resolve) => { release = resolve; }),
+        error: Object.assign(new Error('Folder scan stopped'), { name: 'AbortError' }),
+        stop(reason) {
+          if (context.reason) return;
+          context.reason = reason;
+          context[reason] = true;
+          release(context.error);
+        },
+      };
+      return context;
+    }
+
+    function checkFolderScan(context) {
+      if (!isDocumentAccessCurrent(context.generation)) context.stop('cancelled');
+      if (folderScanNow() >= context.deadline) context.stop('timeLimitHit');
+      if (context.reason) throw context.error;
+    }
+
+    async function awaitFolderScan(context, operation) {
+      checkFolderScan(context);
+      const result = await Promise.race([operation(), context.stopped]);
+      checkFolderScan(context);
+      return result;
+    }
+
+    async function folderScanCheckpoint(context) {
+      checkFolderScan(context);
+      if (context.visited >= MAX_FOLDER_SCAN_ENTRIES) context.stop('entryLimitHit');
+      if (context.files >= MAX_FOLDER_SCAN_FILES) context.stop('fileLimitHit');
+      checkFolderScan(context);
+      if (context.visited >= context.nextYieldAt) {
+        context.nextYieldAt = context.visited + 64;
+        let timer;
+        try {
+          // Yield to input/paint even if every filesystem promise resolves immediately.
+          await awaitFolderScan(context, () => new Promise((resolve) => { timer = window.setTimeout(resolve, 0); }));
+        } finally {
+          window.clearTimeout(timer);
+        }
+      }
+    }
+
+    async function runFolderScan(generation, scan) {
+      if (!isDocumentAccessCurrent(generation)) return [];
+      activeFolderScan?.stop('cancelled');
+      const context = createFolderScanContext(generation);
+      activeFolderScan = context;
+      if (els.folderScanCancel) els.folderScanCancel.hidden = false;
+      const timer = window.setTimeout(() => context.stop('timeLimitHit'), MAX_FOLDER_SCAN_MS);
+      try {
+        try {
+          await scan(context);
+        } catch (error) {
+          if (error !== context.error || context.cancelled) throw error;
+        }
+        if (context.cancelled || !isDocumentAccessCurrent(generation)) throw context.error;
+        state.folderScanLimitMessage = folderScanLimitMessage(context);
+        if (state.folderScanLimitMessage) {
+          setStatus(state.folderScanLimitMessage);
+          warnFolderScanLimitIfNeeded();
+        }
+        return context.entries;
+      } finally {
+        window.clearTimeout(timer);
+        if (context.cancelled) context.entries.length = 0;
+        if (activeFolderScan === context) {
+          activeFolderScan = null;
+          if (els.folderScanCancel) els.folderScanCancel.hidden = true;
+        }
+      }
+    }
+
+    function cancelFolderScan() {
+      if (!activeFolderScan) return;
+      beginDocumentAccess();
+      setStatus('フォルダ走査を中止しました。編集中の文書は変更していません');
     }
 
     function folderScanLimitMessage(context) {
-      if (!context?.fileLimitHit && !context?.depthLimitHit) return '';
+      if (!context) return '';
       const limits = [];
       if (context.fileLimitHit) limits.push(`最大${MAX_FOLDER_SCAN_FILES.toLocaleString()}ファイル`);
       if (context.depthLimitHit) limits.push(`最大${MAX_FOLDER_SCAN_DEPTH}階層`);
-      return `フォルダ走査上限（${limits.join('、')}）に達したため一部を読み飛ばしました`;
+      if (context.entryLimitHit) limits.push(`最大${MAX_FOLDER_SCAN_ENTRIES.toLocaleString()}項目（フォルダを含む）`);
+      if (context.byteLimitHit) limits.push(`合計${MAX_FOLDER_SCAN_BYTES / 1024 / 1024}MiB`);
+      if (context.pathLimitHit) limits.push(`パス文字列合計${MAX_FOLDER_SCAN_PATH_BYTES / 1024 / 1024}MiB`);
+      if (context.timeLimitHit) limits.push(`${MAX_FOLDER_SCAN_MS / 1000}秒`);
+      if (context.sizeLimitHit) limits.push('Markdownは10MiB、画像は25MiB以下');
+      return limits.length ? `フォルダ走査上限（${limits.join('、')}）に達したため一部を読み飛ばしました` : '';
     }
 
     function folderScanStatusSuffix() {
@@ -1528,12 +1654,10 @@
 
     async function openFolderEntries(entries, folderName, directoryHandle = null, generation = beginDocumentAccess()) {
       if (!isDocumentAccessCurrent(generation)) return;
-      if (!entries.length) return;
 
       const markdownEntries = entries.filter((entry) => isMarkdownFile(entry.file));
       if (!markdownEntries.length) {
         setStatus(`フォルダ内にMarkdownファイルがありません${folderScanStatusSuffix()}`);
-        warnFolderScanLimitIfNeeded();
         return;
       }
 
@@ -1574,7 +1698,6 @@
         const access = directoryHandle ? 'File System Access API' : 'フォルダ入力';
         const assetsHint = directoryHandle ? '。貼り付け/ドロップ画像はassetsフォルダに保存できます' : '';
         setStatus(`${state.fileName} をフォルダ基準で開きました${suffix} (${access})。画像候補: ${count}${assetsHint}${folderScanStatusSuffix()}`);
-        warnFolderScanLimitIfNeeded();
       } catch (error) {
         if (!isDocumentAccessCurrent(generation)) return;
         warnSafeError('open folder markdown failed', error);
@@ -2182,6 +2305,7 @@
     return Object.freeze({
       beginDocumentAccess,
       beginImageInsertion,
+      cancelFolderScan,
       buildFolderAssetUrls,
       captureCurrentMarkdownFromEditor,
       clearAllLocalData,
