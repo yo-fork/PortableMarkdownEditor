@@ -18,7 +18,7 @@ const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
 const extraGallery = readFileSync(new URL('../samples/mermaid-extra-gallery.md', import.meta.url), 'utf8');
 const advancedGallery = readFileSync(new URL('../samples/mermaid-advanced-gallery.md', import.meta.url), 'utf8');
 const mathGallery = readFileSync(new URL('../samples/math-syntax-gallery.md', import.meta.url), 'utf8');
-const instrumented = app.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml, renderInlineMarkdown, buildExportHtml, createMathRenderSession };\n})();');
+const instrumented = app.replace(/\}\)\(\);\s*$/, 'return { renderMarkdownHtml, renderBlockHtml, renderInlineMarkdown, buildExportHtml, createMathRenderSession, getRichCodeHighlight };\n})();');
 function createRenderer(useVendor = true, mathEngine = katex) {
   const context = vm.createContext({
     document: { baseURI: 'file:///C:/PortableMarkdownEditor/index.html', addEventListener() {} },
@@ -175,6 +175,88 @@ for (const html of ['x'.repeat(100001), '<i></i>'.repeat(1000)]) {
   assert.doesNotMatch(escaped, /<img\b/);
   console.log(`math budget checks passed (1000 adjacent expressions: 256 rendered, ${calls} total cached computations across document/fragment checks)`);
 }
+
+const escapeCode = text => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+const fence = (code, language = '') => '```' + language + '\n' + code + '\n```';
+function highlightHarness(useVendor = true) {
+  const { renderer, context } = createRenderer(useVendor);
+  const calls = [];
+  context.window.hljs = {
+    getLanguage: language => ['js', 'python'].includes(language),
+    highlight(code, options) {
+      calls.push({ mode: options.language, chars: code.length });
+      return { value: `<span class="hljs-keyword">${escapeCode(code)}</span>`, _emitter: { rootNode: { children: [{ scope: 'keyword', children: [code] }] } } };
+    },
+    highlightAuto(code) {
+      calls.push({ mode: 'auto', chars: code.length });
+      return { value: `<span class="hljs-auto">${escapeCode(code)}</span>` };
+    },
+  };
+  return { renderer, context, calls };
+}
+
+for (const useVendor of [false, true]) {
+  for (const [language, limit, mode] of [['js', 120000, 'js'], ['', 16000, 'auto'], ['unknown', 16000, 'auto']]) {
+    const { renderer: codeRenderer, calls } = highlightHarness(useVendor);
+    const code = '<img src=x onerror=alert(1)>'.padEnd(limit + 1, 'x');
+    for (const render of [
+      source => codeRenderer.renderMarkdownHtml(source),
+      source => codeRenderer.buildExportHtml(source),
+      source => codeRenderer.renderBlockHtml({ type: 'code', raw: source }, { items: [], byOffset: new Map() }),
+    ]) {
+      const html = render(fence(code, language));
+      assert.ok(html.includes(escapeCode(code)), 'over-budget code is kept completely as escaped plaintext');
+      assert.doesNotMatch(html, /<img\b|<span class="hljs-/);
+    }
+    assert.equal(calls.length, 0, 'every public code boundary rejects over-budget input before vendor work');
+    codeRenderer.renderMarkdownHtml(fence('x'.repeat(limit), language));
+    assert.deepEqual(calls, [{ mode, chars: limit }], 'the selected highlighting limit is inclusive');
+  }
+}
+
+{
+  const { renderer: codeRenderer, calls } = highlightHarness();
+  const code = 'const reused = 42;';
+  const html = codeRenderer.renderMarkdownHtml(fence(code, 'javascript'));
+  assert.match(html, /hljs-keyword/);
+  assert.ok(codeRenderer.getRichCodeHighlight(code, 'language-JavaScript')?.rootNode, 'rich decorations share the normalized token tree');
+  codeRenderer.renderMarkdownHtml(fence(code, 'js'));
+  codeRenderer.buildExportHtml(fence(code, 'js'));
+  assert.deepEqual(calls, [{ mode: 'js', chars: code.length }], 'preview, repeated roots, rich and export reuse one expensive result');
+  assert.equal(codeRenderer.getRichCodeHighlight(code, ''), null);
+  assert.equal(codeRenderer.getRichCodeHighlight(code, 'unknown'), null);
+  codeRenderer.renderMarkdownHtml(fence(code));
+  assert.equal(calls.at(-1).mode, 'auto', 'rich plaintext policy must not suppress preview auto-detection');
+  assert.equal(codeRenderer.getRichCodeHighlight(code, 'unknown'), null, 'cached auto output must not enable rich auto-detection');
+  assert.equal(codeRenderer.getRichCodeHighlight('x'.repeat(120001), 'js'), null, 'rich uses the shared size guard');
+  const before = calls.length;
+  codeRenderer.renderMarkdownHtml('[r]: #r\n~~~js\n' + 'x'.repeat(120001) + '\n~~~');
+  assert.equal(calls.length, before, 'markdown-it fence rendering also obeys the shared guard');
+  codeRenderer.renderMarkdownHtml('[r]: #r\n~~~js\nconst nested = 2;\n~~~');
+  assert.equal(calls.length, before + 1, 'the alternate vendor fence path still highlights ordinary code');
+}
+
+for (const useVendor of [false, true]) {
+  const { renderer: fallback, context } = createRenderer(useVendor);
+  const allowed = '//' + 'x'.repeat(119998);
+  assert.match(fallback.renderMarkdownHtml(fence(allowed, 'js')), /tok-comment/, 'fallback highlighting works at its limit');
+  assert.doesNotMatch(fallback.renderMarkdownHtml(fence(allowed + 'x', 'js')), /tok-comment/, 'fallback uses the same size guard');
+  context.window.hljs = { getLanguage() { throw new Error('test lookup error'); } };
+  assert.ok(fallback.renderMarkdownHtml(fence('<tag>', 'js')).includes('&lt;tag&gt;'), 'vendor lookup errors fail to escaped plaintext');
+  context.window.hljs = { getLanguage: () => true, highlight() { throw new Error('test render error'); } };
+  assert.ok(fallback.renderMarkdownHtml(fence('<tag>', 'js')).includes('&lt;tag&gt;'), 'vendor render errors preserve code safely');
+}
+
+{
+  const { renderer: codeRenderer, context, calls } = highlightHarness();
+  for (let index = 0; index < 17; index += 1) codeRenderer.renderMarkdownHtml(fence(`const n = ${index};`, 'js'));
+  codeRenderer.renderMarkdownHtml(fence('const n = 0;', 'js'));
+  assert.equal(calls.length, 18, 'old entries are evicted from the bounded result cache');
+  context.window.hljs = { ...context.window.hljs };
+  codeRenderer.renderMarkdownHtml(fence('const n = 0;', 'js'));
+  assert.equal(calls.length, 19, 'a replaced vendor runtime cannot reuse stale token results');
+}
+console.log('highlight budget checks passed (vendor/fallback, exact boundaries, alternate fences, shared rich cache)');
 
 function renderMermaid(source) {
   return renderer.renderMarkdownHtml([

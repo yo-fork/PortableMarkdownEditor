@@ -42,6 +42,7 @@ async function main() {
     await checkAppStartup(baseUrl, sessionId);
     await checkInlineTableRendering(sessionId);
     await checkLinkPolicy(sessionId);
+    await checkCodeHighlightBudgets(sessionId);
     await checkMathRenderBudgets(sessionId);
     // Use a fresh tab so the dirty-document beforeunload guard remains enabled.
     await connection.send('Target.closeTarget', { targetId });
@@ -55,6 +56,7 @@ async function main() {
     await poll(`Boolean(document.querySelector('.source-pane .cm-editor'))`, Boolean, fileSessionId, 'file app startup');
     await checkInlineTableRendering(fileSessionId);
     await checkLinkPolicy(fileSessionId);
+    await checkCodeHighlightBudgets(fileSessionId);
     await checkMathRenderBudgets(fileSessionId);
 
     assert.deepEqual(browserErrors, [], `browser console errors:\n${browserErrors.join('\n')}`);
@@ -563,6 +565,112 @@ async function checkUneditedRichSourcePreservation(sessionId) {
     markdown,
     'an unedited rich-mode visit must preserve source spelling and blank lines exactly',
   );
+}
+
+async function checkCodeHighlightBudgets(sessionId) {
+  await switchMode('source', sessionId);
+  await evaluate(`(() => {
+    const originalHighlight = window.hljs.highlight;
+    const originalAuto = window.hljs.highlightAuto;
+    const probe = { calls: [], expected: [], markdown: '' };
+    window.hljs.highlight = function(code, ...args) {
+      probe.calls.push({ method: 'highlight', chars: code.length });
+      // A regression must fail by call count without invoking costly vendor work.
+      if (code.length > 120000) throw new Error('oversized explicit highlight reached vendor');
+      return originalHighlight.call(this, code, ...args);
+    };
+    window.hljs.highlightAuto = function(code, ...args) {
+      probe.calls.push({ method: 'highlightAuto', chars: code.length });
+      if (code.length > 16000) throw new Error('oversized automatic highlight reached vendor');
+      return originalAuto.call(this, code, ...args);
+    };
+    probe.restore = () => {
+      window.hljs.highlight = originalHighlight;
+      window.hljs.highlightAuto = originalAuto;
+    };
+    probe.inspect = () => {
+      const inspectRoot = selector => {
+        const codes = Array.from(document.querySelectorAll(selector + ' pre code'));
+        return {
+          count: codes.length,
+          sourceMatches: codes.length === probe.expected.length
+            && codes.every((code, index) => code.textContent === probe.expected[index]),
+          images: codes.reduce((count, code) => count + code.querySelectorAll('img').length, 0),
+          tokens: codes.reduce((count, code) => count + code.querySelectorAll('span').length, 0),
+        };
+      };
+      return {
+        preview: inspectRoot('#preview'), rich: inspectRoot('#richEditor'),
+        sourceMatches: document.getElementById('sourceEditor').value === probe.markdown,
+        fallback: document.getElementById('richEditor').classList.contains('is-prosemirror-fallback'),
+        calls: probe.calls.slice(), protocol: location.protocol,
+      };
+    };
+    window.__pmeCodeHighlightProbe = probe;
+  })()`, sessionId);
+  try {
+    const literal = '<img src=x onerror="throw 1"> & literal ';
+    const sizedCode = (length, label) => `${label} ${literal}`.padEnd(length, 'x');
+    const oversized = [sizedCode(120001, 'explicit'), sizedCode(120001, 'unlabeled')];
+    const automatic = [sizedCode(16001, 'unlabeled-auto'), sizedCode(16001, 'unknown-auto')];
+    const fence = (language, code) => `\`\`\`${language}\n${code}\n\`\`\``;
+    const cases = [
+      ['oversized code', [fence('js', oversized[0]), fence('', oversized[1])].join('\n\n'), oversized, false],
+      ['automatic detection limit', [fence('', automatic[0]), fence('pme-unknown-language', automatic[1])].join('\n\n'), automatic, false],
+      ['read-only rich oversized code', `${fence('', oversized[1])}\n\n[highlight-probe]: #target`, [oversized[1]], true],
+    ];
+    for (const [label, markdown, expected, fallback] of cases) {
+      await evaluate(`(() => {
+        const probe = window.__pmeCodeHighlightProbe;
+        probe.calls.length = 0;
+        probe.expected = ${JSON.stringify(expected)};
+        probe.markdown = ${JSON.stringify(markdown)};
+      })()`, sessionId);
+      await setAppMarkdown(markdown, sessionId);
+      const result = await poll('window.__pmeCodeHighlightProbe.inspect()',
+        value => value?.preview.sourceMatches && value.rich.sourceMatches && value.fallback === fallback,
+        sessionId, label);
+      assert.equal(result.sourceMatches, true, `${label} must preserve the complete Markdown source`);
+      assert.deepEqual(result.calls, [], `${label} must stop before either Highlight.js entry point`);
+      for (const [rootName, root] of [['preview', result.preview], ['rich', result.rich]]) {
+        assert.equal(root.images, 0, `${label}: ${rootName} must escape source HTML`);
+        assert.equal(root.tokens, 0, `${label}: ${rootName} must display plain code text`);
+      }
+    }
+
+    const shortCode = 'const pmeSharedHighlightProbe = "<img src=x>";\nconsole.log(pmeSharedHighlightProbe);';
+    const shortMarkdown = fence('javascript', shortCode);
+    await evaluate(`(() => {
+      const probe = window.__pmeCodeHighlightProbe;
+      probe.calls.length = 0;
+      probe.expected = [${JSON.stringify(shortCode)}];
+      probe.markdown = ${JSON.stringify(shortMarkdown)};
+    })()`, sessionId);
+    await setAppMarkdown(shortMarkdown, sessionId);
+    const short = await poll('window.__pmeCodeHighlightProbe.inspect()',
+      value => value?.preview.sourceMatches && value.rich.sourceMatches
+        && value.preview.tokens > 0 && value.rich.tokens > 0 && !value.fallback,
+      sessionId, 'shared preview and rich code highlighting');
+    assert.equal(short.sourceMatches, true, 'ordinary highlighted code must preserve its source');
+    assert.deepEqual(short.calls, [{ method: 'highlight', chars: shortCode.length }],
+      'preview and editable rich rendering must share one explicit Highlight.js result');
+    assert.equal(short.preview.images + short.rich.images, 0, 'highlighted source HTML must remain literal');
+
+    await evaluate(`window.__pmeCodeHighlightProbe.previousCode = document.querySelector('#preview pre code')`, sessionId);
+    await setAppMarkdown(shortMarkdown, sessionId);
+    await poll(`window.__pmeCodeHighlightProbe.previousCode !== document.querySelector('#preview pre code')`,
+      Boolean, sessionId, 'repeat code preview rendering');
+    await switchMode('rich', sessionId);
+    await clickSelector('.pme-code-block code', sessionId);
+    await pressKey({ key: 'ArrowLeft', code: 'ArrowLeft', windowsVirtualKeyCode: 37 }, sessionId);
+    const repeated = await evaluate('window.__pmeCodeHighlightProbe.inspect()', sessionId);
+    assert.deepEqual(repeated.calls, short.calls, 'repeat renders and cursor movement must reuse highlighted code');
+    assert.equal(repeated.sourceMatches && repeated.preview.sourceMatches && repeated.rich.sourceMatches, true,
+      'repeat rendering and cursor movement must preserve all code text');
+    console.log(`code highlight budget browser checks passed (${repeated.protocol})`);
+  } finally {
+    await evaluate(`(() => { window.__pmeCodeHighlightProbe.restore(); delete window.__pmeCodeHighlightProbe; })()`, sessionId);
+  }
 }
 
 async function checkMathRenderBudgets(sessionId) {

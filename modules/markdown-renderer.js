@@ -9,7 +9,7 @@
     if (!state || !els) throw new Error('Markdown renderer requires state and element references');
 
     const {
-      MAX_HIGHLIGHT_CHARS,
+      MAX_HIGHLIGHT_CHARS = 120000,
       DESKTOP_DOCUMENT_HOST,
       IMAGE_EXTENSION_PATTERN,
       VENDOR_TOC_MARKER,
@@ -62,6 +62,10 @@
     let mathCacheChars = 0;
     let activeMathSession = null;
     const mathRootSessions = new WeakMap();
+    const MAX_AUTO_HIGHLIGHT_CHARS = 16000;
+    const highlightCache = new Map();
+    let highlightCacheChars = 0;
+    let cachedHighlighter = null;
 
     function mathOutputCost(source, html) {
       // KaTeX escapes attribute/text delimiters. Count tags and intervening text
@@ -192,7 +196,7 @@
         typographer: true,
         breaks: false,
         highlight(code, lang) {
-          return highlightCodeWithVendor(code, normalizeCodeLanguage(lang));
+          return highlightCode(code, lang);
         },
       });
       preserveMarkdownLocalPaths(md);
@@ -210,7 +214,7 @@
         const langAttr = lang ? ` data-lang="${escapeAttribute(lang)}"` : '';
         const langClass = normalized ? ` language-${escapeAttribute(normalized)}` : '';
         const label = normalized ? `<span class="code-lang">${escapeHtml(normalized)}</span>` : '';
-        return `<pre class="code-block${langClass}">${label}<code class="hljs"${langAttr}>${highlightCodeWithVendor(codeText, normalized)}</code></pre>\n`;
+        return `<pre class="code-block${langClass}">${label}<code class="hljs"${langAttr}>${highlightCode(codeText, normalized)}</code></pre>\n`;
       };
 
       const defaultLinkOpen = md.renderer.rules.link_open || defaultMarkdownItRule;
@@ -436,16 +440,53 @@
       return Boolean(env.references && Object.keys(env.references).length);
     }
 
-    function highlightCodeWithVendor(code, lang) {
-      if (!window.hljs) return escapeHtml(code);
-      try {
-        if (lang && window.hljs.getLanguage?.(lang)) {
-          return window.hljs.highlight(code, { language: lang, ignoreIllegals: true }).value;
-        }
-        return window.hljs.highlightAuto(code).value;
-      } catch (_) {
-        return escapeHtml(code);
+    function highlightCode(code, lang) {
+      const text = String(code || '');
+      return getCodeHighlight(text, lang)?.value ?? escapeHtml(text);
+    }
+
+    function getCodeHighlight(code, lang, autoDetect = true) {
+      const text = String(code || '');
+      // Check before language lookup, vendor dispatch, cache lookup, or fallback rules.
+      if (text.length > MAX_HIGHLIGHT_CHARS) return null;
+      const language = normalizeCodeLanguage(lang);
+      const highlighter = window.hljs || null;
+      if (cachedHighlighter !== highlighter) {
+        highlightCache.clear();
+        highlightCacheChars = 0;
+        cachedHighlighter = highlighter;
       }
+      try {
+        const known = Boolean(highlighter && language && highlighter.getLanguage?.(language));
+        if (highlighter && !known && (!autoDetect || text.length > MAX_AUTO_HIGHLIGHT_CHARS)) return null;
+        if (!highlighter && (!autoDetect || !language)) return null;
+        const mode = highlighter ? (known ? `language:${language}` : 'auto') : `fallback:${language}`;
+        const key = `${mode}:${text}`;
+        if (highlightCache.has(key)) return highlightCache.get(key);
+        const highlighted = highlighter
+          ? (known ? highlighter.highlight(text, { language, ignoreIllegals: true }) : highlighter.highlightAuto(text))
+          : { value: highlightCodeFallback(text, language) };
+        if (typeof highlighted?.value !== 'string') return null;
+        // Keep only HTML and the token tree needed for rich decorations, not parser state.
+        const result = { value: highlighted.value, rootNode: highlighted._emitter?.rootNode || null };
+        const size = key.length + result.value.length;
+        if (size <= 2000000) {
+          while (highlightCache.size && (highlightCache.size >= 16 || highlightCacheChars + size > 2000000)) {
+            const oldest = highlightCache.keys().next().value;
+            highlightCacheChars -= oldest.length + highlightCache.get(oldest).value.length;
+            highlightCache.delete(oldest);
+          }
+          highlightCache.set(key, result);
+          highlightCacheChars += size;
+        }
+        return result;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function getRichCodeHighlight(code, lang) {
+      return getCodeHighlight(code, lang, false);
     }
 
     function renderMermaidPlaceholder(code) {
@@ -690,7 +731,7 @@
       if (normalizedLang === 'mermaid') {
         return window.mermaid?.render ? renderMermaidPlaceholder(codeText) : renderMermaidBlock(codeText);
       }
-      const code = window.hljs ? highlightCodeWithVendor(codeText, normalizedLang) : highlightCode(codeText, normalizedLang);
+      const code = highlightCode(codeText, normalizedLang);
       const langAttr = lang ? ` data-lang="${escapeAttribute(lang)}"` : '';
       const langClass = normalizedLang ? ` language-${escapeAttribute(normalizedLang)}` : '';
       const offsetAttrs = Number.isFinite(block?.start)
@@ -1077,9 +1118,8 @@
       return aliases[value] || value;
     }
 
-    function highlightCode(code, lang) {
+    function highlightCodeFallback(code, lang) {
       const text = String(code || '');
-      if (!lang || text.length > MAX_HIGHLIGHT_CHARS) return escapeHtml(text);
       if (lang === 'html') return highlightWithRules(text, htmlHighlightRules());
       if (lang === 'css') return highlightWithRules(text, cssHighlightRules());
       if (lang === 'json') return highlightWithRules(text, jsonHighlightRules());
@@ -2300,6 +2340,7 @@
       decodeLocalImagePath,
       enhanceRenderedHtml,
       getLines,
+      getRichCodeHighlight,
       hasAmbiguousStrongDelimiterNeighborhood,
       hasRasterImageExtension,
       hashString,

@@ -184,6 +184,7 @@ flowchart TD
     decodeLocalImagePath,
     enhanceRenderedHtml,
     getLines,
+    getRichCodeHighlight,
     hasAmbiguousStrongDelimiterNeighborhood,
     hasRasterImageExtension,
     hashString,
@@ -1157,6 +1158,7 @@ flowchart TD
       resolveImageSrc: sanitizeImageUrl,
       resolveLinkHref: sanitizeLinkUrl,
       createMathRenderSession,
+      getCodeHighlight: getRichCodeHighlight,
       imageBlockReason,
     });
     return true;

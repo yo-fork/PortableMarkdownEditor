@@ -20852,7 +20852,6 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
   }
 
   var richCodeHighlightPluginKey = new state.PluginKey('pmeRichCodeHighlight');
-  var MAX_RICH_CODE_HIGHLIGHT_CHARS = 120000;
 
   function highlightScopeClassName(scope) {
     var value = String(scope || '');
@@ -20878,14 +20877,11 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     return offset;
   }
 
-  function highlightedCodeRanges(code, language) {
-    var highlighter = global.hljs;
-    if (!language || code.length > MAX_RICH_CODE_HIGHLIGHT_CHARS || !highlighter
-      || typeof highlighter.highlight !== 'function' || typeof highlighter.getLanguage !== 'function'
-      || !highlighter.getLanguage(language)) return [];
+  function highlightedCodeRanges(code, language, getCodeHighlight) {
+    if (!language || typeof getCodeHighlight !== 'function') return [];
     try {
-      var result = highlighter.highlight(code, { language: language, ignoreIllegals: true });
-      var rootNode = result && result._emitter && result._emitter.rootNode;
+      var result = getCodeHighlight(code, language);
+      var rootNode = result && result.rootNode;
       if (!rootNode) return [];
       var ranges = [];
       return collectHighlightRanges(rootNode, 0, ranges) === code.length ? ranges : [];
@@ -20894,11 +20890,11 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     }
   }
 
-  function richCodeHighlightDecorations(doc) {
+  function richCodeHighlightDecorations(doc, getCodeHighlight) {
     var decorations = [];
     doc.descendants(function(node, pos) {
       if (node.type !== schema.nodes.code_block) return true;
-      var ranges = highlightedCodeRanges(node.textContent, safeCodeBlockLanguage(node.attrs && node.attrs.params));
+      var ranges = highlightedCodeRanges(node.textContent, safeCodeBlockLanguage(node.attrs && node.attrs.params), getCodeHighlight);
       for (var index = 0; index < ranges.length; index += 1) {
         var range = ranges[index];
         decorations.push(view.Decoration.inline(pos + 1 + range.from, pos + 1 + range.to, { class: range.className }));
@@ -20908,13 +20904,13 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     return view.DecorationSet.create(doc, decorations);
   }
 
-  function richCodeHighlightPlugin() {
+  function richCodeHighlightPlugin(getCodeHighlight) {
     return new state.Plugin({
       key: richCodeHighlightPluginKey,
       state: {
-        init: function(_, editorState) { return richCodeHighlightDecorations(editorState.doc); },
+        init: function(_, editorState) { return richCodeHighlightDecorations(editorState.doc, getCodeHighlight); },
         apply: function(transaction, decorations) {
-          return transaction.docChanged ? richCodeHighlightDecorations(transaction.doc) : decorations;
+          return transaction.docChanged ? richCodeHighlightDecorations(transaction.doc, getCodeHighlight) : decorations;
         }
       },
       props: {
@@ -21155,7 +21151,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     return inputRulesModule.inputRules({ rules: rules });
   }
 
-  function createState(markdownText) {
+  function createState(markdownText, getCodeHighlight) {
     var doc = ensureEditableTrailingParagraph(parseMarkdown(markdownText || ''));
     var listItem = schema.nodes.list_item;
     var keys = {
@@ -21190,7 +21186,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
         markdownShapeNormalizationPlugin(),
         emptyTextblockStoredMarksCleanupPlugin(),
         editableTrailingParagraphPlugin(),
-        richCodeHighlightPlugin(),
+        richCodeHighlightPlugin(getCodeHighlight),
         inlineVisualAffordancePlugin(),
         tocRefreshPlugin(),
         tableToolbarPlugin(),
@@ -21529,7 +21525,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       }));
 
     mount.textContent = '';
-    var initialState = createState(options.markdown || '');
+    var initialState = createState(options.markdown || '', options.getCodeHighlight);
     prepareMathPlan(initialState.doc);
     var editorView = new view.EditorView(mount, {
       state: initialState,
@@ -21584,7 +21580,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
         if (destroyed) return false;
         if (unsupportedMarkdownReason(markdownText)) return false;
         var nextSource = normalizeNewlines(markdownText || '');
-        var nextState = createState(nextSource);
+        var nextState = createState(nextSource, options.getCodeHighlight);
         if (editorView.state.doc.eq(nextState.doc)) return true;
         applyingExternal = true;
         try {
