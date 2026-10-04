@@ -201,6 +201,7 @@ flowchart TD
     renderBlockHtml,
     renderInlineMarkdown,
     renderMarkdownHtml,
+    beginDocumentRender,
     renderExportHtmlBody,
     renderMermaidIn,
     safeSetHtml,
@@ -931,6 +932,7 @@ flowchart TD
 
   function initializeCodeMirrorSourceEditor() {
     if (!els.source || state.codeMirrorSource || state.codeMirrorSourceLoading) return;
+    if (!window.PMEDocumentPolicy.allowsSource(els.source.value || state.markdown || '')) return;
     state.codeMirrorSourceLoading = true;
     const createEditor = window.PMECodeMirrorSourceEditor?.createPortableMarkdownSourceEditor;
     if (typeof createEditor !== 'function') {
@@ -1002,7 +1004,14 @@ flowchart TD
   }
 
   function syncCodeMirrorSourceFromTextarea(_reason = 'sync') {
-    if (!isCodeMirrorSourceReady()) return;
+    if (!window.PMEDocumentPolicy.allowsSource(els.source.value || state.markdown || '')) {
+      state.codeMirrorSource?.destroy();
+      state.codeMirrorSource = null;
+      state.codeMirrorSourceReady = false;
+      els.source.closest?.('.source-pane')?.classList.remove('is-codemirror-ready');
+      return;
+    }
+    if (!isCodeMirrorSourceReady()) { initializeCodeMirrorSourceEditor(); return; }
     state.codeMirrorSource.setValue(els.source.value || state.markdown || '', { silent: true });
   }
 
@@ -1151,6 +1160,7 @@ flowchart TD
   }
 
   function readOnlyRichFallbackMessage(reason = state.proseMirrorRichFallbackReason) {
+    if (reason === 'document-render-limit') return window.PMEDocumentPolicy.message;
     if (reason === 'table-render-limit') {
       return '表の表示上限を超えたため、リッチ表示は読み取り専用です。ソース編集を使用してください';
     }
@@ -1183,7 +1193,8 @@ flowchart TD
       mount: els.rich,
       markdown: state.markdown,
       onChange: handleProseMirrorRichChange,
-      onUnsupportedMarkdown: () => setStatus('表の表示上限を超えているため挿入できません。ソース編集で貼り付けてください'),
+      onUnsupportedMarkdown: (reason) => setStatus(reason === 'document-render-limit'
+        ? window.PMEDocumentPolicy.message : '表の表示上限を超えているため挿入できません。ソース編集で貼り付けてください'),
       resolveImageSrc: sanitizeImageUrl,
       getImageInfo,
       getImageExportSrc,
@@ -3534,9 +3545,12 @@ flowchart TD
   }
 
   function renderPreview() {
+    beginDocumentRender(state.markdown);
     const mathSession = createMathRenderSession();
     const html = renderMarkdownHtml(state.markdown, mathSession);
     safeSetHtml(els.preview, html, mathSession);
+    // Rich node views may have queued before onChange established this budget.
+    if (isProseMirrorRichActive()) renderMermaidIn(els.rich);
     requestDesktopImageReferenceAliases();
   }
 
@@ -3612,7 +3626,7 @@ flowchart TD
     if (headings.length === 0) {
       const empty = document.createElement('span');
       empty.className = 'outline-empty';
-      empty.textContent = '見出しはありません';
+      empty.textContent = !blocks.length && state.markdown.trim() ? window.PMEDocumentPolicy.message : '見出しはありません';
       els.outline.appendChild(empty);
       return;
     }
@@ -3621,8 +3635,8 @@ flowchart TD
 
   function updateStatusBar() {
     const chars = state.markdown.length;
-    const words = countWords(state.markdown);
-    els.stats.textContent = `${chars.toLocaleString()}文字 / ${words.toLocaleString()}語`;
+    const words = window.PMEDocumentPolicy.allowsSource(state.markdown) ? countWords(state.markdown) : null;
+    els.stats.textContent = `${chars.toLocaleString()}文字 / ${words === null ? '語数の集計を省略' : `${words.toLocaleString()}語`}`;
     els.fileNameLabel.textContent = state.fileName;
     const dirtyText = state.dirty
       ? '未保存'

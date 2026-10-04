@@ -30,7 +30,7 @@ async function checks() {
     confirm() { return true; }, prompt() { return ''; }, alert() {} };
   sandbox.window = { markdownit: MarkdownIt, katex };
   const context = vm.createContext(sandbox);
-  for (const file of ['table-policy', 'image-policy', 'markdown-renderer', 'rich-editor', 'rich-input-controller', 'file-manager', 'shortcut-manager']) {
+  for (const file of ['document-policy', 'table-policy', 'image-policy', 'markdown-renderer', 'rich-editor', 'rich-input-controller', 'file-manager', 'shortcut-manager']) {
     vm.runInContext(read('modules/' + file + '.js'), context);
   }
   const renderer = vm.runInContext(read('app.js').replace(/\}\)\(\);\s*$/,
@@ -59,7 +59,8 @@ async function checks() {
 
   globalThis.window = globalThis;
   globalThis.markdownit = MarkdownIt;
-  require('../modules/table-policy.js');
+  require('../modules/document-policy.js');
+require('../modules/table-policy.js');
   require('../modules/image-policy.js');
   require('../vendor/prosemirror/prosemirror-editor.js');
   const pm = globalThis.PMEProseMirror;

@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 globalThis.window = globalThis;
 const MarkdownIt = require('../vendor/markdown-it/markdown-it.min.js');
+require('../modules/document-policy.js');
 require('../modules/table-policy.js');
 
 function tableSource(columns, rows, body = '|') {

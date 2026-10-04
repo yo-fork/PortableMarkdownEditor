@@ -333,7 +333,7 @@ assert.match(proseMirrorBundle, /function\s+handleMarkdownPlainTextPaste[\s\S]+e
 const configuredPaste = proseMirrorBundle.match(/handlePaste:\s*function\(editorView, event, slice\)\s*\{([\s\S]*?)\n      \},/)?.[1] || '';
 assert.match(configuredPaste, /return handleMarkdownPlainTextPaste\(editorView, event, options\.onUnsupportedMarkdown\)/, 'the Markdown paste handler should report rejected source without inserting a lossy fallback');
 assert.match(configuredPaste, /tableModule\.__pastedCells\(slice\)/, 'clipboard cells must be checked before the table paste plugin expands them');
-assert.match(proseMirrorBundle, /function\s+escapeInlineMathPipesInMarkdownTables[\s\S]+function\s+parseMarkdown\(markdownText\)\s*\{\s*return parser\.parse\(escapeInlineMathPipesInMarkdownTables\(markdownText\)\);/, 'Markdown parsing should protect formula pipes only while parsing table rows');
+assert.match(proseMirrorBundle, /function\s+escapeInlineMathPipesInMarkdownTables[\s\S]+function\s+parseMarkdown\(markdownText\)\s*\{\s*global\.PMEDocumentPolicy\.assertSource\(markdownText\);\s*var doc = parser\.parse\(escapeInlineMathPipesInMarkdownTables\(markdownText\)\);/, 'Markdown parsing should enforce admission before protecting formula pipes in table rows');
 assert.match(proseMirrorBundle, /function\s+ensureEditableTrailingParagraph[\s\S]+doc\.copy\(doc\.content\.append\(model\.Fragment\.from\(schema\.nodes\.paragraph\.create\(\)\)\)\)/, 'rich editor state should append an editable trailing paragraph when the parsed document ends in a non-editable block');
 assert.match(proseMirrorBundle, /function\s+documentWithoutEditableTrailingParagraphs[\s\S]+while \(nodes\.length > 1 && isEmptyParagraphNode\(nodes\[nodes\.length - 1\]\)\) nodes\.pop\(\)/, 'Markdown serialization should remove editor-only trailing empty paragraphs');
 assert.match(proseMirrorBundle, /function\s+serializeMarkdown\(doc\) \{\s*return restoreMarkdownSyntaxEscapes\(serializer\.serialize\(documentWithoutEditableTrailingParagraphs\(doc\)\)\);/, 'source Markdown should not persist the editor-only trailing paragraph');
@@ -434,6 +434,7 @@ const proseMirrorContext = {
 proseMirrorContext.window.window = proseMirrorContext.window;
 proseMirrorContext.window.navigator = proseMirrorContext.navigator;
 proseMirrorContext.window.document = proseMirrorContext.document;
+vm.runInNewContext(read('modules/document-policy.js'), proseMirrorContext);
 vm.runInNewContext(read('modules/table-policy.js'), proseMirrorContext);
 vm.runInNewContext(proseMirrorBundle, proseMirrorContext);
 assert.equal(

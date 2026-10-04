@@ -10,6 +10,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+. (Join-Path $repoRoot 'tools\ArchivePolicy.ps1')
 $resolvedZipPath = if ([string]::IsNullOrWhiteSpace($ZipPath)) {
     Join-Path $repoRoot 'release\PortableMarkdownEditor-win-x64.zip'
 } elseif ([IO.Path]::IsPathRooted($ZipPath)) {
@@ -165,9 +166,7 @@ try {
         if ($entriesByName.ContainsKey($entryName)) {
             throw "Duplicate ZIP entry: $entryName"
         }
-        if ([IO.Path]::IsPathRooted($entryName) -or $entryName -match '(^|/)\.\.(/|$)') {
-            throw "Unsafe ZIP entry: $entryName"
-        }
+        Assert-SafeArchiveEntry $entry
         $entriesByName[$entryName] = $entry
     }
 
@@ -255,14 +254,20 @@ try {
         }
     }
 
-    $appEntries = @($archive.Entries | Where-Object {
-        ![string]::IsNullOrEmpty($_.Name) -and $_.FullName.StartsWith('PortableMarkdownEditor/app/', [StringComparison]::Ordinal)
-    })
-    foreach ($entry in $appEntries) {
-        if (!$sourceByEntry.ContainsKey($entry.FullName)) {
-            throw "Release ZIP contains an unexpected application file: $($entry.FullName)"
+    $allowedFiles = @($sourceByEntry.Keys) + @($requiredEntries)
+    $allowedDirectories = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($name in $allowedFiles) {
+        for ($slash = $name.LastIndexOf('/'); $slash -gt 0; $slash = $name.LastIndexOf('/', $slash - 1)) {
+            [void]$allowedDirectories.Add($name.Substring(0, $slash + 1))
         }
     }
+    foreach ($sourceDirectoryName in @('modules', 'vendor')) {
+        foreach ($directory in Get-ChildItem -LiteralPath (Join-Path $repoRoot $sourceDirectoryName) -Recurse -Directory) {
+            $relative = $directory.FullName.Substring($repoRoot.TrimEnd('\').Length + 1).Replace('\', '/')
+            [void]$allowedDirectories.Add("PortableMarkdownEditor/app/$relative/")
+        }
+    }
+    Assert-ArchiveInventory -Entries $archive.Entries -Files $allowedFiles -Directories @($allowedDirectories)
     foreach ($entryName in $sourceByEntry.Keys) {
         if (!$entriesByName.ContainsKey($entryName) -or $entriesByName[$entryName].Length -eq 0) {
             throw "Source application file is missing from the release ZIP: $entryName"

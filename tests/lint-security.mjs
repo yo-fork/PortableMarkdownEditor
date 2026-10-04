@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 const app = [
   readFileSync(new URL('../app.js', import.meta.url), 'utf8'),
   readFileSync(new URL('../modules/markdown-renderer.js', import.meta.url), 'utf8'),
+  readFileSync(new URL('../modules/document-policy.js', import.meta.url), 'utf8'),
   readFileSync(new URL('../modules/table-policy.js', import.meta.url), 'utf8'),
   readFileSync(new URL('../modules/image-policy.js', import.meta.url), 'utf8'),
   readFileSync(new URL('../modules/mermaid-policy.js', import.meta.url), 'utf8'),

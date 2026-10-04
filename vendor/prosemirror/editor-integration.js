@@ -21,12 +21,13 @@
   }
 
   function unsupportedMarkdownReason(markdownText) {
+    if (!global.PMEDocumentPolicy.allowsSource(markdownText || '')) return 'document-render-limit';
     var markdownEnv = {};
     var tokens;
     try {
       tokens = parser.tokenizer.parse(escapeInlineMathPipesInMarkdownTables(markdownText || ''), markdownEnv);
-    } catch (_) {
-      return 'markdown-parse-failed';
+    } catch (error) {
+      return global.PMEDocumentPolicy.isLimit(error) ? 'document-render-limit' : 'markdown-parse-failed';
     }
     if (markdownEnv.pmeTableLimit) return 'table-render-limit';
     if (markdownEnv.references && Object.keys(markdownEnv.references).length) {
@@ -448,6 +449,7 @@
     preserveMarkdownLocalPaths(tokenizer);
     tokenizer.enable(['table', 'strikethrough']);
     global.PMETablePolicy.installMarkdownIt(tokenizer);
+    global.PMEDocumentPolicy.installMarkdownIt(tokenizer);
     addTocBlockRule(tokenizer);
     addMathBlockRule(tokenizer);
     addMathInlineRule(tokenizer);
@@ -684,7 +686,10 @@
   }
 
   function parseMarkdown(markdownText) {
-    return parser.parse(escapeInlineMathPipesInMarkdownTables(markdownText));
+    global.PMEDocumentPolicy.assertSource(markdownText);
+    var doc = parser.parse(escapeInlineMathPipesInMarkdownTables(markdownText));
+    if (!global.PMEDocumentPolicy.allowsNode(doc)) global.PMEDocumentPolicy.fail();
+    return doc;
   }
 
   function isEmptyParagraphNode(node) {
@@ -3116,6 +3121,7 @@
 
   function createImageClipboardSerializer(options, linkAttributes) {
     var budget = null;
+    var outputBudget = null;
     var depth = 0;
     var base = model.DOMSerializer.fromSchema(schema);
     var clipboard = new model.DOMSerializer(extendObject(base.nodes, {
@@ -3142,16 +3148,40 @@
         return attrs.href ? ['a', attrs, 0] : ['span', { class: 'blocked-link' }, 0];
       }
     }));
+    [clipboard.nodes, clipboard.marks].forEach(function(serializers) {
+      Object.keys(serializers).forEach(function(name) {
+        var serialize = serializers[name];
+        serializers[name] = function() {
+          var spec = serialize.apply(this, arguments);
+          outputBudget.reserve(spec);
+          return spec;
+        };
+      });
+    });
     // Nested fragments share one budget; each copy or drag starts a fresh root.
     ['serializeFragment', 'serializeNode'].forEach(function(method) {
       var serialize = clipboard[method];
       clipboard[method] = function() {
-        if (depth === 0) budget = createImageRenderBudget();
+        if (depth === 0) {
+          budget = createImageRenderBudget();
+          outputBudget = global.PMEDocumentPolicy.createDomOutputBudget();
+        }
         depth += 1;
         try { return serialize.apply(this, arguments); }
+        catch (error) {
+          if (depth !== 1 || !global.PMEDocumentPolicy.isLimit(error)) throw error;
+          if (typeof options.onUnsupportedMarkdown === 'function') options.onUnsupportedMarkdown('document-render-limit');
+          var owner = arguments[1] && arguments[1].document || document;
+          var fallback = owner.createTextNode(global.PMEDocumentPolicy.message);
+          if (method === 'serializeNode') return fallback;
+          var target = arguments[2] || owner.createDocumentFragment();
+          while (target.firstChild) target.removeChild(target.firstChild);
+          target.appendChild(fallback);
+          return target;
+        }
         finally {
           depth -= 1;
-          if (depth === 0) budget = null;
+          if (depth === 0) { budget = null; outputBudget = null; }
         }
       };
     });
@@ -3702,6 +3732,10 @@
     return new state.Plugin({
       filterTransaction: function(transaction) {
         if (!transaction.docChanged) return true;
+        if (!global.PMEDocumentPolicy.allowsNode(transaction.doc)) {
+          if (typeof onUnsupportedMarkdown === 'function') onUnsupportedMarkdown('document-render-limit');
+          return false;
+        }
         var allowed = true;
         transaction.doc.descendants(function(node) {
           if (!allowed) return false;
@@ -3710,6 +3744,10 @@
           return false;
         });
         if (!allowed && typeof onUnsupportedMarkdown === 'function') onUnsupportedMarkdown('table-render-limit');
+        if (allowed && !global.PMEDocumentPolicy.allowsSource(serializeMarkdown(transaction.doc))) {
+          if (typeof onUnsupportedMarkdown === 'function') onUnsupportedMarkdown('document-render-limit');
+          return false;
+        }
         return allowed;
       }
     });
@@ -3985,8 +4023,9 @@
   }
 
   function rejectOversizedTableInsertion(markdownText, onUnsupportedMarkdown) {
-    if (unsupportedMarkdownReason(markdownText) !== 'table-render-limit') return false;
-    if (typeof onUnsupportedMarkdown === 'function') onUnsupportedMarkdown('table-render-limit');
+    var reason = unsupportedMarkdownReason(markdownText);
+    if (reason !== 'table-render-limit' && reason !== 'document-render-limit') return false;
+    if (typeof onUnsupportedMarkdown === 'function') onUnsupportedMarkdown(reason);
     return true;
   }
 
@@ -4158,7 +4197,18 @@
         return handleMarkdownPlainTextPaste(editorView, event, options.onUnsupportedMarkdown);
       },
       clipboardTextParser: markdownClipboardTextParser,
-      transformPastedHTML: global.PMETablePolicy.sanitizePastedHTML,
+      transformPastedText: function(text) {
+        if (global.PMEDocumentPolicy.allowsSource(text)) return text;
+        if (typeof options.onUnsupportedMarkdown === 'function') options.onUnsupportedMarkdown('document-render-limit');
+        return '';
+      },
+      transformPastedHTML: function(html) {
+        if (!global.PMEDocumentPolicy.outputCost(html)) {
+          if (typeof options.onUnsupportedMarkdown === 'function') options.onUnsupportedMarkdown('document-render-limit');
+          return '';
+        }
+        return global.PMETablePolicy.sanitizePastedHTML(html);
+      },
       clipboardSerializer: clipboardSerializer,
       nodeViews: extendedNodeViews(options, mathViews, getMathHtml, getImageSrc),
       markViews: { link: createLinkView },
@@ -4248,6 +4298,10 @@
       insertDroppedText: function(text, coordinates) {
         if (destroyed || typeof text !== 'string' || !text || !coordinates
           || !Number.isFinite(coordinates.left) || !Number.isFinite(coordinates.top)) return false;
+        if (!global.PMEDocumentPolicy.allowsSource(text)) {
+          if (typeof options.onUnsupportedMarkdown === 'function') options.onUnsupportedMarkdown('document-render-limit');
+          return false;
+        }
         var bounds = editorView.dom.getBoundingClientRect();
         if (coordinates.left < bounds.left || coordinates.left > bounds.right
           || coordinates.top < bounds.top || coordinates.top > bounds.bottom) return false;

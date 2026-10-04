@@ -6,6 +6,7 @@ import vm from 'node:vm';
 const require = createRequire(import.meta.url);
 globalThis.window = globalThis;
 globalThis.markdownit = require('../vendor/markdown-it/markdown-it.min.js');
+require('../modules/document-policy.js');
 require('../modules/table-policy.js');
 require('../modules/image-policy.js');
 require('../vendor/prosemirror/prosemirror-editor.js');
@@ -111,15 +112,36 @@ const moduleNames = {
   'prosemirror-markdown': 'markdown', 'prosemirror-tables': 'tables',
 };
 const imageContext = vm.createContext({
-  global: { PMETablePolicy: globalThis.PMETablePolicy, PMEImagePolicy: globalThis.PMEImagePolicy },
+  global: { PMETablePolicy: globalThis.PMETablePolicy, PMEImagePolicy: globalThis.PMEImagePolicy,
+    PMEDocumentPolicy: globalThis.PMEDocumentPolicy },
   requireModule(name) {
     return name === 'markdown-it' ? globalThis.markdownit : proseMirror.modules[moduleNames[name]] || {};
   },
 });
 vm.runInContext(`${integrationSource}\nglobal.imageChecks = {
-  parseMarkdown, createImageRenderPlan, createImageClipboardSerializer, MermaidNodeView
+  parseMarkdown, createImageRenderPlan, createImageClipboardSerializer, MermaidNodeView, tableBudgetPlugin, schema
 };`, imageContext);
 const imageChecks = imageContext.global.imageChecks;
+for (const source of [
+  '[x](https://example.com/' + 'a'.repeat(550000) + ')',
+  '![x](approved.png "' + 'a'.repeat(550000) + '")',
+]) {
+  const doc = imageChecks.parseMarkdown(source);
+  assert.equal(PMEDocumentPolicy.allowsNode(doc), true, 'a single permitted long attribute remains supported');
+  let notices = 0;
+  const before = proseMirror.modules.state.EditorState.create({ doc,
+    plugins: [imageChecks.tableBudgetPlugin(() => { notices++; })] });
+  const after = before.apply(before.tr.insert(doc.content.size, doc.content));
+  assert.equal(after.doc, before.doc, 'repeated link marks and image attributes count toward the source budget');
+  assert.equal(notices, 1);
+}
+{
+  const doc = imageChecks.parseMarkdown('normal');
+  const before = proseMirror.modules.state.EditorState.create({ doc, plugins: [imageChecks.tableBudgetPlugin()] });
+  const escapedText = imageChecks.schema.nodes.paragraph.create(null, imageChecks.schema.text('*'.repeat(600000)));
+  assert.equal(before.apply(before.tr.insert(doc.content.size, escapedText)).doc, before.doc,
+    'serialized Markdown expansion is checked before accepting rich transactions');
+}
 const approvedInfo = { width: 10, height: 10, pixels: 100, frames: 1, size: 100, mimeType: 'image/png' };
 const imageOptions = {
   resolveImageSrc(src) { return src === 'approved.png' ? 'blob:approved-image' : src; },
@@ -190,6 +212,22 @@ assert.ok([...imageChecks.createImageRenderPlan(crowdedImages, exportImageOption
   'portable clipboard output must not change live image rendering URLs');
 assert.equal(clipboardElements(embeddedClipboard.serializeFragment(unsafeImages.content, { document: clipboardDocument }), 'IMG').length, 0,
   'an export URL callback cannot bypass admission of the original image');
+let copyNotices = 0;
+const expandedClipboard = imageChecks.createImageClipboardSerializer({ ...exportImageOptions,
+  getImageExportSrc: () => 'data:image/png;base64,' + 'A'.repeat(40000),
+  onUnsupportedMarkdown() { copyNotices++; },
+}, () => ({}));
+const expandedCopy = expandedClipboard.serializeFragment(crowdedImages.content, { document: clipboardDocument });
+assert.equal(clipboardElements(expandedCopy, 'IMG').length, 0, 'an over-budget copy returns a whole-fragment notice');
+assert.equal(expandedCopy.children[0].text, PMEDocumentPolicy.message);
+assert.equal(copyNotices, 1, 'repeated embedded images cannot multiply output beyond the document cap');
+assert.equal(expandedClipboard.serializeNode(imageNode, { document: clipboardDocument }).nodeName, 'IMG',
+  'a subsequent small copy gets a fresh output budget');
+const oversizedClipboard = imageChecks.createImageClipboardSerializer({ ...exportImageOptions,
+  getImageExportSrc: () => 'data:image/png;base64,' + 'A'.repeat(PMEDocumentPolicy.LIMITS.outputChars),
+}, () => ({}));
+assert.equal(oversizedClipboard.serializeNode(imageNode, { document: clipboardDocument }).text, PMEDocumentPolicy.message,
+  'a single large embedded image is rejected before creating an image element');
 
 // A missing shared renderer must never fall through to the vendor renderer or
 // an HTML insertion sink. Track those effects without invoking an image decoder.

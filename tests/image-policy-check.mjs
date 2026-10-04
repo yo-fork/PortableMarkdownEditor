@@ -74,7 +74,7 @@ const info = (bytes, width, height, frames = 1) => {
 assert.equal(Object.isFrozen(PMEImagePolicy), true);
 assert.equal(Object.isFrozen(LIMITS), true);
 assert.deepEqual(LIMITS, { fileBytes: 26214400, assets: 64, totalBytes: 67108864, dimension: 8192,
-  pixels: 16777216, frames: 60, totalPixels: 33554432, nodes: 64, readMs: 5000 });
+  pixels: 16777216, frames: 60, totalPixels: 33554432, nodes: 64, readMs: 5000, inspectMs: 100, inspectSteps: 131072 });
 
 const realPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aT1sAAAAASUVORK5CYII=', 'base64');
 const realGif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
@@ -82,6 +82,18 @@ const realGif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAI
 const validJpeg = Buffer.from('/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD9U6KKKAP/2Q==', 'base64');
 for (const bytes of [realPng, realGif, validJpeg]) info(bytes, 1, 1);
 rejects(validJpeg.subarray(0, validJpeg.length - 5), 'truncated real JPEG is rejected');
+assert.throws(() => inspectRaster(realPng, '', '', PMEImagePolicy.now() - 1), /タイムアウト/,
+  'a deadline spent acquiring bytes must also reject otherwise valid structure');
+const denseCount = LIMITS.inspectSteps + 1;
+for (const bytes of [
+  concat(pngSignature, ihdr(1, 1), Buffer.concat(Array(denseCount).fill(pngChunk('tEXt'))), idat(), iend()),
+  concat(gifHead(1, 1), [0x21, 0xfe], Buffer.alloc(denseCount * 2, 1), [0], gifFrame(1, 1), [0x3b]),
+  concat([0xff, 0xd8], Buffer.alloc(denseCount, 0xff), sof(1, 1), sos(), [0xff, 0xd9]),
+  webp(vp8x(1, 1), Buffer.concat(Array(denseCount).fill(webpChunk('EXIF', []))), vp8l(1, 1)),
+]) assert.throws(() => inspectRaster(bytes), /処理上限|タイムアウト/, 'dense container work is rejected');
+// The byte limit still permits a large ordinary entropy stream: it is scanned
+// in bounded chunks, not charged once per pixel/byte as a container structure.
+info(concat([0xff, 0xd8], sof(1, 1), sos(), Buffer.alloc(24 * 1024 * 1024), [0xff, 0xd9]), 1, 1);
 
 for (const [extension, mime, bytes] of [
   ['png', 'image/png', png()], ['jpg', 'image/jpeg', jpeg()], ['gif', 'image/gif', gif()], ['webp', 'image/webp', webp(vp8l(1, 1))],

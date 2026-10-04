@@ -2414,6 +2414,7 @@
       record.promise = session.tail.then(async () => {
         if (session.closed) return;
         const controller = window.AbortController ? new window.AbortController() : null;
+        const deadline = imagePolicy.now() + imagePolicy.LIMITS.readMs;
         let timer;
         try {
           const timeout = new Promise((_, reject) => {
@@ -2423,7 +2424,7 @@
             readImageAssetBytes(input, session, controller?.signal), timeout, session.cancelled,
           ]);
           if (session.closed || !result) return;
-          const info = imagePolicy.inspectRaster(result.bytes, result.mimeType, result.name);
+          const info = imagePolicy.inspectRaster(result.bytes, result.mimeType, result.name, deadline);
           if (session.pixels + info.pixels > imagePolicy.LIMITS.totalPixels) throw new Error('画像の合計画素数の上限に達しました');
           session.pixels += info.pixels;
           record.info = info;

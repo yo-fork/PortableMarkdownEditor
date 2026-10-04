@@ -9,6 +9,9 @@ if not "%~2"=="" goto :usage
 set "skipReleasePackage=1"
 
 :argumentsReady
+call powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File tests\Check-ReleaseArchivePolicy.ps1 || goto :failed
+node --check modules\document-policy.js || goto :failed
+node tests\document-policy-check.mjs || goto :failed
 echo.
 echo ^> node --check app.js
 node --check app.js || goto :failed

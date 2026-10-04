@@ -5,11 +5,23 @@
     fileBytes: 25 * 1024 * 1024, assets: 64, totalBytes: 64 * 1024 * 1024,
     dimension: 8192, pixels: 16 * 1024 * 1024, frames: 60,
     totalPixels: 32 * 1024 * 1024, nodes: 64, readMs: 5000,
+    inspectMs: 100, inspectSteps: 131072,
   });
   const TYPES = Object.freeze({ png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' });
 
   function invalid(message = '画像の形式または構造を確認できません。') {
     throw new Error(message);
+  }
+
+  const now = () => typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+  function inspectionBudget(deadline) {
+    const end = Math.min(Number.isFinite(deadline) ? deadline : Infinity, now() + LIMITS.inspectMs);
+    let steps = 0;
+    return () => {
+      if (++steps > LIMITS.inspectSteps) invalid('画像の構造検査の処理上限を超えています。');
+      if (now() >= end) invalid('画像の構造検査がタイムアウトしました。');
+    };
   }
 
   function requireBytes(bytes, offset, length, end = bytes.length) {
@@ -63,7 +75,7 @@
     return canvas;
   }
 
-  function inspectPng(bytes) {
+  function inspectPng(bytes, check) {
     const canvas = pngHeader(bytes);
     let offset = 33;
     let declared = 0;
@@ -76,6 +88,7 @@
     let hasPalette = false;
     let separateDefault = false;
     while (offset < bytes.length) {
+      check();
       requireBytes(bytes, offset, 12);
       const length = u32(bytes, offset);
       const type = ascii(bytes, offset + 4, 4);
@@ -129,10 +142,11 @@
   }
 
   // GIF89a: https://www.w3.org/Graphics/GIF/spec-gif89a.txt
-  function gifSubblocks(bytes, start) {
+  function gifSubblocks(bytes, start, check) {
     let offset = start;
     let size = 0;
     while (true) {
+      check();
       requireBytes(bytes, offset, 1);
       const length = bytes[offset++];
       if (!length) return { offset, size };
@@ -142,7 +156,7 @@
     }
   }
 
-  function inspectGif(bytes) {
+  function inspectGif(bytes, check) {
     requireBytes(bytes, 0, 13);
     const canvas = dimensions(u16(bytes, 6, true), u16(bytes, 8, true));
     let offset = 13;
@@ -150,6 +164,7 @@
     requireBytes(bytes, 0, offset);
     let frames = 0;
     while (offset < bytes.length) {
+      check();
       const type = bytes[offset++];
       if (type === 0x3b) {
         if (!frames || offset !== bytes.length) invalid();
@@ -166,9 +181,9 @@
         } else if (label === 0xff) {
           requireBytes(bytes, offset, 12);
           if (bytes[offset] !== 11) invalid();
-          offset = gifSubblocks(bytes, offset + 12).offset;
+          offset = gifSubblocks(bytes, offset + 12, check).offset;
         } else if (label === 0xfe) {
-          offset = gifSubblocks(bytes, offset).offset;
+          offset = gifSubblocks(bytes, offset, check).offset;
         } else invalid('未対応の GIF 拡張です。');
       } else if (type === 0x2c) {
         requireBytes(bytes, offset, 9);
@@ -180,7 +195,7 @@
         if (flags & 128) offset += 3 * (2 ** ((flags & 7) + 1));
         requireBytes(bytes, offset, 1);
         if (bytes[offset] < 2 || bytes[offset] > 8) invalid();
-        const blocks = gifSubblocks(bytes, offset + 1);
+        const blocks = gifSubblocks(bytes, offset + 1, check);
         if (!blocks.size) invalid();
         offset = blocks.offset;
         frames += 1;
@@ -225,15 +240,22 @@
       || (start > 0 && count !== 1) || (approximation >> 4) > 13 || (approximation & 15) > 13)) invalid();
   }
 
-  function inspectJpeg(bytes) {
+  function inspectJpeg(bytes, check) {
     let offset = 2;
     let frame = null;
     let scans = 0;
     let entropy = false;
     while (offset < bytes.length) {
-      if (entropy && bytes[offset] !== 0xff) { offset += 1; continue; }
+      check();
+      // Search only a bounded byte range before checking the deadline again.
+      if (entropy && bytes[offset] !== 0xff) {
+        const end = Math.min(bytes.length, offset + 32768);
+        const marker = bytes.subarray(offset, end).indexOf(0xff);
+        offset = marker < 0 ? end : offset + marker;
+        continue;
+      }
       if (bytes[offset++] !== 0xff) invalid();
-      while (offset < bytes.length && bytes[offset] === 0xff) offset += 1;
+      while (offset < bytes.length && bytes[offset] === 0xff) { check(); offset += 1; }
       requireBytes(bytes, offset, 1);
       const marker = bytes[offset++];
       if (entropy && (marker === 0 || (marker >= 0xd0 && marker <= 0xd7))) continue;
@@ -298,11 +320,12 @@
     if ((flags & 3) === 0 && chunk.length !== 1 + canvas.width * canvas.height) invalid();
   }
 
-  function webpFrame(bytes, start, end, expected) {
+  function webpFrame(bytes, start, end, expected, check) {
     let image = null;
     let alpha = null;
     let offset = start;
     while (offset < end) {
+      check();
       const chunk = webpChunk(bytes, offset, end);
       if (chunk.type === 'ALPH') {
         if (alpha || image) invalid();
@@ -317,7 +340,7 @@
     if (alpha) webpAlpha(bytes, alpha, image);
   }
 
-  function inspectWebp(bytes) {
+  function inspectWebp(bytes, check) {
     requireBytes(bytes, 0, 12);
     if (u32(bytes, 4, true) + 8 !== bytes.length) invalid();
     let offset = 12;
@@ -328,6 +351,7 @@
     let hasAnim = false;
     let frames = 0;
     while (offset < bytes.length) {
+      check();
       const chunk = webpChunk(bytes, offset, bytes.length);
       const { type, data, length } = chunk;
       if (type === 'VP8X') {
@@ -342,7 +366,7 @@
         const width = u24(bytes, data + 6) + 1;
         const height = u24(bytes, data + 9) + 1;
         rectangle(width, height, u24(bytes, data) * 2, u24(bytes, data + 3) * 2, canvas);
-        webpFrame(bytes, data + 16, data + length, { width, height });
+        webpFrame(bytes, data + 16, data + length, { width, height }, check);
         frames += 1;
         dimensions(canvas.width, canvas.height, frames);
       } else if (type === 'VP8 ' || type === 'VP8L') {
@@ -366,19 +390,21 @@
     return image;
   }
 
-  function inspectRaster(bytes, mimeType = '', name = '') {
+  function inspectRaster(bytes, mimeType = '', name = '', deadline = Infinity) {
     if (!(bytes instanceof Uint8Array) || !bytes.length) invalid();
     if (bytes.length > LIMITS.fileBytes) invalid('画像ファイルが 25 MiB を超えています。');
+    const check = inspectionBudget(deadline);
+    check();
     let extension;
     let info;
     if (bytes.length >= 8 && ascii(bytes, 0, 8) === '\x89PNG\r\n\x1a\n') {
-      extension = 'png'; info = inspectPng(bytes);
+      extension = 'png'; info = inspectPng(bytes, check);
     } else if (bytes.length >= 6 && ['GIF87a', 'GIF89a'].includes(ascii(bytes, 0, 6))) {
-      extension = 'gif'; info = inspectGif(bytes);
+      extension = 'gif'; info = inspectGif(bytes, check);
     } else if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-      extension = 'jpg'; info = inspectJpeg(bytes);
+      extension = 'jpg'; info = inspectJpeg(bytes, check);
     } else if (bytes.length >= 12 && ascii(bytes, 0, 4) === 'RIFF' && ascii(bytes, 8, 4) === 'WEBP') {
-      extension = 'webp'; info = inspectWebp(bytes);
+      extension = 'webp'; info = inspectWebp(bytes, check);
     } else invalid('PNG、JPEG、GIF、WebP の画像だけを表示できます。');
     const actualMime = TYPES[extension];
     const providedMime = String(mimeType).split(';', 1)[0].trim().toLowerCase();
@@ -386,6 +412,7 @@
     const suffix = String(name).split(/[\\/]/).pop().match(/\.([^.]+)$/)?.[1].toLowerCase();
     const namedType = suffix === 'jpeg' ? 'jpg' : suffix;
     if (namedType && namedType !== extension) invalid('画像の拡張子と内容が一致しません。');
+    check();
     return Object.freeze({ mimeType: actualMime, ...info, pixels: info.width * info.height * info.frames,
       size: bytes.length, extension: '.' + extension });
   }
@@ -417,5 +444,5 @@
     return Object.freeze({ reserve, release });
   }
 
-  window.PMEImagePolicy = Object.freeze({ LIMITS, inspectRaster, createRenderBudget });
+  window.PMEImagePolicy = Object.freeze({ LIMITS, inspectRaster, createRenderBudget, now });
 })();

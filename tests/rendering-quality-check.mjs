@@ -33,6 +33,7 @@ function createRenderer(useVendor = true, mathEngine = katex) {
     alert() {},
     console,
   });
+  vm.runInContext(readFileSync(new URL('../modules/document-policy.js', import.meta.url), 'utf8'), context);
   vm.runInContext(tablePolicyModule, context);
   vm.runInContext(readFileSync(new URL('../modules/image-policy.js', import.meta.url), 'utf8'), context);
   vm.runInContext(markdownRendererModule, context);

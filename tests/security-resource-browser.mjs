@@ -159,5 +159,90 @@ export async function checkSecurityResources({ evaluate, poll, setAppMarkdown, s
     if (test.limited) assert.match(test.error, /resource limit/, test.name + ': rejected at the resource boundary');
     else assert.equal(test.rendered, true, test.name + ': ' + test.error);
   }
+  await checkDocumentBudgets({ evaluate, poll, setAppMarkdown }, sessionId);
   console.log(`security resource browser checks passed (${await evaluate('location.protocol', sessionId)})`);
+}
+
+async function checkDocumentBudgets({ evaluate, poll, setAppMarkdown }, sessionId) {
+  await evaluate(`(() => {
+    const source = document.getElementById('sourceEditor');
+    source.value = 'x'.repeat(PMEDocumentPolicy.LIMITS.sourceChars + 1);
+    source.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`, sessionId);
+  await poll(`Boolean(document.querySelector('#preview .document-render-limit'))`, Boolean, sessionId, 'oversized preview fallback');
+  const limited = await evaluate(`({
+    length: document.getElementById('sourceEditor').value.length,
+    expected: PMEDocumentPolicy.LIMITS.sourceChars + 1,
+    cm: Boolean(document.querySelector('.source-pane .cm-editor')),
+    rich: Boolean(document.querySelector('#richEditor .document-render-limit')),
+    nodes: document.querySelector('#preview').querySelectorAll('*').length
+  })`, sessionId);
+  assert.equal(limited.length, limited.expected, 'source is preserved in full');
+  assert.equal(limited.cm, false, 'oversized source uses the plain editor');
+  assert.equal(limited.rich, true, 'rich fallback does not repeat full parsing');
+  assert.ok(limited.nodes < 10);
+  await setAppMarkdown('# Normal after limit\n\n**editable**', sessionId);
+  await poll(`Boolean(document.querySelector('.source-pane .cm-editor')) &&
+    document.querySelector('#preview').textContent.includes('Normal after limit')`, Boolean, sessionId, 'normal editing recovery');
+
+  const transactions = await evaluate(`(() => {
+    const mount = document.createElement('div'); document.body.appendChild(mount);
+    let notices = 0;
+    const editor = PMEProseMirror.createRichMarkdownEditor({ mount,
+      markdown: '# heading\\n'.repeat(PMEDocumentPolicy.LIMITS.headings), onUnsupportedMarkdown() { notices++; } });
+    try {
+      const before = editor.view.state.doc;
+      editor.view.dispatch(editor.view.state.tr.insert(before.content.size, before.child(0)));
+      const blocked = editor.view.state.doc === before;
+      const inserted = editor.insertMarkdown('x'.repeat(PMEDocumentPolicy.LIMITS.sourceChars + 1));
+      editor.view.pasteText('*a* '.repeat(40000));
+      editor.view.pasteHTML('<i>x</i>'.repeat(40000));
+      return { blocked, inserted, unchanged: editor.view.state.doc === before, notices };
+    } finally { editor.destroy(); mount.remove(); }
+  })()`, sessionId);
+  assert.equal(transactions.blocked, true, 'cumulative rich transactions enforce the heading cap');
+  assert.equal(transactions.inserted, false);
+  assert.equal(transactions.unchanged, true, 'oversized text and HTML paste are rejected before insertion');
+  assert.ok(transactions.notices >= 3);
+
+  await setAppMarkdown('```mermaid\nflowchart TD\nA-->B\n```', sessionId);
+  await poll(`Boolean(document.querySelector('#richEditor svg.mermaid-svg'))`, Boolean, sessionId, 'initial rich Mermaid');
+  await evaluate(`(() => {
+    const target = document.querySelector('#richEditor .pme-mermaid-node');
+    target.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    const input = document.querySelector('.pme-node-source-editor--mermaid');
+    input.value = 'flowchart TD\\nA-->C';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`, sessionId);
+  await poll(`['preview', 'richEditor'].every(id => {
+    const target = document.querySelector('#' + id + ' .mermaid-render-target');
+    return target?.getAttribute('data-mermaid-source').includes('A-->C') && Boolean(target.querySelector('svg.mermaid-svg'));
+  })`, Boolean, sessionId, 'Mermaid edit refreshes both roots after the budget changes');
+  await setAppMarkdown('Normal after diagram edit', sessionId);
+
+  await evaluate(`(() => {
+    window.__documentBudgetMermaid = { original: window.mermaid, calls: 0, roots: [] };
+    const test = window.__documentBudgetMermaid;
+    window.mermaid = { ...test.original, async render() {
+      test.calls++;
+      return { svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><text x="1" y="20">ok</text></svg>' };
+    } };
+    for (let rootIndex = 0; rootIndex < 2; rootIndex++) {
+      const root = document.createElement('div'); document.body.appendChild(root); test.roots.push(root);
+      for (let index = 0; index < 10; index++) {
+        const target = document.createElement('div'); target.className = 'mermaid-render-target';
+        target.setAttribute('data-mermaid-source', 'flowchart TD\\nA-->B'); root.appendChild(target);
+      }
+      PMERenderMermaidIn(root);
+    }
+  })()`, sessionId);
+  try {
+    await poll(`__documentBudgetMermaid.roots.every(root => Array.from(root.children).every(target =>
+      target.querySelector('svg') || target.hasAttribute('data-mermaid-error')))`, Boolean, sessionId, 'aggregate Mermaid budget');
+    const calls = await evaluate('__documentBudgetMermaid.calls', sessionId);
+    assert.ok(calls > 0 && calls <= 8, 'two roots share the Mermaid call cap: ' + calls);
+  } finally {
+    await evaluate(`(() => { const test = __documentBudgetMermaid; window.mermaid = test.original;
+      test.roots.forEach(root => root.remove()); delete window.__documentBudgetMermaid; })()`, sessionId);
+  }
 }

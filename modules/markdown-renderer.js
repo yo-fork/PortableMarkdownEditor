@@ -74,6 +74,20 @@
     let cachedHighlighter = null;
     let activeImageBudget = null;
     let exportingImages = false;
+    const documentPolicy = window.PMEDocumentPolicy;
+    let workSource = null;
+    let documentWork = null;
+    let activeDocumentWork = null;
+
+    function beginDocumentRender(source) {
+      workSource = source;
+      documentWork = documentPolicy.createWorkBudget();
+    }
+
+    function workFor(source) {
+      if (workSource !== source || !documentWork) beginDocumentRender(source);
+      return documentWork;
+    }
 
     function withImageBudget(render) {
       if (activeImageBudget) return render();
@@ -164,12 +178,29 @@
     }
 
     function renderMarkdownHtml(markdown, mathSession = null) {
-      return withImageBudget(() => withMathSession(mathSession, () => {
+      if (!documentPolicy.allowsSource(markdown)) return documentPolicy.notice;
+      const previousWork = activeDocumentWork;
+      activeDocumentWork = markdown === state.markdown ? workFor(markdown) : documentPolicy.createWorkBudget();
+      const started = documentPolicy.now();
+      const output = documentPolicy.createOutputBudget();
+      try { return withImageBudget(() => withMathSession(mathSession, () => {
         const blocks = buildBlockModel(stripRichCaretTokens(markdown));
+        if (!blocks.length && markdown.trim()) return documentPolicy.notice;
         const headings = buildHeadingIndex(blocks);
         const references = collectReferenceDefinitions(markdown);
-        return blocks.map((block) => annotateRenderedBlockHtml(renderBlockHtml(block, headings, references), block)).join('\n');
-      }));
+        const fragments = [];
+        for (const block of blocks) {
+          if (documentPolicy.now() - started > documentPolicy.LIMITS.renderMs) documentPolicy.fail();
+          const html = annotateRenderedBlockHtml(renderBlockHtml(block, headings, references), block) + '\n';
+          if (!output.reserve(html)) documentPolicy.fail();
+          fragments.push(html);
+        }
+        if (documentPolicy.now() - started > documentPolicy.LIMITS.renderMs) documentPolicy.fail();
+        return fragments.join('').trimEnd();
+      })); } catch (error) {
+        if (documentPolicy.isLimit(error)) return documentPolicy.notice;
+        throw error;
+      } finally { activeDocumentWork = previousWork; }
     }
 
     function renderExportHtmlBody(markdown) {
@@ -227,6 +258,7 @@
         },
       });
       window.PMETablePolicy.installMarkdownIt(md);
+      documentPolicy.installMarkdownIt(md);
       preserveMarkdownLocalPaths(md);
       installMarkdownItMath(md);
       try {
@@ -500,10 +532,18 @@
         const mode = highlighter ? (known ? `language:${language}` : 'auto') : `fallback:${language}`;
         const key = `${mode}:${text}`;
         if (highlightCache.has(key)) return highlightCache.get(key);
-        const highlighted = highlighter
-          ? (known ? highlighter.highlight(text, { language, ignoreIllegals: true }) : highlighter.highlightAuto(text))
-          : { value: highlightCodeFallback(text, language) };
-        if (typeof highlighted?.value !== 'string') return null;
+        const work = activeDocumentWork || workFor(state.markdown);
+        if (!work.reserve('highlight', text.length)) return null;
+        const started = documentPolicy.now();
+        let highlighted;
+        let withinTime;
+        try {
+          highlighted = highlighter
+            ? (known ? highlighter.highlight(text, { language, ignoreIllegals: true }) : highlighter.highlightAuto(text))
+            : { value: highlightCodeFallback(text, language) };
+        } finally { withinTime = work.charge(started); }
+        if (!withinTime || typeof highlighted?.value !== 'string'
+          || !work.output.reserve(highlighted.value)) return null;
         // Keep only HTML and the token tree needed for rich decorations, not parser state.
         const result = { value: highlighted.value, rootNode: highlighted._emitter?.rootNode || null };
         const size = key.length + result.value.length;
@@ -561,10 +601,12 @@
     }
 
     function splitMarkdownBlocks(markdown) {
+      if (!documentPolicy.allowsSource(markdown)) return [];
       const text = normalizeNewlines(markdown);
       const lines = getLines(text);
       const blocks = [];
       let index = 0;
+      let headings = 0;
 
       while (index < lines.length) {
         while (index < lines.length && lines[index].text.trim() === '') index += 1;
@@ -621,6 +663,8 @@
           type: classifyBlock(raw),
           trailingNewline: text[sourceEnd] === '\n',
         });
+        if (blocks.length > documentPolicy.LIMITS.blocks
+          || (blocks[blocks.length - 1].type === 'heading' && ++headings > documentPolicy.LIMITS.headings)) return [];
         index = Math.max(endIndex, index + 1);
       }
       return blocks;
@@ -655,6 +699,17 @@
     }
 
     function renderBlockHtml(block, headingIndex, references = null) {
+      if (!documentPolicy.allowsSource(block.raw || '')) return documentPolicy.notice;
+      try {
+        const html = renderBlockContent(block, headingIndex, references);
+        return documentPolicy.outputCost(html) ? html : documentPolicy.notice;
+      } catch (error) {
+        if (documentPolicy.isLimit(error)) return documentPolicy.notice;
+        throw error;
+      }
+    }
+
+    function renderBlockContent(block, headingIndex, references) {
       if (references && containsReferenceDefinition(block.raw)) {
         return renderBlockWithVendor(block.raw, block, references);
       }
@@ -706,7 +761,8 @@
       if (hasAmbiguousStrongDelimiterNeighborhood(raw) || hasBlockedMarkdownLink(raw)) return '';
       const md = getVendorMarkdownRenderer();
       if (!md) return '';
-      return md.render(preprocessVendorMarkdown(raw), buildMarkdownItEnv(raw, block, references)).trimEnd();
+      const html = md.render(preprocessVendorMarkdown(raw), buildMarkdownItEnv(raw, block, references)).trimEnd();
+      return documentPolicy.outputCost(html) ? html : documentPolicy.notice;
     }
 
     function buildMarkdownItEnv(raw, block, references = null) {
@@ -728,12 +784,19 @@
     }
 
     function renderInlineMarkdown(raw, references = null) {
+      if (!documentPolicy.allowsSource(String(raw || ''))) return documentPolicy.notice;
       if (!activeImageBudget) return withImageBudget(() => renderInlineMarkdown(raw, references));
       const safeRaw = stripRichCaretTokens(raw);
       if (hasAmbiguousStrongDelimiterNeighborhood(safeRaw) || hasBlockedMarkdownLink(safeRaw)) return renderInline(safeRaw, references);
       const md = getVendorMarkdownRenderer();
       if (!md) return renderInline(safeRaw, references);
-      return md.renderInline(String(safeRaw || ''), references ? { references: { ...references } } : {});
+      try {
+        const html = md.renderInline(String(safeRaw || ''), references ? { references: { ...references } } : {});
+        return documentPolicy.outputCost(html) ? html : documentPolicy.notice;
+      } catch (error) {
+        if (documentPolicy.isLimit(error)) return documentPolicy.notice;
+        throw error;
+      }
     }
 
     function hasAmbiguousStrongDelimiterNeighborhood(raw) {
@@ -1788,7 +1851,7 @@
     }
 
     function safeSetHtml(element, html, mathSession = null) {
-      element.innerHTML = html;
+      element.innerHTML = documentPolicy.outputCost(html) ? html : documentPolicy.notice;
       mathRootSessions.delete(element);
       enhanceRenderedHtml(element, mathSession);
     }
@@ -1803,6 +1866,7 @@
     function renderMermaidIn(root) {
       if (!window.mermaid?.render) return;
       const targets = Array.from(root.querySelectorAll('.mermaid-render-target[data-mermaid-source]'));
+      const work = workFor(state.markdown);
       const linkPolicy = JSON.stringify(state.allowedLinkDomains);
       for (const target of targets) {
         if (target.querySelector('svg.mermaid-svg') && mermaidLinkPolicies.get(target) !== linkPolicy) {
@@ -1811,29 +1875,35 @@
         }
       }
       mermaidRenderQueue = mermaidRenderQueue
-        .then(() => renderMermaidTargets(targets))
+        .then(() => renderMermaidTargets(targets, work))
         .catch(() => {});
     }
 
     window.PMERenderMermaidIn = renderMermaidIn;
 
-    async function renderMermaidTargets(targets) {
+    async function renderMermaidTargets(targets, work) {
       cleanupMermaidRenderScratchNodes();
       for (const target of targets) {
-        if (!target.isConnected) continue;
+        if (!target.isConnected || work !== documentWork) continue;
         const source = target.getAttribute('data-mermaid-source') || '';
         if (target.querySelector('svg.mermaid-svg')) continue;
         const id = target.getAttribute('data-mermaid-render-id') || nextMermaidId('diagram', source);
         cleanupMermaidRenderScratch(id);
+        let started = null;
         try {
+          if (!work.reserve('mermaid', source.length)) documentPolicy.fail();
+          started = documentPolicy.now();
           if (!window.PMEMermaidPolicy) throw new Error('Mermaidの描画前検査を使用できません。');
           await window.PMEMermaidPolicy.assertSafeSource(source, window.mermaid);
-          if (!target.isConnected || target.getAttribute('data-mermaid-source') !== source) continue;
+          if (!target.isConnected || work !== documentWork || target.getAttribute('data-mermaid-source') !== source) continue;
           const result = await window.mermaid.render(id, source);
-          if (!target.isConnected || target.getAttribute('data-mermaid-source') !== source) continue;
+          if (!target.isConnected || work !== documentWork || target.getAttribute('data-mermaid-source') !== source) continue;
           const svg = typeof result === 'string' ? result : result?.svg;
+          const withinTime = work.charge(started);
+          started = null;
+          if (!withinTime || !work.output.reserve(svg)) documentPolicy.fail();
           const safeSvg = sanitizeSvgMarkup(svg);
-          if (safeSvg) {
+          if (safeSvg && documentPolicy.outputCost(safeSvg)) {
             target.classList.remove('mermaid-fallback');
             target.removeAttribute('data-mermaid-error');
             target.innerHTML = safeSvg;
@@ -1845,11 +1915,12 @@
             target.innerHTML = renderMermaidFallbackPre(source);
           }
         } catch (error) {
-          if (!target.isConnected || target.getAttribute('data-mermaid-source') !== source) continue;
+          if (!target.isConnected || work !== documentWork || target.getAttribute('data-mermaid-source') !== source) continue;
           target.classList.add('mermaid-fallback');
           target.setAttribute('data-mermaid-error', String(error?.message || 'Mermaid描画に失敗しました').slice(0, 300));
           target.innerHTML = renderMermaidFallbackPre(source);
         } finally {
+          if (started !== null) work.charge(started);
           cleanupMermaidRenderScratch(id);
         }
       }
@@ -2440,6 +2511,7 @@
       renderBlockHtml: (...args) => withMathSession(null, () => renderBlockHtml(...args)),
       renderInlineMarkdown: (...args) => withMathSession(null, () => renderInlineMarkdown(...args)),
       renderMarkdownHtml,
+      beginDocumentRender,
       renderExportHtmlBody,
       renderMermaidIn,
       safeSetHtml,
