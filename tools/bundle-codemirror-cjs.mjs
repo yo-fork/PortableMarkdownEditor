@@ -2,6 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { patchVendor } from './vendor-security-patches.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const nodeModulesRoot = path.join(root, 'vendor', 'codemirror6', 'node_modules');
@@ -59,7 +60,8 @@ async function addFileModule(filePath) {
   const id = toBundleId(filePath);
   if (modules.has(id)) return id;
 
-  const code = transformKnownEsmDependency(filePath, await readFile(filePath, 'utf8'));
+  const original = await readFile(filePath, 'utf8');
+  const code = transformKnownEsmDependency(filePath, filePath.replaceAll('\\', '/').includes('/@lezer/markdown/') ? patchVendor('@lezer/markdown', original) : original);
   modules.set(id, { id, filePath, code, requires: {} });
 
   for (const specifier of requiredSpecifiers(code)) {

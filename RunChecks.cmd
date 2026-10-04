@@ -108,6 +108,10 @@ echo ^> node tests\rendering-quality-check.mjs
 node tests\rendering-quality-check.mjs || goto :failed
 
 echo.
+echo ^> node tests\security-resource-check.mjs
+node tests\security-resource-check.mjs || goto :failed
+
+echo.
 echo ^> node tests\vendor-static-check.mjs
 node tests\vendor-static-check.mjs || goto :failed
 

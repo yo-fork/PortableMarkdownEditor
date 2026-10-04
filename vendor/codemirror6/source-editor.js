@@ -48,11 +48,17 @@ export function createPortableMarkdownSourceEditor(options) {
   const dispatchPaste = (event) => options?.onPaste?.(event);
   const dispatchDragOver = (event) => options?.onDragOver?.(event);
   const dispatchDragLeave = (event) => options?.onDragLeave?.(event);
-  const dispatchDrop = (event) => options?.onDrop?.(event);
+  const dispatchDrop = (event) => {
+    if (!event.dataTransfer?.files?.length) return;
+    // Run before CodeMirror's contentDOM handler can create any FileReaders.
+    event.preventDefault();
+    event.stopPropagation();
+    options?.onDrop?.(event);
+  };
   host.addEventListener('paste', dispatchPaste);
   host.addEventListener('dragover', dispatchDragOver);
   host.addEventListener('dragleave', dispatchDragLeave);
-  host.addEventListener('drop', dispatchDrop);
+  host.addEventListener('drop', dispatchDrop, true);
 
   let suppressChange = false;
   const state = EditorState.create({
@@ -209,7 +215,7 @@ export function createPortableMarkdownSourceEditor(options) {
       host.removeEventListener('paste', dispatchPaste);
       host.removeEventListener('dragover', dispatchDragOver);
       host.removeEventListener('dragleave', dispatchDragLeave);
-      host.removeEventListener('drop', dispatchDrop);
+      host.removeEventListener('drop', dispatchDrop, true);
       view.destroy();
       host.remove();
     },

@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { blockedMarkdownLinks, blockedLinkUrls } from './link-policy-cases.mjs';
+import { checkSecurityResources } from './security-resource-browser.mjs';
 
 const testsDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(testsDirectory, '..');
@@ -37,6 +38,14 @@ async function main() {
     await connection.send('Log.enable', {}, sessionId);
     connection.onEvent((message) => collectBrowserError(message, sessionId));
 
+    if (process.argv.includes('--security-resources-only')) {
+      await navigate(baseUrl + '/index.html', sessionId);
+      await poll(`Boolean(document.querySelector('.source-pane .cm-editor'))`, Boolean, sessionId, 'resource check startup');
+      await checkSecurityResources({ evaluate, poll, setAppMarkdown, switchMode }, sessionId);
+      assert.deepEqual(browserErrors, []);
+      return;
+    }
+
     await checkVendorSelfTest(baseUrl, sessionId);
     await checkImageAssets(baseUrl, sessionId);
     await checkMermaidVisuals(baseUrl, sessionId);
@@ -49,6 +58,7 @@ async function main() {
     await checkCodeHighlightBudgets(sessionId);
     await checkMathRenderBudgets(sessionId);
     await checkImageBudgets(sessionId);
+    await checkSecurityResources({ evaluate, poll, setAppMarkdown, switchMode }, sessionId);
     // Use a fresh tab so the dirty-document beforeunload guard remains enabled.
     await connection.send('Target.closeTarget', { targetId });
     ({ targetId } = await connection.send('Target.createTarget', { url: 'about:blank' }));
@@ -67,6 +77,7 @@ async function main() {
     await checkCodeHighlightBudgets(fileSessionId);
     await checkMathRenderBudgets(fileSessionId);
     await checkImageBudgets(fileSessionId);
+    await checkSecurityResources({ evaluate, poll, setAppMarkdown, switchMode }, fileSessionId);
 
     assert.deepEqual(browserErrors, [], `browser console errors:\n${browserErrors.join('\n')}`);
     console.log(`browser checks passed (${path.basename(browserPath)})`);
@@ -242,6 +253,15 @@ async function checkVendorSelfTest(baseUrl, sessionId) {
 }
 
 async function checkImageAssets(baseUrl, sessionId) {
+  // A normal same-origin visit must neither launch the app nor touch its storage.
+  await navigate(`${baseUrl}/tests/image-assets-browser-check.html`, sessionId);
+  await evaluate(`localStorage.setItem('portable-markdown-editor:draft:v2', 'fixture-sentinel')`, sessionId);
+  await navigate(`${baseUrl}/tests/image-assets-browser-check.html?phase=start`, sessionId);
+  assert.equal(await evaluate(`localStorage.getItem('portable-markdown-editor:draft:v2')`, sessionId), 'fixture-sentinel');
+  assert.equal(await evaluate(`typeof window.PMEProseMirror`, sessionId), 'undefined');
+  const { identifier } = await connection.send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `if (location.origin === ${JSON.stringify(baseUrl)} && location.pathname === '/tests/image-assets-browser-check.html') Object.defineProperty(window, '__PME_TEST_RUNNER', { value: true });`,
+  }, sessionId);
   await navigate(`${baseUrl}/tests/image-assets-browser-check.html`, sessionId);
   const result = await poll(
     `(() => { const result = document.getElementById('testResult'); return result ? { className: result.className, text: result.textContent } : null; })()`,
@@ -252,6 +272,7 @@ async function checkImageAssets(baseUrl, sessionId) {
   );
   assert.equal(result.className, 'pass', result.text);
   assert.match(result.text, /FSA directory handle restored/, 'image assets check must include reload restoration');
+  await connection.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sessionId);
 }
 
 async function checkMermaidVisuals(baseUrl, sessionId) {

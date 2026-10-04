@@ -14485,10 +14485,14 @@ var defaultMarkdownSerializer = new MarkdownSerializer({
     state.write("![" + state.esc(node.attrs.alt || "") + "](" + node.attrs.src.replace(/[\(\)]/g, "\\$&") + (node.attrs.title ? ' "' + node.attrs.title.replace(/"/g, '\\"') + '"' : "") + ")");
   },
   hard_break: function hard_break(state, node, parent, index) {
-    for (var i = index + 1; i < parent.childCount; i++) if (parent.child(i).type != node.type) {
-      state.write("\\\n");
-      return;
+    var tails = state.pmeBreakTails || (state.pmeBreakTails = new WeakMap());
+    var last = tails.get(parent);
+    if (last === undefined) {
+      last = parent.childCount - 1;
+      while (last >= 0 && parent.child(last).type === node.type) last--;
+      tails.set(parent, last);
     }
+    if (index < last) state.write("\\\n");
   },
   text: function text(state, node) {
     state.text(node.text, !state.inAutolink);
@@ -14686,7 +14690,7 @@ var MarkdownSerializerState = function () {
           var info = _this2.getMark(mark.type.name);
           return info && info.expelEnclosingWhitespace && !_this2.isMarkAhead(parent, index + 1, mark);
         })) {
-          var _exec3 = /^(.*?)(\s*)$/m.exec(node.text),
+          var _exec3 = (function(text) { var lineEnd = text.search(/[\r\n\u2028\u2029]/); if (lineEnd < 0) lineEnd = text.length; var at = lineEnd; while (at > 0 && /\s/.test(text.charAt(at - 1))) at--; var end = at, lastBreak = -1; while (end < text.length && /\s/.test(text.charAt(end))) { if (/[\r\n\u2028\u2029]/.test(text.charAt(end))) lastBreak = end; end++; } if (end < text.length) end = lastBreak < 0 ? lineEnd : lastBreak; return [text.slice(0, end), text.slice(0, at), text.slice(at, end)]; })(node.text),
             _exec4 = _slicedToArray(_exec3, 3),
             _2 = _exec4[0],
             _rest = _exec4[1],
@@ -14930,6 +14934,7 @@ var TableMap = class {
 function computeMap(table) {
 	if (table.type.spec.tableRole != "table") throw new RangeError("Not a table node: " + table.type.name);
 	const width = findWidth(table), height = table.childCount;
+	if (!Number.isSafeInteger(width) || width < 1 || width > 64 || height > 256 || width * height > 4096) throw new RangeError("Table resource limit exceeded");
 	const map = [];
 	let mapPos = 0;
 	let problems = null;
@@ -15050,6 +15055,8 @@ function getCellAttrs(dom, extraAttrs) {
 	const widthAttr = dom.getAttribute("data-colwidth");
 	const widths = widthAttr && /^\d+(,\d+)*$/.test(widthAttr) ? widthAttr.split(",").map((s) => Number(s)) : null;
 	const colspan = Number(dom.getAttribute("colspan") || 1);
+	const pmeRowspan = Number(dom.getAttribute("rowspan") || 1);
+	if (!Number.isSafeInteger(colspan) || colspan < 1 || colspan > 64 || !Number.isSafeInteger(pmeRowspan) || pmeRowspan < 1 || pmeRowspan > 256) return false;
 	const result = {
 		colspan,
 		rowspan: Number(dom.getAttribute("rowspan") || 1),
@@ -16744,16 +16751,22 @@ function pastedCells(slice) {
 	return ensureRectangular(schema, rows);
 }
 function ensureRectangular(schema, rows) {
+	if (rows.length > 256) throw new RangeError("Table resource limit exceeded");
 	const widths = [];
 	for (let i = 0; i < rows.length; i++) {
 		const row = rows[i];
 		for (let j = row.childCount - 1; j >= 0; j--) {
 			const { rowspan, colspan } = row.child(j).attrs;
-			for (let r = i; r < i + rowspan; r++) widths[r] = (widths[r] || 0) + colspan;
+			if (!Number.isSafeInteger(rowspan) || rowspan < 1 || i + rowspan > 256 || !Number.isSafeInteger(colspan) || colspan < 1 || colspan > 64) throw new RangeError("Table resource limit exceeded");
+			for (let r = i; r < i + rowspan; r++) {
+				widths[r] = (widths[r] || 0) + colspan;
+				if (widths[r] > 64) throw new RangeError("Table resource limit exceeded");
+			}
 		}
 	}
 	let width = 0;
 	for (let r = 0; r < widths.length; r++) width = Math.max(width, widths[r]);
+	if (width * widths.length > 4096) throw new RangeError("Table resource limit exceeded");
 	for (let r = 0; r < widths.length; r++) {
 		if (r >= rows.length) rows.push(prosemirror_model.Fragment.empty);
 		if (widths[r] < width) {
@@ -16899,6 +16912,7 @@ function insertCells(state, dispatch, tableStart, rect, cells) {
 	let map = TableMap.get(table);
 	const { top, left } = rect;
 	const right = left + cells.width, bottom = top + cells.height;
+	if (!Number.isSafeInteger(right) || !Number.isSafeInteger(bottom) || right > 64 || bottom > 256 || Math.max(map.width, right) * Math.max(map.height, bottom) > 4096) throw new RangeError("Table resource limit exceeded");
 	const tr = state.tr;
 	let mapFrom = 0;
 	function recomp() {
@@ -17801,33 +17815,41 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
   }
 
   function inlineMathMatchAt(source, start) {
-    if (source.slice(start, start + 2) === '\\(' && !isEscapedMarkdownCharacter(source, start)) {
-      var parenClose = source.indexOf('\\)', start + 2);
-      while (parenClose >= 0 && isEscapedMarkdownCharacter(source, parenClose)) {
-        parenClose = source.indexOf('\\)', parenClose + 2);
+    source = String(source || '');
+    const paren = source.slice(start, start + 2) === '\\(';
+    if (!paren && (source[start] !== '$' || source[start + 1] === '$' || /\s/.test(source[start + 1] || ''))) return null;
+    if (isEscapedMarkdownCharacter(source, start)) return null;
+    // Index valid closing delimiters once. Failed starts never rescan a suffix.
+    let index = inlineMathMatchAt.index;
+    if (!index || index.source !== source) {
+      index = { source, dollars: [], parens: [], lines: [] };
+      let slashes = 0;
+      for (let i = 0; i < source.length; i += 1) {
+        const escaped = slashes % 2 === 1;
+        if (source[i] === '\n') index.lines.push(i);
+        if (source[i] === '$' && !escaped && !/\s/.test(source[i - 1] || '')) index.dollars.push(i);
+        if (source[i] === '\\' && source[i + 1] === ')' && !escaped) index.parens.push(i);
+        slashes = source[i] === '\\' ? slashes + 1 : 0;
       }
-      if (parenClose < 0) return null;
-      var parenValue = source.slice(start + 2, parenClose);
-      if (parenValue.indexOf('\n') >= 0 || /^\s|\s$/.test(parenValue)) return null;
-      return { value: parenValue, end: parenClose + 2 };
+      inlineMathMatchAt.index = index;
     }
-
-    if (source.charAt(start) !== '$'
-      || source.charAt(start + 1) === '$'
-      || /\s/.test(source.charAt(start + 1))
-      || isEscapedMarkdownCharacter(source, start)) return null;
-    var close = start + 1;
-    while (close < source.length) {
-      close = source.indexOf('$', close);
-      if (close < 0) return null;
-      if (!isEscapedMarkdownCharacter(source, close)
-        && !/\s/.test(source.charAt(close - 1))) {
-        var value = source.slice(start + 1, close);
-        if (value && value.indexOf('\n') < 0) return { value: value, end: close + 1 };
+    function next(values) {
+      let low = 0;
+      let high = values.length;
+      while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (values[middle] <= start) low = middle + 1;
+        else high = middle;
       }
-      close += 1;
+      return low < values.length ? values[low] : -1;
     }
-    return null;
+    const close = next(paren ? index.parens : index.dollars);
+    if (close < 0) return null;
+    const line = next(index.lines);
+    if (line >= 0 && line < close) return null;
+    const from = start + (paren ? 2 : 1);
+    if (paren && close > from && (/\s/.test(source[from]) || /\s/.test(source[close - 1]))) return null;
+    return { value: source.slice(from, close), end: close + (paren ? 2 : 1) };
   }
 
   function escapeTablePipesInInlineMathSource(source) {
@@ -20460,16 +20482,24 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
   MermaidNodeView.prototype.ignoreMutation = function(mutation) { return ignoreNodeSourceEditorMutation(mutation) || true; };
   MermaidNodeView.prototype.destroy = function() { destroyNodeSourceEditor(this.sourceEditor); };
 
+  var tocPlans = new WeakMap();
   function headingEntries(doc) {
+    if (tocPlans.has(doc)) return tocPlans.get(doc);
     var entries = [];
+    var count = 0;
+    var chars = 128;
     doc.descendants(function(node, pos) {
+      if (node.type.name === 'toc_block') count += 1;
       if (node.type.name !== 'heading') return;
+      chars += 256 + 6 * (node.textContent || '見出し').length;
       entries.push({
         level: node.attrs.level || 1,
         title: node.textContent || '見出し',
         pos: pos
       });
     });
+    entries.limitExceeded = entries.length * count > 4096 || chars * count > 1000000;
+    tocPlans.set(doc, entries);
     return entries;
   }
 
@@ -20480,6 +20510,14 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     title.setAttribute('contenteditable', 'false');
     dom.appendChild(title);
     var entries = headingEntries(doc);
+    if (entries.limitExceeded) {
+      var notice = document.createElement('p');
+      notice.className = 'toc-render-limit';
+      notice.textContent = '[toc] 表示上限を超えたため目次を省略しました。';
+      notice.setAttribute('contenteditable', 'false');
+      dom.appendChild(notice);
+      return;
+    }
     if (!entries.length) {
       var empty = document.createElement('p');
       empty.textContent = '見出しがありません';
@@ -21186,7 +21224,24 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     return inputRulesModule.inputRules({ rules: rules });
   }
 
-  function createState(markdownText, getCodeHighlight) {
+  function tableBudgetPlugin(onUnsupportedMarkdown) {
+    return new state.Plugin({
+      filterTransaction: function(transaction) {
+        if (!transaction.docChanged) return true;
+        var allowed = true;
+        transaction.doc.descendants(function(node) {
+          if (!allowed) return false;
+          if (node.type.spec.tableRole !== 'table') return;
+          allowed = global.PMETablePolicy.allowsTableNode(node);
+          return false;
+        });
+        if (!allowed && typeof onUnsupportedMarkdown === 'function') onUnsupportedMarkdown('table-render-limit');
+        return allowed;
+      }
+    });
+  }
+
+  function createState(markdownText, getCodeHighlight, onUnsupportedMarkdown) {
     var doc = ensureEditableTrailingParagraph(parseMarkdown(markdownText || ''));
     var listItem = schema.nodes.list_item;
     var keys = {
@@ -21216,6 +21271,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       schema: schema,
       doc: doc,
       plugins: [
+        tableBudgetPlugin(onUnsupportedMarkdown),
         historyModule.history(),
         markdownInputRules(),
         markdownShapeNormalizationPlugin(),
@@ -21578,7 +21634,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
     var clipboardSerializer = createImageClipboardSerializer(options, linkAttributes);
 
     mount.textContent = '';
-    var initialState = createState(options.markdown || '', options.getCodeHighlight);
+    var initialState = createState(options.markdown || '', options.getCodeHighlight, options.onUnsupportedMarkdown);
     prepareMathPlan(initialState.doc);
     prepareImagePlan(initialState.doc);
     var editorView = new view.EditorView(mount, {
@@ -21604,10 +21660,31 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
       handleDOMEvents: { beforeinput: preserveInlineCodeSelectionBeforeInput },
       handleKeyDown: preserveInlineCodeSelectionKeyDown,
       handleTextInput: preserveInlineCodeSelectionTextInput,
-      handlePaste: function(editorView, event) {
+      handlePaste: function(editorView, event, slice) {
+        // Clipboard context metadata may recreate cells after HTML validation.
+        // The vendor checks dimensions before padding; reject that paste with
+        // the application's existing notice instead of leaking a DOM exception.
+        try {
+          var pastedCells = tableModule.__pastedCells(slice);
+          if (pastedCells && tableModule.isInTable(editorView.state)
+            && !(editorView.state.selection instanceof tableModule.CellSelection)) {
+            var target = tableModule.selectedRect(editorView.state);
+            if (!global.PMETablePolicy.allowsDimensions(
+              Math.max(target.map.width, target.left + pastedCells.width),
+              Math.max(target.map.height, target.top + pastedCells.height))) {
+              throw new RangeError('Table resource limit exceeded');
+            }
+          }
+        }
+        catch (error) {
+          if (error.message !== 'Table resource limit exceeded') throw error;
+          if (typeof options.onUnsupportedMarkdown === 'function') options.onUnsupportedMarkdown('table-render-limit');
+          return true;
+        }
         return handleMarkdownPlainTextPaste(editorView, event, options.onUnsupportedMarkdown);
       },
       clipboardTextParser: markdownClipboardTextParser,
+      transformPastedHTML: global.PMETablePolicy.sanitizePastedHTML,
       clipboardSerializer: clipboardSerializer,
       nodeViews: extendedNodeViews(options, mathViews, getMathHtml, getImageSrc),
       markViews: { link: createLinkView },
@@ -21643,7 +21720,7 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
         if (destroyed) return false;
         if (unsupportedMarkdownReason(markdownText)) return false;
         var nextSource = normalizeNewlines(markdownText || '');
-        var nextState = createState(nextSource, options.getCodeHighlight);
+        var nextState = createState(nextSource, options.getCodeHighlight, options.onUnsupportedMarkdown);
         if (editorView.state.doc.eq(nextState.doc)) return true;
         applyingExternal = true;
         try {
@@ -21652,6 +21729,9 @@ exports.updateColumnsOnResize = updateColumnsOnResize;
           editorView.updateState(nextState);
           refreshMathViews();
           refreshImageNodeViews(editorView);
+          // A replaced state recreates plugin views; their update hook is not
+          // called for a reused, unchanged toc_block NodeView.
+          refreshTocNodeViews(editorView);
         }
         finally { applyingExternal = false; }
         return true;

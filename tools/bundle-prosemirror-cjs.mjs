@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { patchVendor } from './vendor-security-patches.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const bundlePath = path.join(root, 'vendor', 'prosemirror', 'prosemirror-editor.js');
@@ -80,7 +81,7 @@ async function readIntegration() {
 
 async function buildWithBundledModules(integration) {
   const currentBundle = await readFile(bundlePath, 'utf8');
-  const dependencyPrefix = dependencyPrefixFromBundle(currentBundle);
+  const dependencyPrefix = patchVendor('prosemirror-tables', patchVendor('prosemirror-markdown', dependencyPrefixFromBundle(currentBundle)));
   return `${generatedHeader}${dependencyPrefix}${integration.trimEnd()}${wrapperEnd}\n`;
 }
 
@@ -101,7 +102,7 @@ async function readPackageModule(name, nodeModulesRoot, lock) {
     throw new Error(`${name} version does not match vendor/prosemirror/package-lock.json`);
   }
   const entryPath = path.join(packageDirectory, packageJson.main || 'index.js');
-  const code = (await readFile(entryPath, 'utf8')).trimEnd();
+  const code = patchVendor(name, (await readFile(entryPath, 'utf8')).trimEnd());
   const unsupportedDependencies = requiredSpecifiers(code).filter(
     (specifier) => specifier !== 'markdown-it' && !packageNames.includes(specifier),
   );

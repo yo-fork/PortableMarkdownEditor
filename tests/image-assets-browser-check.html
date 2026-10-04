@@ -24,6 +24,8 @@
   </style>
   <script>
     (() => {
+      // Only the isolated CDP runner may start this destructive fixture.
+      if (window.__PME_TEST_RUNNER !== true) return;
       const STORAGE_KEY = 'portable-markdown-editor:draft:v2';
       const SETTINGS_KEY = 'portable-markdown-editor:settings:v2';
       const LEGACY_STORAGE_KEY = 'portable-markdown-editer:draft:v1';
@@ -212,17 +214,17 @@
     <span id="inlineInsertTargetLabel"></span>
   </dialog>
 
-  <script src="../vendor/markdown-it/markdown-it.min.js"></script>
-  <script src="../modules/table-policy.js"></script>
-  <script src="../modules/image-policy.js?v=image-budget-1"></script>
-  <script src="../modules/mermaid-policy.js?v=mermaid-images-1"></script>
-  <script src="../vendor/prosemirror/prosemirror-editor.js"></script>
-  <script src="../modules/markdown-renderer.js"></script>
-  <script src="../modules/rich-editor.js"></script>
-  <script src="../modules/rich-input-controller.js"></script>
-  <script src="../modules/file-manager.js"></script>
-  <script src="../modules/shortcut-manager.js"></script>
-  <script src="../app.js"></script>
+  <script>
+    if (window.__PME_TEST_RUNNER === true) {
+      // Parser-inserted scripts preserve the application's DOMContentLoaded order.
+      const scripts = ['../vendor/markdown-it/markdown-it.min.js', '../modules/table-policy.js',
+        '../modules/image-policy.js', '../modules/mermaid-policy.js',
+        '../vendor/prosemirror/prosemirror-editor.js', '../modules/markdown-renderer.js',
+        '../modules/rich-editor.js', '../modules/rich-input-controller.js',
+        '../modules/file-manager.js', '../modules/shortcut-manager.js', '../app.js'];
+      document.write(scripts.map((src) => '<script src="' + src + '"><\/script>').join(''));
+    }
+  </script>
   <script>
     (() => {
       const PHASE_KEY = 'pme-image-assets-browser-check:phase';
@@ -543,6 +545,10 @@
       }
 
       window.addEventListener('DOMContentLoaded', () => {
+        if (window.__PME_TEST_RUNNER !== true) {
+          document.getElementById('testResult').textContent = '自動検査専用のページです。保存済みデータは変更していません。';
+          return;
+        }
         const phase = window.__PME_IMAGE_TEST_PHASE;
         (phase === 'reload' ? runReloadPhase() : runStartPhase()).catch(fail);
       });

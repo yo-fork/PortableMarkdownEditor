@@ -205,9 +205,11 @@
       const md = getVendorMarkdownRenderer();
       if (!md) return '';
       const headings = buildHeadingIndex(splitMarkdownBlocks(markdown)).items;
-      return md.render(preprocessVendorMarkdown(markdown))
-        .replaceAll(`<p>${VENDOR_TOC_MARKER}</p>\n`, renderToc(headings))
-        .replaceAll(VENDOR_TOC_MARKER, renderToc(headings));
+      const html = md.render(preprocessVendorMarkdown(markdown));
+      const count = html.split(VENDOR_TOC_MARKER).length - 1;
+      const allowed = allowsToc(headings, count);
+      const marker = VENDOR_TOC_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return html.replace(new RegExp(`<p>${marker}</p>\\n|${marker}`, 'g'), () => renderToc(headings, allowed));
     }
 
     function getVendorMarkdownRenderer() {
@@ -391,33 +393,42 @@
       return `<span class="math-inline" data-math-source="${escapeAttribute(value)}" data-math-display="false">${html === null ? mathSourceFallback(original) : html}</span>`;
     }
 
-    function inlineMathTokenAt(text, start) {
-      const source = String(text || '');
-      if (source.slice(start, start + 2) === '\\(' && !isEscapedCharacter(source, start)) {
-        let close = source.indexOf('\\)', start + 2);
-        while (close >= 0 && isEscapedCharacter(source, close)) close = source.indexOf('\\)', close + 2);
-        if (close < 0) return null;
-        const value = source.slice(start + 2, close);
-        if (value.includes('\n') || /^\s|\s$/.test(value)) return null;
-        return { value, end: close + 2 };
-      }
-
-      if (source[start] !== '$'
-        || source[start + 1] === '$'
-        || /\s/.test(source[start + 1] || '')
-        || isEscapedCharacter(source, start)) return null;
-      let close = start + 1;
-      while (close < source.length) {
-        close = source.indexOf('$', close);
-        if (close < 0) return null;
-        if (!isEscapedCharacter(source, close)
-          && !/\s/.test(source[close - 1] || '')) {
-          const value = source.slice(start + 1, close);
-          if (value && !value.includes('\n')) return { value, end: close + 1 };
+    function inlineMathTokenAt(source, start) {
+      source = String(source || '');
+      const paren = source.slice(start, start + 2) === '\\(';
+      if (!paren && (source[start] !== '$' || source[start + 1] === '$' || /\s/.test(source[start + 1] || ''))) return null;
+      if (isEscapedCharacter(source, start)) return null;
+      // Index valid closing delimiters once. Failed starts never rescan a suffix.
+      let index = inlineMathTokenAt.index;
+      if (!index || index.source !== source) {
+        index = { source, dollars: [], parens: [], lines: [] };
+        let slashes = 0;
+        for (let i = 0; i < source.length; i += 1) {
+          const escaped = slashes % 2 === 1;
+          if (source[i] === '\n') index.lines.push(i);
+          if (source[i] === '$' && !escaped && !/\s/.test(source[i - 1] || '')) index.dollars.push(i);
+          if (source[i] === '\\' && source[i + 1] === ')' && !escaped) index.parens.push(i);
+          slashes = source[i] === '\\' ? slashes + 1 : 0;
         }
-        close += 1;
+        inlineMathTokenAt.index = index;
       }
-      return null;
+      function next(values) {
+        let low = 0;
+        let high = values.length;
+        while (low < high) {
+          const middle = (low + high) >>> 1;
+          if (values[middle] <= start) low = middle + 1;
+          else high = middle;
+        }
+        return low < values.length ? values[low] : -1;
+      }
+      const close = next(paren ? index.parens : index.dollars);
+      if (close < 0) return null;
+      const line = next(index.lines);
+      if (line >= 0 && line < close) return null;
+      const from = start + (paren ? 2 : 1);
+      if (paren && close > from && (/\s/.test(source[from]) || /\s/.test(source[close - 1]))) return null;
+      return { value: source.slice(from, close), end: close + (paren ? 2 : 1) };
     }
 
     function isEscapedCharacter(text, index) {
@@ -654,7 +665,7 @@
           if (block.trailingNewline && /[ \t]{2}$/.test(block.raw || '')) return renderParagraph(block.raw, block, references);
           break;
         case 'toc':
-          return renderToc(headingIndex.items);
+          return renderToc(headingIndex.items, headingIndex.tocAllowed);
         case 'code':
           return renderCodeBlock(block.raw, block);
         case 'math':
@@ -895,7 +906,13 @@
         .join('<br>');
     }
 
-    function renderToc(headings) {
+    function allowsToc(headings, count) {
+      const chars = headings.reduce((total, item) => total + 256 + 6 * (item.text.length + item.id.length), 128);
+      return headings.length * count <= 4096 && chars * count <= 1000000;
+    }
+
+    function renderToc(headings, allowed = allowsToc(headings, 1)) {
+      if (!allowed) return '<nav class="toc toc-render-limit" role="note">[toc] 表示上限を超えたため目次を省略しました。</nav>';
       if (!headings.length) return '<div class="toc"><strong>目次</strong><p>見出しはありません。</p></div>';
       return `<nav class="toc" aria-label="目次"><strong>目次</strong>${renderTocTree(buildHeadingTree(headings), true)}</nav>`;
     }
@@ -965,26 +982,27 @@
 
       let text = raw.replace(/`([^`]+)`/g, (_match, code) => hold(`<code>${escapeHtml(code)}</code>`));
 
-      text = text.replace(/!\[([^\]\n]*)\]\((<[^>\n]+>|(?:[^()\s\n]+|\([^()\n]*\))+)\)/g, (_match, alt, target) => {
-        const url = parseMarkdownTarget(target);
-        const safe = imageOutputUrl(sanitizeImageUrl(url));
-        if (!safe) return hold(renderBlockedImage(url, alt || 'no alt'));
-        return hold(`<img alt="${escapeAttribute(alt)}" src="${escapeAttribute(safe)}" data-markdown-src="${escapeAttribute(url)}">`);
-      });
-
-      text = text.replace(/\\\[([^\]\n]+)\\\]\((<[^>\n]+>|(?:[^()\s\n]+|\([^()\n]*\))+)\)/g, (match, label, target) => {
-        const url = parseMarkdownTarget(target);
-        if (sanitizeLinkUrl(url)) return match;
-        return hold(`<span class="blocked-link">リンクブロック: ${escapeHtml(label)}</span>`);
-      });
-
-      text = text.replace(/\[([^\]\n]+)\]\((<[^>\n]+>|(?:[^()\s\n]+|\([^()\n]*\))+)\)/g, (match, label, target, offset, source) => {
-        if (source[offset - 1] === '\\') return match;
-        const url = parseMarkdownTarget(target);
-        const safe = sanitizeLinkUrl(url);
-        if (!safe) return hold(`<span class="blocked-link">リンクブロック: ${escapeHtml(label)}</span>`);
-        return hold(`<a href="${escapeAttribute(safe)}" data-markdown-href="${escapeAttribute(url)}" rel="noopener noreferrer" target="_blank">${escapeHtml(label)}</a>`);
-      });
+      const links = markdownLinks(text);
+      let lastLink = 0;
+      const linked = [];
+      for (const link of links) {
+        linked.push(text.slice(lastLink, link.start));
+        const url = parseMarkdownTarget(link.target);
+        if (link.kind === 'image') {
+          const safe = imageOutputUrl(sanitizeImageUrl(url));
+          linked.push(hold(safe
+            ? `<img alt="${escapeAttribute(link.label)}" src="${escapeAttribute(safe)}" data-markdown-src="${escapeAttribute(url)}">`
+            : renderBlockedImage(url, link.label || 'no alt')));
+        } else {
+          const safe = sanitizeLinkUrl(url);
+          linked.push(link.kind === 'escaped' && safe ? text.slice(link.start, link.end) : hold(safe
+            ? `<a href="${escapeAttribute(safe)}" data-markdown-href="${escapeAttribute(url)}" rel="noopener noreferrer" target="_blank">${escapeHtml(link.label)}</a>`
+            : `<span class="blocked-link">リンクブロック: ${escapeHtml(link.label)}</span>`));
+        }
+        lastLink = link.end;
+      }
+      linked.push(text.slice(lastLink));
+      text = linked.join('');
 
       text = splitMathSegments(text)
         .map((part) => part.type === 'math' ? hold(renderInlineMathHtml(part.value, part.source)) : part.value)
@@ -1008,23 +1026,58 @@
       });
     }
 
-    function hasBlockedMarkdownLink(raw) {
-      const text = String(raw || '');
-      const patterns = [
-        /\\\[([^\]\n]+)\\\]\((<[^>\n]+>|(?:[^()\s\n]+|\([^()\n]*\))+)\)/g,
-        /\[([^\]\n]+)\]\((<[^>\n]+>|(?:[^()\s\n]+|\([^()\n]*\))+)\)/g,
-      ];
-      for (let patternIndex = 0; patternIndex < patterns.length; patternIndex += 1) {
-        const pattern = patterns[patternIndex];
-        let match = pattern.exec(text);
-        while (match) {
-          const escaped = patternIndex === 0;
-          const previous = text[match.index - 1] || '';
-          if (previous !== '!' && (escaped || previous !== '\\') && !sanitizeLinkUrl(parseMarkdownTarget(match[2]))) return true;
-          match = pattern.exec(text);
+    function markdownLinks(text) {
+      const links = [];
+      let cursor = 0;
+      let work = text.length * 8 + 32;
+      function spend() { if (--work < 0) throw INLINE_RENDER_LIMIT; }
+      function targetEnd(start, angle) {
+        let depth = 0;
+        for (let at = start + (angle ? 1 : 0); at < text.length; at += 1) {
+          spend();
+          const char = text[at];
+          if (char === '\n') return -1;
+          if (angle) {
+            if (char === '>') return text[at + 1] === ')' && at > start + 1 ? at + 1 : -1;
+          } else if (char === '(') {
+            if (depth) return -1;
+            depth = 1;
+          } else if (char === ')') {
+            if (!depth) return at > start ? at : -1;
+            depth = 0;
+          } else if (!depth && /\s/.test(char)) return -1;
         }
+        return -1;
       }
-      return false;
+      while (cursor < text.length) {
+        const open = text.indexOf('[', cursor);
+        if (open < 0) break;
+        let close = open + 1;
+        while (close < text.length && text[close] !== ']' && text[close] !== '\n') { spend(); close += 1; }
+        cursor = close + 1;
+        if (text[close] !== ']' || text[close + 1] !== '(') continue;
+        const kind = text[open - 1] === '!' ? 'image' : text[open - 1] === '\\' ? 'escaped' : 'link';
+        if (kind === 'escaped' && text[close - 1] !== '\\') continue;
+        const label = text.slice(open + 1, close - (kind === 'escaped' ? 1 : 0));
+        if (!label && kind !== 'image') continue;
+        const start = close + 2;
+        let end = text[start] === '<' ? targetEnd(start, true) : -1;
+        if (end < 0) end = targetEnd(start, false);
+        if (end < 0) continue;
+        links.push({ kind, start: open - (kind === 'link' ? 0 : 1), end: end + 1, label, target: text.slice(start, end) });
+        if (links.length > MAX_INLINE_TOKENS) throw INLINE_RENDER_LIMIT;
+        cursor = end + 1;
+      }
+      return links;
+    }
+
+    function hasBlockedMarkdownLink(raw) {
+      try {
+        return markdownLinks(String(raw || '')).some((link) => link.kind !== 'image' && !sanitizeLinkUrl(parseMarkdownTarget(link.target)));
+      } catch (error) {
+        if (error === INLINE_RENDER_LIMIT) return true;
+        throw error;
+      }
     }
 
     function buildHeadingIndex(blocks) {
@@ -1044,7 +1097,7 @@
         items.push({ id, text, level, start: block.start, index: items.length });
         byOffset.set(block.start, id);
       }
-      return { items, byOffset };
+      return { items, byOffset, tocAllowed: allowsToc(items, blocks.filter((block) => block.type === 'toc').length) };
     }
 
     function buildHeadingTree(headings) {

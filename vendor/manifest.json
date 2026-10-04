@@ -866,8 +866,8 @@
     },
     {
       "path": "vendor/codemirror6/node_modules/@lezer/markdown/dist/index.cjs",
-      "bytes": 87440,
-      "sha256": "5ea49cedba825bb821031d406b08b7a8ed6d3e386601cbec23beb4ba7a6a9c43"
+      "bytes": 87508,
+      "sha256": "576d52ac69b4f48fc5afd2bf70f4c22f80c2f30e478b638c072412cdb107d505"
     },
     {
       "path": "vendor/codemirror6/node_modules/@lezer/markdown/dist/index.d.cts",
@@ -881,8 +881,8 @@
     },
     {
       "path": "vendor/codemirror6/node_modules/@lezer/markdown/dist/index.js",
-      "bytes": 86654,
-      "sha256": "f30f04bd0aee92c237ec6b41eaa18b05df3b1d7a4eb4e88cec994681e33f85f1"
+      "bytes": 86722,
+      "sha256": "3c9fb7f9ae36d13814417e96ae5d4ae36f1d921d7a2951fbd8af5296149ae1b4"
     },
     {
       "path": "vendor/codemirror6/node_modules/@lezer/markdown/package.json",
@@ -906,8 +906,8 @@
     },
     {
       "path": "vendor/codemirror6/node_modules/@lezer/markdown/src/markdown.ts",
-      "bytes": 74846,
-      "sha256": "cd21988b2bb5594d59e4e1678a0d6319dfa569262e7e831ed17e5011987bf0b5"
+      "bytes": 74907,
+      "sha256": "ea13ca03539feec3108e552f0d42126755fe979635ec95eb42b1679e4a92ef52"
     },
     {
       "path": "vendor/codemirror6/node_modules/@lezer/markdown/src/nest.ts",
@@ -1061,13 +1061,13 @@
     },
     {
       "path": "vendor/codemirror6/source-editor.js",
-      "bytes": 7252,
-      "sha256": "7181d09d037f02a9a6135eb8319b06a2be0a7e1853b03597d5ff41b98e93e718"
+      "bytes": 7462,
+      "sha256": "3ef547c167734f8b087aba771a48277d362e991162c95f32e041495c3de50a99"
     },
     {
       "path": "vendor/codemirror6/source-editor.bundle.js",
-      "bytes": 1426096,
-      "sha256": "42b337ccef98cff28202b0e57171ac5af96135d943e1b18eb32d552e741f6917"
+      "bytes": 1426374,
+      "sha256": "fb3ab732875ddbff4f54cf77ea50900e6f6fc7730a95aea1370a0cf92a8a587c"
     },
     {
       "path": "vendor/highlight/LICENSE",
@@ -1401,8 +1401,8 @@
     },
     {
       "path": "vendor/katex/katex.min.js",
-      "bytes": 272529,
-      "sha256": "e9822c57638322efdd9ede0164169216682eb5f5c90fb0d04d1d6014bab3a8ea"
+      "bytes": 272615,
+      "sha256": "90bd90f54f742a08ac4636725f77451363f9e47568f272fc4f5f57dac0a32a40"
     },
     {
       "path": "vendor/markdown-it/LICENSE",
@@ -1426,8 +1426,8 @@
     },
     {
       "path": "vendor/mermaid/mermaid.min.js",
-      "bytes": 3312967,
-      "sha256": "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de"
+      "bytes": 3316403,
+      "sha256": "f7ed63389934ed47237123c9a5293ecb3299f3746b3a1b9aebf7464f31e6bcb7"
     },
     {
       "path": "vendor/mermaid/package.json",
@@ -1436,8 +1436,8 @@
     },
     {
       "path": "vendor/prosemirror/editor-integration.js",
-      "bytes": 176363,
-      "sha256": "fb147884f41e1bd659f84a85d01c65c481191c9d9c3af77e48e2cfee86d670cf"
+      "bytes": 179698,
+      "sha256": "52f6ac22fcb67641112ee48840cb253486ed99a15306590884e581f47d5125de"
     },
     {
       "path": "vendor/prosemirror/licenses/orderedmap/LICENSE",
@@ -1621,8 +1621,8 @@
     },
     {
       "path": "vendor/prosemirror/prosemirror-editor.js",
-      "bytes": 836986,
-      "sha256": "bdaa08a78ce2fd2fbf27ec97e848ad7878936ef4e9c9b3d0c42c6322c7ca3fe6"
+      "bytes": 842021,
+      "sha256": "2d9aa0284b9a3f0016f70f0f759479acbe63a16947da4188a0f4ef217e948878"
     }
   ]
 }
